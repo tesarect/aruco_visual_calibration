@@ -1,0 +1,5 @@
+source ~/ros2_ws/install/setup.bash
+ros2 launch the_construct_office_gazebo starbots_ur3e.launch.xml
+
+source /home/simulations/ros2_sims_ws/install/setup.bash
+ros2 launch moveit_setup_assistant setup_assistant.launch.py
