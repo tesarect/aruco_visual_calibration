@@ -23,4 +23,4 @@ moveit_simple_controller_manager:
     action_ns: gripper_cmd
     default: true
     joints:
-      - robotiq_85_left_knuckle_joint
+      - rg2_gripper_finger_left_joint

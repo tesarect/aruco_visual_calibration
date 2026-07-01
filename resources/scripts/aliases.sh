@@ -29,6 +29,11 @@ startmoveitconfig() {
     ros2 launch moveit_setup_assistant setup_assistant.launch.py
 }
 
+startmoveitgroup() {
+    source ~/ros2_ws/install/setup.bash
+    ros2 launch aruco_moveit_config move_group.launch.py
+}
+
 vcbuild() {
     cd ~/ros2_ws || return
     colcon build --packages-up-to aruco_moveit_config
@@ -42,6 +47,16 @@ vcbuildsymlink() {
 }
 
 vccleanbuild() {
+    cd ~/ros2_ws || return
+
+    rm -rf build/aruco_moveit_config
+    rm -rf install/aruco_moveit_config
+
+    colcon build --packages-up-to aruco_moveit_config
+    source install/setup.bash
+}
+
+vccleanbuildsymlink() {
     cd ~/ros2_ws || return
 
     rm -rf build/aruco_moveit_config
