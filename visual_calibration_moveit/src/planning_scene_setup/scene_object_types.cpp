@@ -10,8 +10,10 @@ std::string toParamPrefix(SceneObjectId id)
   switch (id) {
     case SceneObjectId::CoffeeMachine:
       return "coffee_machine";
-    case SceneObjectId::ArmPlatform:
-      return "arm_platform";
+    case SceneObjectId::Cupholder:
+      return "cupholder";
+    case SceneObjectId::Countertop:
+      return "countertop";
   }
   throw std::invalid_argument("Unknown SceneObjectId");
 }
