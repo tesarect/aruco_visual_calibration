@@ -1,0 +1,9 @@
+planning_scene_setup:
+  ros__parameters:
+    planning_frame: "base_link"
+
+    coffee_machine.pose.x: 0.1
+    coffee_machine.pose.y: 0.86
+    coffee_machine.pose.z: -0.032
+    coffee_machine.pose.yaw: 1.57
+    coffee_machine.mesh_path: "package://the_construct_office_gazebo/models/coffee_machine/meshes/cafeteria.dae"

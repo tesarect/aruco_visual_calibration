@@ -1,0 +1,13 @@
+# PLACEHOLDER — not measured on the real robot yet.
+# The real lab layout (Barista body, table, wall-to-camera/arm distances) is
+# visually similar to the sim but NOT identical — do not copy sim values here.
+# Values below must be measured/verified against the real cell before use.
+planning_scene_setup:
+  ros__parameters:
+    planning_frame: "base_link"
+
+    coffee_machine.pose.x: 0.1
+    coffee_machine.pose.y: 0.86
+    coffee_machine.pose.z: -0.032
+    coffee_machine.pose.yaw: 1.57
+    coffee_machine.mesh_path: "package://the_construct_office_gazebo/models/coffee_machine/meshes/cafeteria.dae"

@@ -10,17 +10,37 @@ find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_msgs REQUIRED)
+find_package(geometric_shapes REQUIRED)
+find_package(shape_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
 
-add_executable(planning_scene_setup src/planning_scene_setup.cpp)
+add_executable(planning_scene_setup
+  src/planning_scene_setup/planning_scene_setup.cpp
+  src/planning_scene_setup/main.cpp
+)
+target_include_directories(planning_scene_setup PRIVATE
+  include
+)
 ament_target_dependencies(planning_scene_setup
   rclcpp
   moveit_ros_planning_interface
   moveit_msgs
+  geometric_shapes
+  shape_msgs
+  tf2
+  tf2_geometry_msgs
 )
 
 install(TARGETS
   planning_scene_setup
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY
+  launch
+  config
+  DESTINATION share/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
