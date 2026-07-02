@@ -12,12 +12,6 @@ def generate_launch_description():
         description="Which parameter file to load: 'sim' or 'real'",
     )
 
-    # LaunchConfiguration only resolves to a string at launch time, so the
-    # filename can't be built with plain Python str concatenation or
-    # os.path.join() here — PythonExpression evaluates the concatenation
-    # once "env" is known. PathJoinSubstitution can't do this part either:
-    # it always inserts '/' between elements, which would corrupt the
-    # filename instead of just gluing "scene_objects_" + env + ".yaml".
     params_filename = PythonExpression(
         ["'scene_objects_' + '", LaunchConfiguration("env"), "' + '.yaml'"]
     )

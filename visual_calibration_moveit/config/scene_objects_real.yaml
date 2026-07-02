@@ -11,3 +11,9 @@ planning_scene_setup:
     coffee_machine.pose.z: -0.032
     coffee_machine.pose.yaw: 1.57
     coffee_machine.mesh_path: "package://the_construct_office_gazebo/models/coffee_machine/meshes/cafeteria.dae"
+
+    arm_platform.pose.x: -0.26
+    arm_platform.pose.y: 0.04
+    arm_platform.pose.z: -0.632
+    arm_platform.pose.yaw: 1.57
+    arm_platform.mesh_path: "package://the_construct_office_gazebo/models/barista_model/meshes/TOP_colour_1.dae"

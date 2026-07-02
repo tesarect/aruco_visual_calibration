@@ -17,6 +17,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 
 add_executable(planning_scene_setup
   src/planning_scene_setup/planning_scene_setup.cpp
+  src/planning_scene_setup/scene_object_types.cpp
   src/planning_scene_setup/main.cpp
 )
 target_include_directories(planning_scene_setup PRIVATE

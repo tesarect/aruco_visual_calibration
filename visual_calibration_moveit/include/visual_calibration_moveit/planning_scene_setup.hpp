@@ -2,10 +2,13 @@
 #define VISUAL_CALIBRATION_MOVEIT__PLANNING_SCENE_SETUP_HPP_
 
 #include <string>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <moveit/planning_scene_interface/planning_scene_interface.h>
 #include <moveit_msgs/msg/collision_object.hpp>
+
+#include "visual_calibration_moveit/scene_object_types.hpp"
 
 namespace visual_calibration_moveit
 {
@@ -19,11 +22,11 @@ public:
 
 private:
   void declareParameters();
-  void addCoffeeMachine();
+  std::vector<SceneObjectConfig> loadSceneObjects();
+  moveit_msgs::msg::CollisionObject toCollisionObject(const SceneObjectConfig & config);
+  void addAllObjects();
 
-  moveit_msgs::msg::CollisionObject makeMeshCollisionObject(
-    const std::string & object_id,
-    const std::string & param_prefix);
+  static const std::vector<SceneObjectId> kKnownObjectIds;
 
   std::string planning_frame_;
   moveit::planning_interface::PlanningSceneInterface planning_scene_interface_;

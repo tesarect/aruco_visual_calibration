@@ -6,3 +6,5 @@ ros2 launch moveit_setup_assistant setup_assistant.launch.py
 
 cd ~/ros2_ws/src/visual_calibration
 ros2 pkg create --build-type ament_cmake visual_calibration_moveit --dependencies rclcpp moveit_ros_planning_interface moveit_msgs
+
+dfsdf
