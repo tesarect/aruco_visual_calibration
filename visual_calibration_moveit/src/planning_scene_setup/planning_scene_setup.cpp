@@ -37,6 +37,7 @@ const std::vector<SceneObjectId> PlanningSceneSetup::kKnownObjectIds = {
   SceneObjectId::CoffeeMachine,
   SceneObjectId::Cupholder,
   SceneObjectId::Countertop,
+  SceneObjectId::Wall,
 };
 
 PlanningSceneSetup::PlanningSceneSetup()
@@ -79,11 +80,25 @@ void PlanningSceneSetup::declareParameters()
   declare_parameter("countertop.pose.z", -0.532);
   declare_parameter("countertop.pose.yaw", 0.0);
 
+  declare_parameter(
+    "countertop.box_names", std::vector<std::string>{"body", "top"});
   declare_parameter("countertop.boxes.body.size", std::vector<double>{0.5, 1.8, 1.0});
   declare_parameter("countertop.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 
   declare_parameter("countertop.boxes.top.size", std::vector<double>{0.85, 1.81, 0.05});
   declare_parameter("countertop.boxes.top.local_pose", std::vector<double>{0.0, 0.0, 0.5, 0.0});
+
+  // Wall is a single box primitive — see
+  // the_construct_office_gazebo/models/wall/model.sdf
+  declare_parameter("wall.shape_type", "box");
+  declare_parameter("wall.pose.x", 0.3);
+  declare_parameter("wall.pose.y", -0.56);
+  declare_parameter("wall.pose.z", -0.032);
+  declare_parameter("wall.pose.yaw", 0.0);
+
+  declare_parameter("wall.box_names", std::vector<std::string>{"body"});
+  declare_parameter("wall.boxes.body.size", std::vector<double>{2.0, 0.03, 2.0});
+  declare_parameter("wall.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 }
 
 std::vector<SceneObjectConfig> PlanningSceneSetup::loadSceneObjects()
@@ -106,7 +121,8 @@ std::vector<SceneObjectConfig> PlanningSceneSetup::loadSceneObjects()
     if (shape_type == "box") {
       config.shape_type = ShapeType::Box;
 
-      for (const char * box_name : {"body", "top"}) {
+      const auto box_names = get_parameter(prefix + ".box_names").as_string_array();
+      for (const std::string & box_name : box_names) {
         const auto size = get_parameter(
           prefix + ".boxes." + box_name + ".size").as_double_array();
         const auto local_pose = get_parameter(

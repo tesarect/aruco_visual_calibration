@@ -24,8 +24,20 @@ planning_scene_setup:
     countertop.pose.z: -0.532
     countertop.pose.yaw: 0.0
 
+    countertop.box_names: ["body", "top"]
     countertop.boxes.body.size: [0.5, 1.8, 1.0]
     countertop.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
 
     countertop.boxes.top.size: [0.85, 1.81, 0.05]
     countertop.boxes.top.local_pose: [0.0, 0.0, 0.5, 0.0]
+
+    # Wall — single box primitive, see the_construct_office_gazebo/models/wall/model.sdf
+    wall.shape_type: "box"
+    wall.pose.x: 0.3
+    wall.pose.y: -0.56
+    wall.pose.z: -0.032
+    wall.pose.yaw: 0.0
+
+    wall.box_names: ["body"]
+    wall.boxes.body.size: [2.0, 0.03, 2.0]
+    wall.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]

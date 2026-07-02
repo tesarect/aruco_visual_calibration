@@ -14,6 +14,8 @@ std::string toParamPrefix(SceneObjectId id)
       return "cupholder";
     case SceneObjectId::Countertop:
       return "countertop";
+    case SceneObjectId::Wall:
+      return "wall";
   }
   throw std::invalid_argument("Unknown SceneObjectId");
 }
