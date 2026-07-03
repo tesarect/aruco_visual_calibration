@@ -33,10 +33,52 @@ ament_target_dependencies(planning_scene_setup
   tf2_geometry_msgs
 )
 
+add_executable(simple_trajectory
+  src/simple_trajectory/simple_trajectory.cpp
+  src/simple_trajectory/main.cpp
+)
+target_include_directories(simple_trajectory PRIVATE
+  include
+)
+ament_target_dependencies(simple_trajectory
+  rclcpp
+  moveit_ros_planning_interface
+)
+
+# MoveIt Task Constructor is a separate apt package (ros-humble-moveit-task-constructor-*)
+# that may not be installed everywhere this workspace builds. Gate the MTC
+# executable on it being found instead of hard-failing the whole package.
+find_package(moveit_task_constructor_core QUIET)
+if(moveit_task_constructor_core_FOUND)
+  add_executable(mtc_trajectory
+    src/mtc_trajectory/mtc_trajectory.cpp
+    src/mtc_trajectory/main.cpp
+  )
+  target_include_directories(mtc_trajectory PRIVATE
+    include
+  )
+  ament_target_dependencies(mtc_trajectory
+    rclcpp
+    moveit_task_constructor_core
+  )
+else()
+  message(WARNING
+    "moveit_task_constructor_core not found — skipping mtc_trajectory executable. "
+    "Install ros-humble-moveit-task-constructor-* to build it.")
+endif()
+
 install(TARGETS
   planning_scene_setup
+  simple_trajectory
   DESTINATION lib/${PROJECT_NAME}
 )
+
+if(moveit_task_constructor_core_FOUND)
+  install(TARGETS
+    mtc_trajectory
+    DESTINATION lib/${PROJECT_NAME}
+  )
+endif()
 
 install(DIRECTORY
   launch
