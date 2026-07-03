@@ -3,3 +3,14 @@ ros2 launch the_construct_office_gazebo starbots_ur3e.launch.xml
 
 source /home/simulations/ros2_sims_ws/install/setup.bash
 ros2 launch moveit_setup_assistant setup_assistant.launch.py
+
+cd ~/ros2_ws/src/visual_calibration
+ros2 pkg create --build-type ament_cmake visual_calibration_moveit --dependencies rclcpp moveit_ros_planning_interface moveit_msgs
+
+1. Further verification tests for planning scene objects presence and collision.
+Beyond "it renders in RViz," here's what actually proves the collision object is correct, not just present:
+
+Collision-aware planning check: in RViz's MotionPlanning panel, drag the interactive marker to a goal pose that would require the arm/gripper to pass through the coffee machine's location, then hit "Plan." MoveIt should either refuse (invalid goal state) or produce a path that visibly detours around the mesh, not through it. If it plans straight through, the collision object isn't actually being considered (could be added to the wrong scene topic, wrong frame, or planning group's collision matrix excludes it).
+Pose sanity check via TF: run ros2 run tf2_ros tf2_echo base_link wrist_rgbd_camera_link (or any known frame) alongside visually comparing the RViz mesh position against where the coffee machine actually sits in the Gazebo view — confirms the 0.1, 0.86, -0.032, yaw 1.57 numbers we hand-computed are actually right, not just "present somewhere."
+ros2 service call /get_planning_scene (or ros2 topic echo /monitored_planning_scene --once) — confirms the object's id, frame_id, and pose are exactly what we intended, straight from MoveIt's own scene state, independent of RViz rendering.
+Re-launch idempotency: stop and restart planning_scene_setup — confirm it doesn't throw or duplicate the object (worth knowing now, since the trajectory node will likely run alongside repeated scene-setup runs during development).

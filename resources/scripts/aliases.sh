@@ -39,35 +39,41 @@ startrviz() {
     ros2 launch aruco_moveit_config moveit_rviz.launch.py
 }
 
+startplanningscene() {
+    local env="${1:-sim}"
+    source ~/ros2_ws/install/setup.bash
+    ros2 launch visual_calibration_moveit planning_scene_setup.launch.py env:="$env"
+}
+
 vcbuild() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit
     source install/setup.bash
 }
 
 vcbuildsymlink() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config --symlink-install
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit --symlink-install
     source install/setup.bash
 }
 
 vccleanbuild() {
     cd ~/ros2_ws || return
 
-    rm -rf build/aruco_moveit_config
-    rm -rf install/aruco_moveit_config
+    rm -rf build/aruco_moveit_config build/visual_calibration_moveit
+    rm -rf install/aruco_moveit_config install/visual_calibration_moveit
 
-    colcon build --packages-up-to aruco_moveit_config
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit
     source install/setup.bash
 }
 
 vccleanbuildsymlink() {
     cd ~/ros2_ws || return
 
-    rm -rf build/aruco_moveit_config
-    rm -rf install/aruco_moveit_config
+    rm -rf build/aruco_moveit_config build/visual_calibration_moveit
+    rm -rf install/aruco_moveit_config install/visual_calibration_moveit
 
-    colcon build --packages-up-to aruco_moveit_config --symlink-install
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit --symlink-install
     source install/setup.bash
 }
 

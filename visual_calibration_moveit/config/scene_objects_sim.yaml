@@ -1,0 +1,43 @@
+planning_scene_setup:
+  ros__parameters:
+    planning_frame: "base_link"
+
+    coffee_machine.shape_type: "mesh"
+    coffee_machine.pose.x: 0.1
+    coffee_machine.pose.y: 0.86
+    coffee_machine.pose.z: -0.032
+    coffee_machine.pose.yaw: 1.57
+    coffee_machine.mesh_path: "package://the_construct_office_gazebo/models/coffee_machine/meshes/cafeteria.dae"
+
+    cupholder.shape_type: "mesh"
+    cupholder.pose.x: -0.26
+    cupholder.pose.y: 0.04
+    cupholder.pose.z: -0.632
+    cupholder.pose.yaw: 1.57
+    cupholder.mesh_path: "package://the_construct_office_gazebo/models/barista_model/meshes/TOP_colour_1.dae"
+
+    # Countertop = starbots_bartender_dispenser, modeled in Gazebo as two
+    # stacked box primitives (body + thin top slab), not a mesh.
+    countertop.shape_type: "box"
+    countertop.pose.x: 0.3
+    countertop.pose.y: 0.36
+    countertop.pose.z: -0.532
+    countertop.pose.yaw: 0.0
+
+    countertop.box_names: ["body", "top"]
+    countertop.boxes.body.size: [0.5, 1.8, 1.0]
+    countertop.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
+
+    countertop.boxes.top.size: [0.85, 1.81, 0.05]
+    countertop.boxes.top.local_pose: [0.0, 0.0, 0.5, 0.0]
+
+    # Wall — single box primitive, see the_construct_office_gazebo/models/wall/model.sdf
+    wall.shape_type: "box"
+    wall.pose.x: 0.3
+    wall.pose.y: -0.56
+    wall.pose.z: -0.032
+    wall.pose.yaw: 0.0
+
+    wall.box_names: ["body"]
+    wall.boxes.body.size: [2.0, 0.03, 2.0]
+    wall.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
