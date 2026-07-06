@@ -13,7 +13,9 @@ find_package(moveit_msgs REQUIRED)
 find_package(geometric_shapes REQUIRED)
 find_package(shape_msgs REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 add_executable(planning_scene_setup
   src/planning_scene_setup/planning_scene_setup.cpp
@@ -43,29 +45,30 @@ target_include_directories(simple_trajectory PRIVATE
 ament_target_dependencies(simple_trajectory
   rclcpp
   moveit_ros_planning_interface
+  tf2_ros
+  tf2_geometry_msgs
+  geometry_msgs
 )
 
-# MoveIt Task Constructor is a separate apt package (ros-humble-moveit-task-constructor-*)
-# that may not be installed everywhere this workspace builds. Gate the MTC
-# executable on it being found instead of hard-failing the whole package.
-find_package(moveit_task_constructor_core QUIET)
-if(moveit_task_constructor_core_FOUND)
-  add_executable(mtc_trajectory
-    src/mtc_trajectory/mtc_trajectory.cpp
-    src/mtc_trajectory/main.cpp
-  )
-  target_include_directories(mtc_trajectory PRIVATE
-    include
-  )
-  ament_target_dependencies(mtc_trajectory
-    rclcpp
-    moveit_task_constructor_core
-  )
-else()
-  message(WARNING
-    "moveit_task_constructor_core not found — skipping mtc_trajectory executable. "
-    "Install ros-humble-moveit-task-constructor-* to build it.")
-endif()
+# MoveIt Task Constructor: deactivated, not just unbuildable-and-skipped.
+# Unresolved upstream packaging bug (py_binding_tools vs. py_bindings_tools,
+# see moveit/moveit_task_constructor#629) — see README.md. Files are left in
+# place; uncomment this block (and the matching depend in package.xml) to
+# reactivate once that's fixed upstream.
+# find_package(moveit_task_constructor_core QUIET)
+# if(moveit_task_constructor_core_FOUND)
+#   add_executable(mtc_trajectory
+#     src/mtc_trajectory/mtc_trajectory.cpp
+#     src/mtc_trajectory/main.cpp
+#   )
+#   target_include_directories(mtc_trajectory PRIVATE
+#     include
+#   )
+#   ament_target_dependencies(mtc_trajectory
+#     rclcpp
+#     moveit_task_constructor_core
+#   )
+# endif()
 
 install(TARGETS
   planning_scene_setup
@@ -73,12 +76,12 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-if(moveit_task_constructor_core_FOUND)
-  install(TARGETS
-    mtc_trajectory
-    DESTINATION lib/${PROJECT_NAME}
-  )
-endif()
+# if(moveit_task_constructor_core_FOUND)
+#   install(TARGETS
+#     mtc_trajectory
+#     DESTINATION lib/${PROJECT_NAME}
+#   )
+# endif()
 
 install(DIRECTORY
   launch
