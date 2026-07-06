@@ -9,8 +9,11 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(OpenCV REQUIRED COMPONENTS aruco calib3d)
 
 add_executable(image_subscriber_node
   src/image_subscriber/image_subscriber_node.cpp
@@ -26,8 +29,26 @@ ament_target_dependencies(image_subscriber_node
   image_transport
 )
 
+add_executable(aruco_detector_node
+  src/aruco_detector/aruco_detector_node.cpp
+  src/aruco_detector/main.cpp
+)
+target_include_directories(aruco_detector_node PRIVATE
+  include
+)
+ament_target_dependencies(aruco_detector_node
+  rclcpp
+  sensor_msgs
+  geometry_msgs
+  cv_bridge
+  image_transport
+  tf2
+)
+target_link_libraries(aruco_detector_node ${OpenCV_LIBS})
+
 install(TARGETS
   image_subscriber_node
+  aruco_detector_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

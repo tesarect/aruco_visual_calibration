@@ -1,0 +1,19 @@
+# Simulation topics (see CLAUDE.md's Key Topics section) and detection
+# tuning. Sim lighting is controlled/consistent, so the adaptive-threshold
+# defaults below are OpenCV's own defaults — expect to retune these for the
+# real robot's inconsistent lighting (see aruco_detector_real.yaml, once
+# real-robot testing begins).
+aruco_detector_node:
+  ros__parameters:
+    image_topic: "/wrist_rgbd_depth_sensor/image_raw"
+    camera_info_topic: "/wrist_rgbd_depth_sensor/camera_info"
+    pose_topic: "/aruco_perception/marker_pose"
+    dictionary_name: "DICT_4X4_50"
+    marker_id: 0
+    marker_length_m: 0.045
+    adaptive_thresh_win_size_min: 3
+    adaptive_thresh_win_size_max: 23
+    adaptive_thresh_win_size_step: 10
+    adaptive_thresh_constant: 7.0
+    min_marker_perimeter_rate: 0.03
+    corner_refinement_method: 1
