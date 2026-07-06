@@ -45,6 +45,12 @@ startplanningscene() {
     ros2 launch visual_calibration_moveit planning_scene_setup.launch.py env:="$env"
 }
 
+startsimpletrajectory() {
+    local env="${1:-sim}"
+    source ~/ros2_ws/install/setup.bash
+    ros2 launch visual_calibration_moveit simple_trajectory.launch.py env:="$env"
+}
+
 vcbuild() {
     cd ~/ros2_ws || return
     colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit

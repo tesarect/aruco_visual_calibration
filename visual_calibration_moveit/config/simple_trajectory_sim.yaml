@@ -1,0 +1,21 @@
+# standoff_m is a starting point, not a precise derivation — the camera
+# (wrist_rgbd_camera_link) sits ~0.43m from base_link already, close to the
+# UR3e's ~0.5m datasheet max_reach_m, so straight-line distance alone
+# doesn't guarantee reachability (that also depends on orientation and
+# joint limits). Tune standoff_m against what actually plans in this scene.
+# Working value found empirically: 0.25 (see error-mitigation.md #11).
+#
+# facing_rpy_rad (roll, pitch, yaw, radians — same convention as
+# scene_objects_sim.yaml's pose.yaw) is applied in the camera frame's own
+# local axes to compute the goal orientation for end_effector_frame. The
+# value below (pi, 0, pi/2) is equivalent to the quaternion
+# (0.7071, 0.7071, 0, 0): it swaps the goal's X/Y axes with the camera's
+# and flips Z, so end_effector_frame's Z ends up facing back toward the
+# camera's Z — verified numerically (see error-mitigation.md #13).
+simple_trajectory:
+  ros__parameters:
+    camera_frame: "wrist_rgbd_camera_depth_optical_frame"
+    end_effector_frame: "rg2_gripper_aruco_link"
+    standoff_m: 0.25
+    max_reach_m: 0.5
+    facing_rpy_rad: [3.14159265, 0.0, 1.57079633]

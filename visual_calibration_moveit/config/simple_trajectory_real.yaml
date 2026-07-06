@@ -1,0 +1,18 @@
+# PLACEHOLDER — not measured/tuned on the real robot yet.
+# camera_frame will need to change once the real camera's TF is published
+# (there is no wrist_rgbd_camera_depth_optical_frame on the real robot —
+# the real camera isn't arm-mounted, and its frame comes from the
+# calibration pipeline itself, not a static URDF TF). standoff_m,
+# max_reach_m, and facing_rpy_rad must be re-tuned/re-verified against the
+# real cell before use — the real camera's mounting orientation may not
+# match sim's, so facing_rpy_rad (the rule for how end_effector_frame
+# should face camera_frame) may need a different rotation. Re-derive and
+# verify visually (e.g. via tf_debug_markers.py) rather than assuming the
+# sim value carries over.
+simple_trajectory:
+  ros__parameters:
+    camera_frame: "camera_depth_optical_frame"
+    end_effector_frame: "rg2_gripper_aruco_link"
+    standoff_m: 0.25
+    max_reach_m: 0.5
+    facing_rpy_rad: [3.14159265, 0.0, 1.57079633]

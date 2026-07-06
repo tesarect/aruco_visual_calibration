@@ -14,3 +14,98 @@ Collision-aware planning check: in RViz's MotionPlanning panel, drag the interac
 Pose sanity check via TF: run ros2 run tf2_ros tf2_echo base_link wrist_rgbd_camera_link (or any known frame) alongside visually comparing the RViz mesh position against where the coffee machine actually sits in the Gazebo view — confirms the 0.1, 0.86, -0.032, yaw 1.57 numbers we hand-computed are actually right, not just "present somewhere."
 ros2 service call /get_planning_scene (or ros2 topic echo /monitored_planning_scene --once) — confirms the object's id, frame_id, and pose are exactly what we intended, straight from MoveIt's own scene state, independent of RViz rendering.
 Re-launch idempotency: stop and restart planning_scene_setup — confirm it doesn't throw or duplicate the object (worth knowing now, since the trajectory node will likely run alongside repeated scene-setup runs during development).
+
+What we have now
+Our (planned) trajectory node will most likely use the standard moveit_ros_planning_interface::MoveGroupInterface — you set a target pose or joint state, call plan(), then execute(). One-shot: compute a full trajectory from A to B, then run it. This is what move_group.launch.py already exposes, and it's what MoveIt's RViz plugin uses under the hood when you drag the marker and hit Plan.
+
+MoveIt Task Constructor (MTC)
+MTC is for chaining multiple planning stages into one task, where each stage can have a different planner or purpose, and MTC handles passing state between them. Example: "move to pre-grasp pose" → "open gripper" → "approach along a straight line" → "close gripper" → "retreat." Each stage is its own C++ object; MTC solves them in sequence (sometimes exploring multiple candidate solutions per stage) and stitches the result into one trajectory.
+
+How different from now: substantial. It's a separate package (moveit_task_constructor_core), a different API entirely (you build a Task object out of Stage subclasses, not just call plan()/execute()), and it's designed for pick-and-place-style multi-step manipulation. For this project — where the actual need is "move the arm so the ArUco marker is visible to the camera" — there's no multi-stage manipulation sequence (no grasping, no approach/retreat choreography). MTC would be real, unused complexity here.
+
+MoveIt2 Hybrid Planning
+Hybrid Planning runs two planners at once: a slower global planner computing a full trajectory in the background, plus a fast local planner that reacts to changes (obstacles moving, replanning needed) in real time, blending the two. It's built for dynamic environments — e.g. a robot arm working near a human or a moving object — where a fully pre-planned trajectory might become invalid mid-execution.
+
+How different from now: also substantial — it's a different move_group-replacement stack (moveit_hybrid_planning package, separate global/local planner components, its own launch architecture). Our environment is static (fixed coffee machine, wall, countertop — nothing moves during a trajectory), so the "react to a changing scene mid-motion" capability Hybrid Planning exists for doesn't apply here.
+
+Bottom line
+Both are real, substantial rewrites of the trajectory node's architecture — not incremental additions. Given this project's actual requirement (reliably move the end-effector so the camera sees the marker, in a static scene, no multi-stage manipulation choreography), the plain MoveGroupInterface approach we're already positioned for is the right-sized tool. I'd treat MTC and Hybrid Planning as "nice to mention as future work" in your Task 5 documentation/presentation, not something to actually implement.
+
+
+On Linux, note that **creation time ("birth time") is not available on all filesystems**. Ubuntu 22.04 on `ext4` may support it if the filesystem and kernel expose it, but many systems only reliably provide modification time.
+
+Here are the most useful commands:
+
+### List directories with modification date (works everywhere)
+
+```bash
+find . -maxdepth 1 -type d -printf '%TY-%Tm-%Td %TH:%TM  %f\n' | sort
+```
+
+Example:
+
+```text
+2026-06-25 10:42  logs
+2026-06-28 14:18  src
+2026-07-03 09:55  build
+```
+
+---
+
+### Using `ls`
+
+```bash
+ls -ld --time-style=long-iso */
+```
+
+Example:
+
+```text
+drwxr-xr-x 5 user user 2026-07-03 09:55 build/
+drwxr-xr-x 8 user user 2026-07-01 17:10 src/
+```
+
+---
+
+### If your filesystem supports creation (birth) time
+
+```bash
+stat */
+```
+
+Look for a line like:
+
+```text
+Birth: 2026-07-03 09:55:21.123456789 +0530
+```
+
+Or in a compact format:
+
+```bash
+for d in */; do
+    stat -c '%w %n' "$d"
+done
+```
+
+Output:
+
+```text
+2026-07-03 09:55:21.123456789 +0530 build/
+2026-07-01 17:10:02.987654321 +0530 src/
+```
+
+If you see:
+
+```text
+-
+```
+
+instead of a timestamp, your filesystem does not expose directory creation times.
+
+### Sort by newest directory
+
+```bash
+find . -maxdepth 1 -type d -printf '%TY-%Tm-%Td %TH:%TM  %f\n' | sort -r
+```
+
+This lists directories from newest to oldest based on modification time.
