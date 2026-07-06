@@ -1,0 +1,5 @@
+# Simulation wrist-mounted RGBD sensor topics (see CLAUDE.md's Key Topics section).
+image_subscriber_node:
+  ros__parameters:
+    image_topic: "/wrist_rgbd_depth_sensor/image_raw"
+    camera_info_topic: "/wrist_rgbd_depth_sensor/camera_info"

@@ -51,35 +51,57 @@ startsimpletrajectory() {
     ros2 launch visual_calibration_moveit simple_trajectory.launch.py env:="$env"
 }
 
+vcpkgbuild() {
+    local pkg="${1}"
+    cd ~/ros2_ws || return
+    colcon build --packages-up-to "$pkg"
+    source install/setup.bash
+}
+
+vcpkgbuildsymlink() {
+    local pkg="${1}"
+    cd ~/ros2_ws || return
+    colcon build --packages-up-to "$pkg" --symlink-install
+    source install/setup.bash
+}
+
 vcbuild() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit aruco_perception
     source install/setup.bash
 }
 
 vcbuildsymlink() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit --symlink-install
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit aruco_perception --symlink-install
     source install/setup.bash
 }
 
 vccleanbuild() {
     cd ~/ros2_ws || return
 
-    rm -rf build/aruco_moveit_config build/visual_calibration_moveit
-    rm -rf install/aruco_moveit_config install/visual_calibration_moveit
+    rm -rf build/aruco_moveit_config \
+        build/visual_calibration_moveit \
+        build/aruco_perception
+    rm -rf install/aruco_moveit_config \
+        install/visual_calibration_moveit \
+        install/aruco_perception
 
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit aruco_perception
     source install/setup.bash
 }
 
 vccleanbuildsymlink() {
     cd ~/ros2_ws || return
 
-    rm -rf build/aruco_moveit_config build/visual_calibration_moveit
-    rm -rf install/aruco_moveit_config install/visual_calibration_moveit
+    rm -rf build/aruco_moveit_config \
+        build/visual_calibration_moveit \
+        build/aruco_perception
+    rm -rf install/aruco_moveit_config \
+        install/visual_calibration_moveit \
+        install/aruco_perception
 
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit --symlink-install
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_moveit aruco_perception --symlink-install
     source install/setup.bash
 }
 
