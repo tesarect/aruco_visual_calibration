@@ -35,14 +35,14 @@ ament_target_dependencies(planning_scene_setup
   tf2_geometry_msgs
 )
 
-add_executable(simple_trajectory
-  src/simple_trajectory/simple_trajectory.cpp
-  src/simple_trajectory/main.cpp
+add_executable(trajectory_planner
+  src/trajectory_planner/trajectory_planner.cpp
+  src/trajectory_planner/main.cpp
 )
-target_include_directories(simple_trajectory PRIVATE
+target_include_directories(trajectory_planner PRIVATE
   include
 )
-ament_target_dependencies(simple_trajectory
+ament_target_dependencies(trajectory_planner
   rclcpp
   moveit_ros_planning_interface
   tf2_ros
@@ -72,7 +72,7 @@ ament_target_dependencies(simple_trajectory
 
 install(TARGETS
   planning_scene_setup
-  simple_trajectory
+  trajectory_planner
   DESTINATION lib/${PROJECT_NAME}
 )
 

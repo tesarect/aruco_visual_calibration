@@ -1,4 +1,4 @@
-#include "visual_calibration_moveit/simple_trajectory.hpp"
+#include "visual_calibration_moveit/trajectory_planner.hpp"
 
 #include <cmath>
 #include <vector>
@@ -25,7 +25,7 @@ geometry_msgs::msg::Pose offsetInFrontOf(
   // camera's orientation. facing_rpy_rad encodes a facing preference (a
   // design choice — how the goal's axes should relate to the camera's
   // axes), not a value measured from any TF, so it's a parameter rather
-  // than something computed here — see simple_trajectory_sim.yaml.
+  // than something computed here — see trajectory_planner_sim.yaml.
   tf2::Quaternion facing_quat;
   facing_quat.setRPY(facing_rpy_rad[0], facing_rpy_rad[1], facing_rpy_rad[2]);
   tf2::Transform offset(facing_quat, tf2::Vector3(0.0, 0.0, standoff_m));
@@ -39,7 +39,7 @@ geometry_msgs::msg::Pose offsetInFrontOf(
   return goal_pose;
 }
 
-SimpleTrajectory::SimpleTrajectory(
+TrajectoryPlanner::TrajectoryPlanner(
   const rclcpp::Node::SharedPtr & node,
   const std::string & planning_group)
 : node_(node),
@@ -49,11 +49,11 @@ SimpleTrajectory::SimpleTrajectory(
   standoff_config_(loadStandoffConfigFromParams())
 {
   RCLCPP_INFO(
-    node_->get_logger(), "simple_trajectory ready (planning group: '%s')",
+    node_->get_logger(), "trajectory_planner ready (planning group: '%s')",
     planning_group.c_str());
 }
 
-bool SimpleTrajectory::planAndExecute(const geometry_msgs::msg::Pose & target_pose)
+bool TrajectoryPlanner::planAndExecute(const geometry_msgs::msg::Pose & target_pose)
 {
   move_group_interface_.setPoseTarget(target_pose);
 
@@ -77,7 +77,7 @@ bool SimpleTrajectory::planAndExecute(const geometry_msgs::msg::Pose & target_po
   return true;
 }
 
-bool SimpleTrajectory::planAndExecuteInFrontOf(
+bool TrajectoryPlanner::planAndExecuteInFrontOf(
   const StandoffConfig & config,
   rclcpp::Duration tf_timeout)
 {
@@ -117,12 +117,12 @@ bool SimpleTrajectory::planAndExecuteInFrontOf(
   return planAndExecute(goal_pose);
 }
 
-bool SimpleTrajectory::planAndExecuteInFrontOf(rclcpp::Duration tf_timeout)
+bool TrajectoryPlanner::planAndExecuteInFrontOf(rclcpp::Duration tf_timeout)
 {
   return planAndExecuteInFrontOf(standoff_config_, tf_timeout);
 }
 
-StandoffConfig SimpleTrajectory::loadStandoffConfigFromParams() const
+StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const
 {
   StandoffConfig config;
   config.camera_frame = node_->get_parameter("camera_frame").as_string();

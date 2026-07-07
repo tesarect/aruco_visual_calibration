@@ -12,7 +12,7 @@
 # (0.7071, 0.7071, 0, 0): it swaps the goal's X/Y axes with the camera's
 # and flips Z, so end_effector_frame's Z ends up facing back toward the
 # camera's Z — verified numerically (see error-mitigation.md #13).
-simple_trajectory:
+trajectory_planner:
   ros__parameters:
     camera_frame: "wrist_rgbd_camera_depth_optical_frame"
     end_effector_frame: "rg2_gripper_aruco_link"

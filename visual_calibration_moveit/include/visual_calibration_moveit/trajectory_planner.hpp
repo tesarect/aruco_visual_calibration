@@ -1,5 +1,5 @@
-#ifndef VISUAL_CALIBRATION_MOVEIT__SIMPLE_TRAJECTORY_HPP_
-#define VISUAL_CALIBRATION_MOVEIT__SIMPLE_TRAJECTORY_HPP_
+#ifndef VISUAL_CALIBRATION_MOVEIT__TRAJECTORY_PLANNER_HPP_
+#define VISUAL_CALIBRATION_MOVEIT__TRAJECTORY_PLANNER_HPP_
 
 #include <array>
 #include <string>
@@ -22,7 +22,7 @@ namespace visual_calibration_moveit
 /// goal's Z ends up facing back toward the camera. This rotation encodes a
 /// facing preference (a design choice, not something measurable from any
 /// TF), so it is a parameter here rather than a value computed from TF —
-/// see simple_trajectory_sim.yaml/_real.yaml.
+/// see trajectory_planner_sim.yaml/_real.yaml.
 /// camera_tf must already be expressed in the frame the caller wants the
 /// resulting Pose in (e.g. the planning frame) — this function does no
 /// further frame conversion. This is the pose for whatever frame should
@@ -57,18 +57,17 @@ struct StandoffConfig
   std::array<double, 3> facing_rpy_rad = {0.0, 0.0, 0.0};
 };
 
-/// One-shot trajectory generation via MoveGroupInterface: set a target
-/// pose (e.g. derived from the camera->base_link TF chain), plan, execute.
-/// No staged approach/retreat/gripper choreography — see MtcTrajectory
-/// for that.
+/// Trajectory generation via MoveGroupInterface: set a target pose (e.g.
+/// derived from the camera->base_link TF chain), plan, execute. No staged
+/// approach/retreat/gripper choreography — see MtcTrajectory for that.
 ///
 /// Holds (rather than inherits) the rclcpp::Node, matching
 /// MoveGroupInterface's own (node, group_name) constructor and avoiding
 /// shared_from_this() pitfalls.
-class SimpleTrajectory
+class TrajectoryPlanner
 {
 public:
-  explicit SimpleTrajectory(
+  explicit TrajectoryPlanner(
     const rclcpp::Node::SharedPtr & node,
     const std::string & planning_group = "ur_manipulator");
 
@@ -113,4 +112,4 @@ private:
 
 }  // namespace visual_calibration_moveit
 
-#endif  // VISUAL_CALIBRATION_MOVEIT__SIMPLE_TRAJECTORY_HPP_
+#endif  // VISUAL_CALIBRATION_MOVEIT__TRAJECTORY_PLANNER_HPP_

@@ -13,7 +13,7 @@ def generate_launch_description():
     )
 
     params_filename = PythonExpression(
-        ["'simple_trajectory_' + '", LaunchConfiguration("env"), "' + '.yaml'"]
+        ["'trajectory_planner_' + '", LaunchConfiguration("env"), "' + '.yaml'"]
     )
 
     params_file = PathJoinSubstitution([
@@ -22,14 +22,14 @@ def generate_launch_description():
         params_filename,
     ])
 
-    simple_trajectory_node = Node(
+    trajectory_planner_node = Node(
         package="visual_calibration_moveit",
-        executable="simple_trajectory",
+        executable="trajectory_planner",
         output="screen",
         parameters=[params_file],
     )
 
     return LaunchDescription([
         env_arg,
-        simple_trajectory_node,
+        trajectory_planner_node,
     ])

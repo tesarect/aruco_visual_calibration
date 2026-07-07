@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Publishes RViz axis markers at key TF frames plus the computed
 offsetInFrontOf() target pose, so the standoff/orientation math used by
-simple_trajectory can be checked visually before running plan+execute.
+trajectory_planner can be checked visually before running plan+execute.
 
 Run standalone alongside the sim:
     python3 tf_debug_markers.py
@@ -33,7 +33,7 @@ WATCH_FRAMES = [
     "rg2_gripper_right_thumb",
 ]
 
-# Kept in sync with simple_trajectory_sim.yaml's standoff_m/facing_rpy_rad.
+# Kept in sync with trajectory_planner_sim.yaml's standoff_m/facing_rpy_rad.
 STANDOFF_M = 0.25
 FACING_RPY_RAD = (3.14159265, 0.0, 1.57079633)
 AXIS_LENGTH = 0.3
@@ -85,10 +85,10 @@ def quat_rotate(q, v):
 
 
 def offset_in_front_of(camera_tf: TransformStamped, standoff_m: float, facing_rpy_rad) -> Pose:
-    """Mirrors simple_trajectory.cpp's offsetInFrontOf(): move standoff_m
+    """Mirrors trajectory_planner.cpp's offsetInFrontOf(): move standoff_m
     along the camera's local +Z, then rotate by facing_rpy_rad (applied in
     the camera's own local frame) to get the goal orientation — the same
-    facing_rpy_rad value used in simple_trajectory_sim.yaml."""
+    facing_rpy_rad value used in trajectory_planner_sim.yaml."""
     t = camera_tf.transform.translation
     r = camera_tf.transform.rotation
     cam_pos = (t.x, t.y, t.z)

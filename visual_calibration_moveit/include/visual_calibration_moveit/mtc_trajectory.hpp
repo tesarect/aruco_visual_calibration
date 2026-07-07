@@ -8,7 +8,7 @@ namespace visual_calibration_moveit
 
 /// Staged trajectory generation via MoveIt Task Constructor: chains
 /// approach / interact / retreat (and gripper open/close) as distinct
-/// stages instead of one plan+execute call. See SimpleTrajectory for
+/// stages instead of one plan+execute call. See TrajectoryPlanner for
 /// the single-pose alternative.
 class MtcTrajectory : public rclcpp::Node
 {

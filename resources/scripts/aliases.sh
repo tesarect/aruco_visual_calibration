@@ -47,10 +47,10 @@ startplanningscene() {
     ros2 launch visual_calibration_moveit planning_scene_setup.launch.py env:="$env"
 }
 
-startsimpletrajectory() {
+starttrajectoryplanner() {
     local env="${1:-sim}"
     source ~/ros2_ws/install/setup.bash
-    ros2 launch visual_calibration_moveit simple_trajectory.launch.py env:="$env"
+    ros2 launch visual_calibration_moveit trajectory_planner.launch.py env:="$env"
 }
 
 vcpkgbuild() {
