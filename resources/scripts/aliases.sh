@@ -8,6 +8,7 @@
 alias srcrc="source ~/.bashrc"
 alias vcdir="cd ~/ros2_ws/src/visual_calibration"
 alias viewcam="ros2 run rqt_image_view rqt_image_view /wrist_rgbd_depth_sensor/image_raw"
+alias overlayviewcam="ros2 run rqt_image_view rqt_image_view /aruco_perception/overlay_image"
 
 # git
 cleanpull() {

@@ -1,5 +1,6 @@
 #include "aruco_perception/aruco_detector_node.hpp"
 
+#include <algorithm>
 #include <vector>
 
 #include <cv_bridge/cv_bridge.h>
@@ -37,6 +38,10 @@ ArucoDetectorNode::ArucoDetectorNode()
     std::bind(&ArucoDetectorNode::cameraInfoCallback, this, std::placeholders::_1));
 
   pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(config_.pose_topic, 10);
+
+  if (config_.publish_overlay_image) {
+    overlay_image_pub_ = image_transport::create_publisher(this, config_.overlay_image_topic);
+  }
 
   RCLCPP_INFO(
     get_logger(), "aruco_detector_node ready (marker_id: %d, dictionary: '%s')",
@@ -120,6 +125,32 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
   pose_msg.pose.orientation.z = tf_quaternion.z();
   pose_msg.pose.orientation.w = tf_quaternion.w();
   pose_pub_->publish(pose_msg);
+
+  if (config_.publish_overlay_image) {
+    // Separate bgr8 conversion (rather than reusing cv_ptr's mono8 buffer):
+    // drawAxis's red/green/blue lines and the yellow border are only
+    // distinguishable on a color image. Skipped entirely when the feature
+    // is off, so it costs nothing in the common (overlay-disabled) case.
+    cv_bridge::CvImagePtr overlay_ptr;
+    try {
+      overlay_ptr = cv_bridge::toCvCopy(msg, "bgr8");
+    } catch (const cv_bridge::Exception & e) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(), *get_clock(), 5000, "cv_bridge overlay conversion failed: %s", e.what());
+      return;
+    }
+
+    const cv::Scalar border_color(
+      config_.overlay_border_color_bgr[0], config_.overlay_border_color_bgr[1],
+      config_.overlay_border_color_bgr[2]);
+    cv::aruco::drawDetectedMarkers(
+      overlay_ptr->image, single_marker_corners, cv::noArray(), border_color);
+    cv::aruco::drawAxis(
+      overlay_ptr->image, camera_matrix_, distortion_coeffs_,
+      rvecs[0], tvecs[0], config_.marker_length_m * 0.5f);
+
+    overlay_image_pub_.publish(overlay_ptr->toImageMsg());
+  }
 }
 
 void ArucoDetectorNode::cameraInfoCallback(
@@ -149,6 +180,15 @@ ArucoDetectorConfig ArucoDetectorNode::loadConfigFromParams() const
   config.image_topic = get_parameter("image_topic").as_string();
   config.camera_info_topic = get_parameter("camera_info_topic").as_string();
   config.pose_topic = get_parameter("pose_topic").as_string();
+  config.publish_overlay_image = get_parameter("publish_overlay_image").as_bool();
+  config.overlay_image_topic = get_parameter("overlay_image_topic").as_string();
+
+  const std::vector<int64_t> border_color_bgr =
+    get_parameter("overlay_border_color_bgr").as_integer_array();
+  config.overlay_border_color_bgr = {
+    static_cast<int>(border_color_bgr[0]), static_cast<int>(border_color_bgr[1]),
+    static_cast<int>(border_color_bgr[2])};
+
   config.dictionary_name = get_parameter("dictionary_name").as_string();
   config.marker_id = static_cast<int>(get_parameter("marker_id").as_int());
   config.marker_length_m = get_parameter("marker_length_m").as_double();

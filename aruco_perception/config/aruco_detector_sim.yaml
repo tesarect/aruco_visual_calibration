@@ -8,9 +8,17 @@ aruco_detector_node:
     image_topic: "/wrist_rgbd_depth_sensor/image_raw"
     camera_info_topic: "/wrist_rgbd_depth_sensor/camera_info"
     pose_topic: "/aruco_perception/marker_pose"
-    dictionary_name: "DICT_4X4_50"
-    marker_id: 0
+    
+    # Overlay
+    publish_overlay_image: false
+    overlay_image_topic: "/aruco_perception/overlay_image"
+    overlay_border_color_bgr: [0, 255, 255]
+
+    # Known / Given
     marker_length_m: 0.045
+    dictionary_name: "DICT_4X4_50"
+
+    marker_id: 0
     adaptive_thresh_win_size_min: 3
     adaptive_thresh_win_size_max: 23
     adaptive_thresh_win_size_step: 10
