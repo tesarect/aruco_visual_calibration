@@ -16,3 +16,10 @@ trajectory_planner:
     standoff_m: 0.25
     max_reach_m: 0.5
     facing_rpy_rad: [3.14159265, 0.0, 1.57079633]
+    # Used by ~/trace_polygon (calibration-sample spread): num_corners >= 3
+    # (3=triangle, 4=square, 5=pentagon, ...), radius_m is each corner's
+    # distance from the standoff pose's center in its own local X/Y plane.
+    # Keep radius_m small relative to max_reach_m above. PLACEHOLDER — not
+    # re-tuned for the real cell yet, see file header.
+    polygon_num_corners: 4
+    polygon_radius_m: 0.05

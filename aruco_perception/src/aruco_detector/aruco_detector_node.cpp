@@ -82,6 +82,7 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
     return;
   }
 
+  // camera → marker frame
   std::vector<int> marker_ids;
   std::vector<std::vector<cv::Point2f>> marker_corners;
   cv::aruco::detectMarkers(

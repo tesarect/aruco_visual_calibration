@@ -10,7 +10,7 @@ aruco_detector_node:
     pose_topic: "/aruco_perception/marker_pose"
     
     # Overlay
-    publish_overlay_image: false
+    publish_overlay_image: true
     overlay_image_topic: "/aruco_perception/overlay_image"
     overlay_border_color_bgr: [0, 255, 255]
 

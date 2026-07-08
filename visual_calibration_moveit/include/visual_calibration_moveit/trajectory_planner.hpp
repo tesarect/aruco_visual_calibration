@@ -3,13 +3,16 @@
 
 #include <array>
 #include <string>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
+#include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <visual_calibration_msgs/srv/trace_path.hpp>
 
 namespace visual_calibration_moveit
 {
@@ -57,6 +60,19 @@ struct StandoffConfig
   std::array<double, 3> facing_rpy_rad = {0.0, 0.0, 0.0};
 };
 
+/// Tuning for polygonWaypointsAroundStandoff, loaded from a parameter file
+/// alongside StandoffConfig. num_corners selects the shape (3=triangle,
+/// 4=square, 5=pentagon, ...); radius_m is each corner's distance from the
+/// standoff pose's center, in its own local X/Y plane.
+struct PolygonConfig
+{
+  /// Number of corners; must be >= 3.
+  int num_corners = 4;
+  /// Distance from center to each corner, in the standoff pose's local X/Y
+  /// plane. Keep small relative to StandoffConfig::max_reach_m.
+  double radius_m = 0.05;
+};
+
 /// Trajectory generation via MoveGroupInterface: set a target pose (e.g.
 /// derived from the camera->base_link TF chain), plan, execute. No staged
 /// approach/retreat/gripper choreography — see MtcTrajectory for that.
@@ -95,7 +111,38 @@ public:
   bool planAndExecuteInFrontOf(
     rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0));
 
+  /// Visits each pose in waypoints in order (plan + execute per waypoint),
+  /// stopping at the first failure. Used to spread calibration samples
+  /// across several arm poses — see polygonWaypointsAroundStandoff for the
+  /// concrete shape used today. Returns true only if every waypoint
+  /// succeeded.
+  bool tracePath(const std::vector<geometry_msgs::msg::Pose> & waypoints);
+
 private:
+  /// Computes polygon_config_.num_corners waypoints forming a regular
+  /// polygon of radius polygon_config_.radius_m, in the standoff pose's own
+  /// local X/Y plane, centered on the standoff pose computed from
+  /// standoff_config_ (see planAndExecuteInFrontOf). Every corner keeps the
+  /// same facing_rpy_rad-derived orientation as the center — only position
+  /// varies — so the target link keeps facing the camera at each corner.
+  /// Corners are visited in angular order (not skipping around), so
+  /// consecutive waypoints are always adjacent. Returns an empty vector (and
+  /// logs the error) if the camera TF lookup fails.
+  std::vector<geometry_msgs::msg::Pose> polygonWaypointsAroundStandoff(
+    rclcpp::Duration tf_timeout) const;
+
+  /// Handles a TracePath service request by calling tracePath() with the
+  /// request's waypoints.
+  void handleTracePath(
+    const std::shared_ptr<visual_calibration_msgs::srv::TracePath::Request> request,
+    std::shared_ptr<visual_calibration_msgs::srv::TracePath::Response> response);
+
+  /// Handles a Trigger service request by computing
+  /// polygonWaypointsAroundStandoff and calling tracePath() with them.
+  void handleTracePolygon(
+    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
+    std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+
   /// Reads camera_frame, end_effector_frame, standoff_m, max_reach_m, and
   /// facing_rpy_rad (a 3-element array) from this node's declared
   /// parameters and returns them as a StandoffConfig. Requires the node to
@@ -103,11 +150,18 @@ private:
   /// automatically_declare_parameters_from_overrides).
   StandoffConfig loadStandoffConfigFromParams() const;
 
+  /// Reads polygon_num_corners and polygon_radius_m from this node's
+  /// declared parameters and returns them as a PolygonConfig.
+  PolygonConfig loadPolygonConfigFromParams() const;
+
   rclcpp::Node::SharedPtr node_;
   moveit::planning_interface::MoveGroupInterface move_group_interface_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   StandoffConfig standoff_config_;
+  PolygonConfig polygon_config_;
+  rclcpp::Service<visual_calibration_msgs::srv::TracePath>::SharedPtr trace_path_service_;
+  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr trace_polygon_service_;
 };
 
 }  // namespace visual_calibration_moveit

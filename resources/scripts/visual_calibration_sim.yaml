@@ -1,0 +1,62 @@
+session_name: visual_calibration
+
+windows:
+
+  # ==================================================
+  # Background simulation window
+  # ==================================================
+  - window_name: simulation
+    layout: tiled
+
+    panes:
+
+      - shell_command:
+          - source ~/ros2_ws/install/setup.bash
+          - ros2 launch the_construct_office_gazebo starbots_ur3e.launch.xml
+
+      - shell_command:
+          - source ~/ros2_ws/install/setup.bash
+          - ros2 launch aruco_moveit_config moveit_rviz.launch.py
+
+      - shell_command:
+          - source ~/ros2_ws/install/setup.bash
+          - ros2 launch aruco_moveit_config move_group.launch.py
+
+      - shell_command:
+          - source ~/ros2_ws/install/setup.bash
+          - ros2 launch visual_calibration_moveit planning_scene_setup.launch.py env:=sim
+
+      - shell_command:
+          - cd ~/ros2_ws/src/visual_calibration/resources/scripts
+          - python3 tf_debug_marker.py
+
+
+  # ==================================================
+  # Main monitoring/control window
+  # +----------------------+----------------------+----------------------+
+  # | trajectory_planner   | calibration_bcaster  | empty shell          |
+  # +----------------------+----------------------+----------------------+
+  # | empty shell          | empty shell          | empty shell          |
+  # +----------------------+----------------------+----------------------+
+  # ==================================================
+  - window_name: main
+    layout: tiled
+
+    panes:
+
+      - shell_command:
+          - source ~/ros2_ws/install/setup.bash
+          - ros2 launch visual_calibration_moveit trajectory_planner.launch.py env:=sim
+
+      - shell_command:
+          - source ~/ros2_ws/install/setup.bash
+          - ros2 run aruco_perception calibration_broadcaster_node --ros-args --params-file ~/ros2_ws/src/visual_calibration/aruco_perception/config/calibration_broadcaster_sim.yaml
+
+      - shell_command:
+          - source ~/ros2_ws/install/setup.bash
+
+      - shell_command:
+          - source ~/ros2_ws/install/setup.bash
+
+      - shell_command:
+          - source ~/ros2_ws/install/setup.bash

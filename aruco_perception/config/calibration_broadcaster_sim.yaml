@@ -1,0 +1,14 @@
+# Sim: camera is wrist-mounted (marker and camera both ride the arm), so
+# base_link -> rg2_gripper_aruco_link is fully known from joint states —
+# this is the "known chain" we combine with the detector's measured
+# camera -> marker pose to solve for base_link -> camera.
+calibration_broadcaster_node:
+  ros__parameters:
+    marker_pose_topic: "/aruco_perception/marker_pose"
+    known_chain_frame: "base_link"
+    marker_frame: "rg2_gripper_aruco_link"
+    num_samples: 10
+    # Gives time to move the arm/marker between samples (e.g. via
+    # trajectory_planner's ~/trace_polygon) so consecutive samples aren't
+    # correlated frames of a stationary pose.
+    min_sample_interval_sec: 2.0

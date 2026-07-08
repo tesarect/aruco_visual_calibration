@@ -46,8 +46,23 @@ TrajectoryPlanner::TrajectoryPlanner(
   move_group_interface_(node_, planning_group),
   tf_buffer_(node_->get_clock()),
   tf_listener_(tf_buffer_),
-  standoff_config_(loadStandoffConfigFromParams())
+  standoff_config_(loadStandoffConfigFromParams()),
+  polygon_config_(loadPolygonConfigFromParams())
 {
+  // "~/..." resolves to a private, node-namespaced service name (e.g.
+  // /trajectory_planner/trace_path), the standard ROS2 convention for a
+  // service specific to this node.
+  trace_path_service_ = node_->create_service<visual_calibration_msgs::srv::TracePath>(
+    "~/trace_path",
+    std::bind(
+      &TrajectoryPlanner::handleTracePath, this, std::placeholders::_1, std::placeholders::_2));
+
+  trace_polygon_service_ = node_->create_service<std_srvs::srv::Trigger>(
+    "~/trace_polygon",
+    std::bind(
+      &TrajectoryPlanner::handleTracePolygon, this, std::placeholders::_1,
+      std::placeholders::_2));
+
   RCLCPP_INFO(
     node_->get_logger(), "trajectory_planner ready (planning group: '%s')",
     planning_group.c_str());
@@ -122,6 +137,106 @@ bool TrajectoryPlanner::planAndExecuteInFrontOf(rclcpp::Duration tf_timeout)
   return planAndExecuteInFrontOf(standoff_config_, tf_timeout);
 }
 
+bool TrajectoryPlanner::tracePath(const std::vector<geometry_msgs::msg::Pose> & waypoints)
+{
+  move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
+
+  for (size_t i = 0; i < waypoints.size(); ++i) {
+    RCLCPP_INFO(node_->get_logger(), "Tracing waypoint %zu/%zu", i + 1, waypoints.size());
+    if (!planAndExecute(waypoints[i])) {
+      RCLCPP_ERROR(
+        node_->get_logger(), "tracePath stopped at waypoint %zu/%zu", i + 1, waypoints.size());
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<geometry_msgs::msg::Pose> TrajectoryPlanner::polygonWaypointsAroundStandoff(
+  rclcpp::Duration tf_timeout) const
+{
+  if (polygon_config_.num_corners < 3) {
+    RCLCPP_ERROR(
+      node_->get_logger(), "polygon_num_corners (%d) must be >= 3", polygon_config_.num_corners);
+    return {};
+  }
+
+  const std::string & planning_frame = move_group_interface_.getPlanningFrame();
+
+  geometry_msgs::msg::TransformStamped camera_tf;
+  try {
+    camera_tf = tf_buffer_.lookupTransform(
+      planning_frame, standoff_config_.camera_frame, tf2::TimePointZero,
+      tf2::durationFromSec(tf_timeout.seconds()));
+  } catch (const tf2::TransformException & ex) {
+    RCLCPP_ERROR(
+      node_->get_logger(), "Could not look up '%s' in planning frame '%s': %s",
+      standoff_config_.camera_frame.c_str(), planning_frame.c_str(), ex.what());
+    return {};
+  }
+
+  const geometry_msgs::msg::Pose standoff_pose = offsetInFrontOf(
+    camera_tf, standoff_config_.standoff_m, standoff_config_.facing_rpy_rad);
+
+  tf2::Transform standoff;
+  tf2::fromMsg(standoff_pose, standoff);
+
+  // Corner offsets applied in the standoff pose's own local X/Y plane (not
+  // the camera's), so every corner keeps the same facing_rpy_rad-derived
+  // orientation as the center — only position varies, so the target link
+  // keeps facing the camera at each corner. Visited in angular order, so
+  // consecutive waypoints are always adjacent (shorter individual moves).
+  std::vector<geometry_msgs::msg::Pose> waypoints;
+  waypoints.reserve(static_cast<size_t>(polygon_config_.num_corners));
+  for (int i = 0; i < polygon_config_.num_corners; ++i) {
+    const double angle_rad = 2.0 * M_PI * static_cast<double>(i) / polygon_config_.num_corners;
+    const tf2::Vector3 corner_offset(
+      polygon_config_.radius_m * std::cos(angle_rad),
+      polygon_config_.radius_m * std::sin(angle_rad),
+      0.0);
+
+    tf2::Transform corner(tf2::Quaternion::getIdentity(), corner_offset);
+    tf2::Transform goal = standoff * corner;
+
+    geometry_msgs::msg::Pose goal_pose;
+    goal_pose.position.x = goal.getOrigin().x();
+    goal_pose.position.y = goal.getOrigin().y();
+    goal_pose.position.z = goal.getOrigin().z();
+    goal_pose.orientation = tf2::toMsg(goal.getRotation());
+    waypoints.push_back(goal_pose);
+  }
+  return waypoints;
+}
+
+void TrajectoryPlanner::handleTracePath(
+  const std::shared_ptr<visual_calibration_msgs::srv::TracePath::Request> request,
+  std::shared_ptr<visual_calibration_msgs::srv::TracePath::Response> response)
+{
+  const std::vector<geometry_msgs::msg::Pose> waypoints(
+    request->waypoints.begin(), request->waypoints.end());
+  response->success = tracePath(waypoints);
+  response->message = response->success ?
+    "Traced all waypoints successfully" : "Failed partway through tracing waypoints";
+}
+
+void TrajectoryPlanner::handleTracePolygon(
+  const std::shared_ptr<std_srvs::srv::Trigger::Request>/*request*/,
+  std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+{
+  const std::vector<geometry_msgs::msg::Pose> waypoints =
+    polygonWaypointsAroundStandoff(rclcpp::Duration::from_seconds(3.0));
+
+  if (waypoints.empty()) {
+    response->success = false;
+    response->message = "Could not compute polygon waypoints (see log for the error)";
+    return;
+  }
+
+  response->success = tracePath(waypoints);
+  response->message = response->success ?
+    "Traced polygon path successfully" : "Failed partway through tracing polygon path";
+}
+
 StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const
 {
   StandoffConfig config;
@@ -134,6 +249,14 @@ StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const
     node_->get_parameter("facing_rpy_rad").as_double_array();
   config.facing_rpy_rad = {facing_rpy_rad[0], facing_rpy_rad[1], facing_rpy_rad[2]};
 
+  return config;
+}
+
+PolygonConfig TrajectoryPlanner::loadPolygonConfigFromParams() const
+{
+  PolygonConfig config;
+  config.num_corners = static_cast<int>(node_->get_parameter("polygon_num_corners").as_int());
+  config.radius_m = node_->get_parameter("polygon_radius_m").as_double();
   return config;
 }
 

@@ -13,6 +13,9 @@ find_package(geometry_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_geometry_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS aruco calib3d)
 
 add_executable(image_subscriber_node
@@ -46,9 +49,26 @@ ament_target_dependencies(aruco_detector_node
 )
 target_link_libraries(aruco_detector_node ${OpenCV_LIBS})
 
+add_executable(calibration_broadcaster_node
+  src/calibration_broadcaster/calibration_broadcaster_node.cpp
+  src/calibration_broadcaster/main.cpp
+)
+target_include_directories(calibration_broadcaster_node PRIVATE
+  include
+)
+ament_target_dependencies(calibration_broadcaster_node
+  rclcpp
+  geometry_msgs
+  std_srvs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
+)
+
 install(TARGETS
   image_subscriber_node
   aruco_detector_node
+  calibration_broadcaster_node
   DESTINATION lib/${PROJECT_NAME}
 )
 

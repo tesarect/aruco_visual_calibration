@@ -1,0 +1,7 @@
+# Move the end-effector through each waypoint in order (blocking: returns
+# once all waypoints are visited, or on first planning/execution failure).
+# Poses are in the MoveGroupInterface's planning frame (see TrajectoryPlanner).
+geometry_msgs/Pose[] waypoints
+---
+bool success
+string message
