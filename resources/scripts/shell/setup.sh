@@ -21,16 +21,15 @@ sudo sed -i 's|http://archive.ubuntu.com/ubuntu|mirror://mirrors.ubuntu.com/mirr
 sudo sed -i 's|http://security.ubuntu.com/ubuntu|mirror://mirrors.ubuntu.com/mirrors.txt|g' /etc/apt/sources.list
 
 echo "🔄 Updating package lists..."
-sudo apt-get update
+sudo apt-get update || true
 
 echo ">_ Installing Tmux..."
-# sudo apt install tmux
-sudo apt install tmuxp
+sudo apt install -y tmux
 
 echo "✅ Setup complete!"
 
 #----place them in you bashrc
-# TMUX_CONF_SRC="$HOME/ros2_ws/src/visual_calibration/resources/scripts/tmux.conf"
+# TMUX_CONF_SRC="$HOME/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf"
 # TMUX_CONF_DST="$HOME/.tmux.conf"
 
 # - copies only if not present at ~/
@@ -43,6 +42,6 @@ echo "✅ Setup complete!"
 #     cp "$TMUX_CONF_SRC" "$TMUX_CONF_DST"
 # fi
 
-# - or redirect the path 
+# - or redirect the path
 # tmux -f /workspaces/configs/.tmux.conf
-# tmux -f ~/ros2_ws/src/visual_calibration/resources/scripts/tmux.conf
+# tmux -f ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf

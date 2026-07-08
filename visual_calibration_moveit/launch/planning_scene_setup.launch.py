@@ -22,11 +22,15 @@ def generate_launch_description():
         params_filename,
     ])
 
+    # use_sim_time must match the environment — see trajectory_planner.launch.py's
+    # comment on this same pattern for why.
+    use_sim_time = PythonExpression(["'", LaunchConfiguration("env"), "' == 'sim'"])
+
     planning_scene_setup_node = Node(
         package="visual_calibration_moveit",
         executable="planning_scene_setup",
         output="screen",
-        parameters=[params_file],
+        parameters=[params_file, {"use_sim_time": use_sim_time}],
     )
 
     return LaunchDescription([

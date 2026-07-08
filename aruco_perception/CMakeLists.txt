@@ -51,6 +51,7 @@ target_link_libraries(aruco_detector_node ${OpenCV_LIBS})
 
 add_executable(calibration_broadcaster_node
   src/calibration_broadcaster/calibration_broadcaster_node.cpp
+  src/calibration_broadcaster/orientation_averaging.cpp
   src/calibration_broadcaster/main.cpp
 )
 target_include_directories(calibration_broadcaster_node PRIVATE
@@ -73,6 +74,7 @@ install(TARGETS
 )
 
 install(DIRECTORY
+  launch
   config
   DESTINATION share/${PROJECT_NAME}
 )

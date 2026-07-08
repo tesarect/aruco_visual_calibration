@@ -12,3 +12,8 @@ calibration_broadcaster_node:
     # trajectory_planner's ~/trace_polygon) so consecutive samples aren't
     # correlated frames of a stationary pose.
     min_sample_interval_sec: 2.0
+    # Orientation-averaging method priority (0 = disabled, lower positive
+    # number = tried first). Markley's method isn't implemented yet — leave
+    # its priority at 0 until orientation_averaging.hpp adds it.
+    orientation_sum_normalize_priority: 1
+    orientation_markley_priority: 0

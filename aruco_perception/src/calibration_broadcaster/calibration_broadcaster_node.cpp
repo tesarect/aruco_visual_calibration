@@ -13,7 +13,10 @@ CalibrationBroadcasterNode::CalibrationBroadcasterNode()
   config_(loadConfigFromParams()),
   tf_buffer_(get_clock()),
   tf_listener_(tf_buffer_),
-  static_broadcaster_(this)
+  static_broadcaster_(this),
+  averaging_method_(
+    selectAveragingMethod(
+      config_.orientation_sum_normalize_priority, config_.orientation_markley_priority))
 {
   marker_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
     config_.marker_pose_topic, 10,
@@ -74,6 +77,7 @@ void CalibrationBroadcasterNode::markerPoseCallback(
   sample_position.y = known_to_camera.getOrigin().y();
   sample_position.z = known_to_camera.getOrigin().z();
   collected_positions_.push_back(sample_position);
+  collected_orientations_.push_back(known_to_camera.getRotation());
 
   last_sample_.header = msg->header;
   last_sample_.pose.position.x = sample_position.x;
@@ -103,6 +107,7 @@ void CalibrationBroadcasterNode::handleStartCalibration(
   }
 
   collected_positions_.clear();
+  collected_orientations_.clear();
   is_collecting_ = true;
 
   response->success = true;
@@ -124,23 +129,28 @@ void CalibrationBroadcasterNode::finishCalibration()
   average_position.y /= count;
   average_position.z /= count;
 
+  const OrientationAveragingResult orientation_result =
+    averageQuaternions(collected_orientations_, averaging_method_);
+
   geometry_msgs::msg::TransformStamped broadcast_tf;
   broadcast_tf.header.stamp = get_clock()->now();
   broadcast_tf.header.frame_id = config_.known_chain_frame;
   broadcast_tf.child_frame_id = last_sample_.header.frame_id;
   broadcast_tf.transform.translation = average_position;
-  // Orientation not yet averaged — see class doc.
-  broadcast_tf.transform.rotation = last_sample_.pose.orientation;
+  broadcast_tf.transform.rotation = tf2::toMsg(orientation_result.averaged);
 
   static_broadcaster_.sendTransform(broadcast_tf);
 
   RCLCPP_INFO(
     get_logger(), "Calibration complete: broadcasting static TF '%s' -> '%s' "
-    "(position averaged over %zu samples, orientation from most recent sample)",
+    "(position + orientation averaged over %zu samples; orientation spread: "
+    "max %.3f deg, mean %.3f deg)",
     config_.known_chain_frame.c_str(), broadcast_tf.child_frame_id.c_str(),
-    collected_positions_.size());
+    collected_positions_.size(), orientation_result.max_spread_deg,
+    orientation_result.mean_spread_deg);
 
   collected_positions_.clear();
+  collected_orientations_.clear();
   is_collecting_ = false;
 }
 
@@ -152,6 +162,10 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
   config.marker_frame = get_parameter("marker_frame").as_string();
   config.num_samples = static_cast<int>(get_parameter("num_samples").as_int());
   config.min_sample_interval_sec = get_parameter("min_sample_interval_sec").as_double();
+  config.orientation_sum_normalize_priority =
+    static_cast<int>(get_parameter("orientation_sum_normalize_priority").as_int());
+  config.orientation_markley_priority =
+    static_cast<int>(get_parameter("orientation_markley_priority").as_int());
   return config;
 }
 

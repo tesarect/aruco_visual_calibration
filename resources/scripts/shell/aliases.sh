@@ -1,13 +1,15 @@
 
 # Add this to you bashrc
-# [ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/aliases.sh"
+# [ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh"
 #               or this
-# grep -qxF '[ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/aliases.sh"' ~/.bashrc ||
-# echo '[ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/aliases.sh"' >> ~/.bashrc
+# grep -qxF '[ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh"' ~/.bashrc ||
+# echo '[ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh"' >> ~/.bashrc
 
 alias srcrc="source ~/.bashrc"
 alias vcdir="cd ~/ros2_ws/src/visual_calibration/"
-alias shdir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/"
+alias shdir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/shell/"
+alias tmuxdir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/"
+alias pydir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/python/"
 alias viewcam="ros2 run rqt_image_view rqt_image_view /wrist_rgbd_depth_sensor/image_raw"
 alias viewoverlaycam="ros2 run rqt_image_view rqt_image_view /aruco_perception/overlay_image"
 
@@ -23,22 +25,30 @@ killsim() {
 }
 
 customkill() {
-    local var="${1}"
-    # TODO:
-    # accept var, if var is equal to string execute specific command 
-    # if 
-    # pkill gzclient*
-    # if 
-    # tmux kill-session -t visual_calibration
+    local key="$1"
+
+    declare -A commands=(
+        [gzclient]='pkill -f "^gzclient"'
+        [basetmux]='tmux kill-session -t base_term'
+        [main1tmux]='tmux kill-session -t main1_term'
+    )
+
+    if [[ -n "${commands[$key]}" ]]; then
+        eval "${commands[$key]}"
+    else
+        echo "Unknown target: $key"
+        echo "Available: ${!commands[*]}"
+        return 1
+    fi
 }
 
 tmuxbasesim() {
-    cd ~/ros2_ws/src/visual_calibration/resources/scripts/
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
     bash ./sim_tmux_base.sh
 }
 
 tmuxmain1sim() {
-    cd ~/ros2_ws/src/visual_calibration/resources/scripts/
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
     bash ./sim_tmux_main1.sh
 }
 

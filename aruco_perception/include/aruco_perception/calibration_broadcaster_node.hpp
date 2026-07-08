@@ -8,9 +8,12 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <tf2/LinearMath/Quaternion.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/static_transform_broadcaster.h>
+
+#include "aruco_perception/orientation_averaging.hpp"
 
 namespace aruco_perception
 {
@@ -41,6 +44,14 @@ struct CalibrationBroadcasterConfig
   /// between samples (e.g. via trajectory_planner's ~/trace_polygon) so
   /// consecutive samples aren't correlated frames of a stationary pose.
   double min_sample_interval_sec = 2.0;
+  /// Priority for OrientationAveragingMethod::kSumNormalize; 0 disables it.
+  /// See selectAveragingMethod — lower positive number = tried first.
+  int orientation_sum_normalize_priority = 1;
+  /// Priority for OrientationAveragingMethod::kMarkley; 0 disables it.
+  /// NOT YET IMPLEMENTED — leave at 0 until it exists (see
+  /// orientation_averaging.hpp), otherwise finishCalibration() throws if
+  /// this method is actually selected.
+  int orientation_markley_priority = 0;
 };
 
 /// Solves for the fixed transform between known_chain_frame and the
@@ -50,9 +61,13 @@ struct CalibrationBroadcasterConfig
 /// only when ~/start_calibration is called (std_srvs/Trigger) — passive
 /// otherwise, ignoring marker_pose_topic entirely.
 ///
-/// Position-only for now: samples' positions are averaged (arithmetic
-/// mean); the broadcast orientation is taken from the most recent sample,
-/// not yet averaged (quaternion averaging deferred — see progress.md's
+/// Position: arithmetic mean of all samples. Orientation: averaged via
+/// whichever OrientationAveragingMethod selectAveragingMethod picks from
+/// config_'s priorities (kSumNormalize today; kMarkley reserved for a more
+/// robust average later — see orientation_averaging.hpp). Both the
+/// resulting spread metrics (see OrientationAveragingResult) are logged at
+/// finishCalibration, as a signal for whether the average is trustworthy —
+/// not yet used to auto-escalate between methods (see progress.md's
 /// Feature Additions).
 class CalibrationBroadcasterNode : public rclcpp::Node
 {
@@ -68,16 +83,20 @@ private:
     const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response);
 
-  /// Averages collected_positions_ (arithmetic mean) and broadcasts
+  /// Averages collected_positions_ (arithmetic mean) and
+  /// collected_orientations_ (via averaging_method_) and broadcasts
   /// known_chain_frame -> the camera frame (from the most recent sample's
-  /// header.frame_id) as a static TF, using the most recent sample's
-  /// orientation. Clears collected_positions_ and resets is_collecting_.
+  /// header.frame_id) as a static TF. Logs the orientation spread metrics.
+  /// Clears both collected_ vectors and resets is_collecting_.
   void finishCalibration();
 
   CalibrationBroadcasterConfig config_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   tf2_ros::StaticTransformBroadcaster static_broadcaster_;
+  /// Selected once at construction from config_'s priorities — see
+  /// selectAveragingMethod.
+  OrientationAveragingMethod averaging_method_;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr marker_pose_sub_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_calibration_service_;
@@ -85,9 +104,9 @@ private:
   bool is_collecting_ = false;
   rclcpp::Time last_sample_time_;
   std::vector<geometry_msgs::msg::Vector3> collected_positions_;
-  /// The most recent sample's orientation and camera frame_id — carried
-  /// through to the final broadcast (see class doc: position-only
-  /// averaging for now).
+  std::vector<tf2::Quaternion> collected_orientations_;
+  /// The most recent sample's camera frame_id — carried through to the
+  /// final broadcast's child_frame_id.
   geometry_msgs::msg::PoseStamped last_sample_;
 };
 

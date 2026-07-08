@@ -1,4 +1,4 @@
- ros2 control list_controllers
+ros2 control list_controllers
 joint_state_broadcaster[joint_state_broadcaster/JointStateBroadcaster] active
 joint_trajectory_controller[joint_trajectory_controller/JointTrajectoryController] active
 gripper_controller  [position_controllers/GripperActionController] active

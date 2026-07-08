@@ -4,9 +4,12 @@
 # trajectory_planner / aruco_detector_node / calibration_broadcaster_node —
 # see sim_tmux_main1.sh for those.
 
-SESSION="visual_calibration"
+SESSION="base_term"
 WINDOW="simulation"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RESOURCES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+SHELL_DIR="$RESOURCES_DIR/shell"
+PYTHON_DIR="$RESOURCES_DIR/python"
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Killing existing tmux session: $SESSION"
@@ -32,20 +35,29 @@ tmux send-keys -t "$PANE1" \
 # MotionPlanning plugin needs move_group up to be useful).
 PANE2=$(tmux split-window -t "$PANE0" -v -P -F "#{pane_id}")
 tmux send-keys -t "$PANE2" \
-"$SCRIPT_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 launch aruco_moveit_config moveit_rviz.launch.py" C-m
+"$SHELL_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 launch aruco_moveit_config moveit_rviz.launch.py" C-m
 
 # Pane 3 — planning scene setup (one-shot: populates the scene, then
 # exits). Polls for move_group first (PlanningSceneInterface needs it).
 PANE3=$(tmux split-window -t "$PANE1" -v -P -F "#{pane_id}")
 tmux send-keys -t "$PANE3" \
-"$SCRIPT_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 launch visual_calibration_moveit planning_scene_setup.launch.py env:=sim" C-m
+"$SHELL_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 launch visual_calibration_moveit planning_scene_setup.launch.py env:=sim" C-m
 
 # Pane 4 — marker-debugger (optional visual aid, RViz axis markers at key
 # TF frames). Background/best-effort: polls for move_group, doesn't block
 # anything else.
 PANE4=$(tmux split-window -t "$PANE2" -v -P -F "#{pane_id}")
 tmux send-keys -t "$PANE4" \
-"$SCRIPT_DIR/wait_for_node.sh move_group 30 && python3 $SCRIPT_DIR/tf_debug_markers.py" C-m
+"$SHELL_DIR/wait_for_node.sh move_group 30 && python3 $PYTHON_DIR/tf_debug_markers.py" C-m
+
+# Give each pane a descriptive title, matching sim_tmux_main1.sh's style.
+tmux select-pane -t "$PANE0" -T "Simulation"
+tmux select-pane -t "$PANE1" -T "MoveIt move_group"
+tmux select-pane -t "$PANE2" -T "RViz"
+tmux select-pane -t "$PANE3" -T "Planning Scene"
+tmux select-pane -t "$PANE4" -T "Marker Debugger"
+tmux set-option -t "$SESSION" pane-border-status top
+tmux set-option -t "$SESSION" pane-border-format "#{?pane_active,#[fg=green]▶ ,}#{pane_title}"
 
 tmux select-layout -t "$SESSION:$WINDOW" tiled
 
