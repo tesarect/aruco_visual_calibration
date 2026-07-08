@@ -1,17 +1,19 @@
 #ifndef ARUCO_PERCEPTION__CALIBRATION_BROADCASTER_NODE_HPP_
 #define ARUCO_PERCEPTION__CALIBRATION_BROADCASTER_NODE_HPP_
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
-#include <std_srvs/srv/trigger.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/static_transform_broadcaster.h>
+#include <visual_calibration_msgs/action/calibrate.hpp>
 
 #include "aruco_perception/orientation_averaging.hpp"
 
@@ -58,20 +60,26 @@ struct CalibrationBroadcasterConfig
 /// camera, from N samples of (known_chain_frame -> marker_frame, from TF)
 /// chained with (camera -> marker_frame, from the detector's PoseStamped,
 /// inverted), then broadcasts it once as a static TF. Collection starts
-/// only when ~/start_calibration is called (std_srvs/Trigger) — passive
-/// otherwise, ignoring marker_pose_topic entirely.
+/// only when a ~/calibrate action goal is accepted — passive otherwise,
+/// ignoring marker_pose_topic entirely. An action (not a plain service) is
+/// used deliberately: calibration takes several seconds to minutes
+/// (depending on how quickly samples accumulate), and a future web UI
+/// needs live progress (samples_collected/samples_total feedback), not
+/// just a final result — see Calibrate.action.
 ///
 /// Position: arithmetic mean of all samples. Orientation: averaged via
 /// whichever OrientationAveragingMethod selectAveragingMethod picks from
 /// config_'s priorities (kSumNormalize today; kMarkley reserved for a more
 /// robust average later — see orientation_averaging.hpp). Both the
-/// resulting spread metrics (see OrientationAveragingResult) are logged at
-/// finishCalibration, as a signal for whether the average is trustworthy —
-/// not yet used to auto-escalate between methods (see progress.md's
-/// Feature Additions).
+/// resulting spread metrics are included in the action result and logged,
+/// as a signal for whether the average is trustworthy — not yet used to
+/// auto-escalate between methods (see progress.md's Feature Additions).
 class CalibrationBroadcasterNode : public rclcpp::Node
 {
 public:
+  using Calibrate = visual_calibration_msgs::action::Calibrate;
+  using GoalHandleCalibrate = rclcpp_action::ServerGoalHandle<Calibrate>;
+
   CalibrationBroadcasterNode();
 
 private:
@@ -79,14 +87,25 @@ private:
 
   void markerPoseCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr & msg);
 
-  void handleStartCalibration(
-    const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
-    std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+  /// Accepts a new goal unless calibration is already in progress.
+  rclcpp_action::GoalResponse handleGoal(
+    const rclcpp_action::GoalUUID & uuid,
+    std::shared_ptr<const Calibrate::Goal> goal);
+
+  /// Always accepts cancellation requests.
+  rclcpp_action::CancelResponse handleCancel(
+    const std::shared_ptr<GoalHandleCalibrate> goal_handle);
+
+  /// Stores goal_handle_ and resets collection state — the actual sample
+  /// collection happens in markerPoseCallback as marker_pose messages
+  /// arrive, not in a dedicated execution thread (no blocking work here).
+  void handleAccepted(const std::shared_ptr<GoalHandleCalibrate> goal_handle);
 
   /// Averages collected_positions_ (arithmetic mean) and
-  /// collected_orientations_ (via averaging_method_) and broadcasts
+  /// collected_orientations_ (via averaging_method_), broadcasts
   /// known_chain_frame -> the camera frame (from the most recent sample's
-  /// header.frame_id) as a static TF. Logs the orientation spread metrics.
+  /// header.frame_id) as a static TF, and completes goal_handle_ with the
+  /// result (see Calibrate.action). Logs the orientation spread metrics.
   /// Clears both collected_ vectors and resets is_collecting_.
   void finishCalibration();
 
@@ -99,9 +118,13 @@ private:
   OrientationAveragingMethod averaging_method_;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr marker_pose_sub_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr start_calibration_service_;
+  rclcpp_action::Server<Calibrate>::SharedPtr calibrate_action_server_;
 
   bool is_collecting_ = false;
+  /// The in-progress goal's handle — used to publish feedback per sample
+  /// and to complete with a result in finishCalibration(). Null when not
+  /// collecting.
+  std::shared_ptr<GoalHandleCalibrate> goal_handle_;
   rclcpp::Time last_sample_time_;
   std::vector<geometry_msgs::msg::Vector3> collected_positions_;
   std::vector<tf2::Quaternion> collected_orientations_;

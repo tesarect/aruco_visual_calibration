@@ -46,15 +46,15 @@ PANE2=$(tmux split-window -t "$PANE0" -v -P -F "#{pane_id}")
 tmux send-keys -t "$PANE2" \
 "$SHELL_DIR/wait_for_node.sh aruco_detector_node 30 && $SHELL_DIR/wait_for_node.sh trajectory_planner 30 && source ~/ros2_ws/install/setup.bash && ros2 run aruco_perception calibration_broadcaster_node --ros-args --params-file ~/ros2_ws/src/visual_calibration/aruco_perception/config/calibration_broadcaster_sim.yaml" C-m
 
-# Pane 3 — service-call helper: starts calibration collection, then traces
-# the polygon a few times so samples spread across several arm poses (see
-# CLAUDE.md/progress.md — calibration_broadcaster_node only collects, it
-# never moves the arm itself). Left as a manual step for now: this pane
-# just polls readiness and prints the commands rather than firing them
-# automatically, since starting calibration is a deliberate user action.
+# Pane 3 — calibration runner: waits for calibration_broadcaster_node,
+# sources aliases.sh (for runcalibration/startcalibration/tracepolygon),
+# then leaves you at a ready prompt. Run `runcalibration` to send the
+# ~/calibrate action goal and auto-loop trace_polygon calls until it
+# completes (see aliases.sh) — printing live samples_collected/total
+# feedback and the final orientation spread (max/mean degrees).
 PANE3=$(tmux split-window -t "$PANE1" -v -P -F "#{pane_id}")
 tmux send-keys -t "$PANE3" \
-"$SHELL_DIR/wait_for_node.sh calibration_broadcaster_node 30 && echo 'Ready. Run:' && echo '  ros2 service call /calibration_broadcaster_node/start_calibration std_srvs/srv/Trigger {}' && echo '  ros2 service call /trajectory_planner/trace_polygon std_srvs/srv/Trigger {}  # repeat until 10/10 samples collected'" C-m
+"$SHELL_DIR/wait_for_node.sh calibration_broadcaster_node 30 && source ~/ros2_ws/install/setup.bash && source $SHELL_DIR/aliases.sh && echo 'Ready. Run: runcalibration'" C-m
 
 # Give each pane a title
 tmux select-pane -t "$PANE0" -T "Trajectory Planner"

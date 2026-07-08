@@ -113,8 +113,34 @@ tracepolygon() {
     ros2 service call /trajectory_planner/trace_polygon std_srvs/srv/Trigger {}
 }
 
+# Sends the ~/calibrate action goal and blocks, printing live feedback
+# (samples_collected/samples_total) until the action completes — includes
+# the final orientation spread (max/mean degrees) in the result.
 startcalibration() {
-    ros2 service call /calibration_broadcaster_node/start_calibration std_srvs/srv/Trigger {}
+    ros2 action send_goal /calibration_broadcaster_node/calibrate \
+        visual_calibration_msgs/action/Calibrate {} --feedback
+}
+
+# Runs startcalibration in the background, then repeatedly calls
+# tracepolygon (spreading samples across several arm poses) until the
+# calibrate action finishes — so you don't have to manually call
+# tracepolygon the right number of times. max_polygon_calls bounds the
+# loop in case calibration never completes (e.g. marker stays out of
+# view) — each trace_polygon visits polygon_num_corners waypoints, so
+# this should comfortably exceed num_samples / polygon_num_corners.
+runcalibration() {
+    local max_polygon_calls="${1:-10}"
+
+    startcalibration &
+    local calibration_pid=$!
+
+    local i=0
+    while kill -0 "$calibration_pid" 2>/dev/null && [ "$i" -lt "$max_polygon_calls" ]; do
+        tracepolygon
+        i=$((i + 1))
+    done
+
+    wait "$calibration_pid"
 }
 
 vcpkgbuild() {

@@ -15,7 +15,8 @@ find_package(image_transport REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
-find_package(std_srvs REQUIRED)
+find_package(rclcpp_action REQUIRED)
+find_package(visual_calibration_msgs REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS aruco calib3d)
 
 add_executable(image_subscriber_node
@@ -59,8 +60,9 @@ target_include_directories(calibration_broadcaster_node PRIVATE
 )
 ament_target_dependencies(calibration_broadcaster_node
   rclcpp
+  rclcpp_action
   geometry_msgs
-  std_srvs
+  visual_calibration_msgs
   tf2
   tf2_ros
   tf2_geometry_msgs

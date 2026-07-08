@@ -22,15 +22,18 @@ CalibrationBroadcasterNode::CalibrationBroadcasterNode()
     config_.marker_pose_topic, 10,
     std::bind(&CalibrationBroadcasterNode::markerPoseCallback, this, std::placeholders::_1));
 
-  start_calibration_service_ = create_service<std_srvs::srv::Trigger>(
-    "~/start_calibration",
+  calibrate_action_server_ = rclcpp_action::create_server<Calibrate>(
+    this,
+    "~/calibrate",
     std::bind(
-      &CalibrationBroadcasterNode::handleStartCalibration, this, std::placeholders::_1,
-      std::placeholders::_2));
+      &CalibrationBroadcasterNode::handleGoal, this, std::placeholders::_1,
+      std::placeholders::_2),
+    std::bind(&CalibrationBroadcasterNode::handleCancel, this, std::placeholders::_1),
+    std::bind(&CalibrationBroadcasterNode::handleAccepted, this, std::placeholders::_1));
 
   RCLCPP_INFO(
     get_logger(), "calibration_broadcaster_node ready (known_chain_frame: '%s', marker_frame: "
-    "'%s', num_samples: %d) — call ~/start_calibration to begin",
+    "'%s', num_samples: %d) — send a ~/calibrate action goal to begin",
     config_.known_chain_frame.c_str(), config_.marker_frame.c_str(), config_.num_samples);
 }
 
@@ -38,6 +41,18 @@ void CalibrationBroadcasterNode::markerPoseCallback(
   const geometry_msgs::msg::PoseStamped::ConstSharedPtr & msg)
 {
   if (!is_collecting_) {
+    return;
+  }
+
+  if (goal_handle_->is_canceling()) {
+    auto result = std::make_shared<Calibrate::Result>();
+    result->success = false;
+    result->message = "Calibration cancelled";
+    goal_handle_->canceled(result);
+    collected_positions_.clear();
+    collected_orientations_.clear();
+    is_collecting_ = false;
+    RCLCPP_INFO(get_logger(), "Calibration cancelled");
     return;
   }
 
@@ -91,29 +106,44 @@ void CalibrationBroadcasterNode::markerPoseCallback(
     get_logger(), "Collected sample %zu/%d", collected_positions_.size(),
     config_.num_samples);
 
+  auto feedback = std::make_shared<Calibrate::Feedback>();
+  feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
+  feedback->samples_total = static_cast<uint32_t>(config_.num_samples);
+  goal_handle_->publish_feedback(feedback);
+
   if (static_cast<int>(collected_positions_.size()) >= config_.num_samples) {
     finishCalibration();
   }
 }
 
-void CalibrationBroadcasterNode::handleStartCalibration(
-  const std::shared_ptr<std_srvs::srv::Trigger::Request>/*request*/,
-  std::shared_ptr<std_srvs::srv::Trigger::Response> response)
+rclcpp_action::GoalResponse CalibrationBroadcasterNode::handleGoal(
+  const rclcpp_action::GoalUUID &/*uuid*/,
+  std::shared_ptr<const Calibrate::Goal>/*goal*/)
 {
   if (is_collecting_) {
-    response->success = false;
-    response->message = "Calibration already in progress";
-    return;
+    RCLCPP_WARN(get_logger(), "Rejecting ~/calibrate goal — calibration already in progress");
+    return rclcpp_action::GoalResponse::REJECT;
   }
+  return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+}
 
+rclcpp_action::CancelResponse CalibrationBroadcasterNode::handleCancel(
+  const std::shared_ptr<GoalHandleCalibrate>/*goal_handle*/)
+{
+  RCLCPP_INFO(get_logger(), "Cancelling ~/calibrate goal");
+  return rclcpp_action::CancelResponse::ACCEPT;
+}
+
+void CalibrationBroadcasterNode::handleAccepted(
+  const std::shared_ptr<GoalHandleCalibrate> goal_handle)
+{
+  goal_handle_ = goal_handle;
   collected_positions_.clear();
   collected_orientations_.clear();
   is_collecting_ = true;
 
-  response->success = true;
-  response->message = "Calibration started — collecting " +
-    std::to_string(config_.num_samples) + " samples";
-  RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+  RCLCPP_INFO(
+    get_logger(), "Calibration started — collecting %d samples", config_.num_samples);
 }
 
 void CalibrationBroadcasterNode::finishCalibration()
@@ -148,6 +178,14 @@ void CalibrationBroadcasterNode::finishCalibration()
     config_.known_chain_frame.c_str(), broadcast_tf.child_frame_id.c_str(),
     collected_positions_.size(), orientation_result.max_spread_deg,
     orientation_result.mean_spread_deg);
+
+  auto result = std::make_shared<Calibrate::Result>();
+  result->success = true;
+  result->message = "Broadcasting static TF '" + config_.known_chain_frame + "' -> '" +
+    broadcast_tf.child_frame_id + "'";
+  result->max_spread_deg = orientation_result.max_spread_deg;
+  result->mean_spread_deg = orientation_result.mean_spread_deg;
+  goal_handle_->succeed(result);
 
   collected_positions_.clear();
   collected_orientations_.clear();

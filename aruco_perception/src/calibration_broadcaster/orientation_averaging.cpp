@@ -42,7 +42,11 @@ tf2::Quaternion sumNormalize(const std::vector<tf2::Quaternion> & samples)
 
   for (tf2::Quaternion sample : samples) {
     if (sample.dot(reference) < 0.0) {
-      sample = -sample;
+      // Component-wise negation instead of unary operator- (which is
+      // ambiguous against btQuaternion's inherited operator- overloads):
+      // flips sample to the same hemisphere as reference, since q and -q
+      // represent the same rotation but would sum destructively otherwise.
+      sample.setValue(-sample.x(), -sample.y(), -sample.z(), -sample.w());
     }
     sum += sample;
   }

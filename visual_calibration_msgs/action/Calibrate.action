@@ -1,0 +1,16 @@
+# Goal: start N-sample calibration collection (see
+# CalibrationBroadcasterConfig::num_samples for the default N — this is
+# empty for now since overriding N per-call isn't needed yet, matching the
+# project's convention of tuning via YAML params, not per-call args).
+---
+# Result: final status once collection finishes (success) or is aborted.
+# The computed transform itself is not duplicated here — it's already
+# broadcast on /tf by calibration_broadcaster_node; read it from there.
+bool success
+string message
+float64 max_spread_deg
+float64 mean_spread_deg
+---
+# Feedback: published after each accepted sample.
+uint32 samples_collected
+uint32 samples_total
