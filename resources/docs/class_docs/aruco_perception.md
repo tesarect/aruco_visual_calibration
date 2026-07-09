@@ -7,6 +7,11 @@ Classes documented here: `ArucoDetectorNode`, `ImageSubscriberNode`,
 `orientation_averaging.hpp`, covered under their own section since they're
 not a class.
 
+Per-parameter YAML references:
+[image_subscriber_sim.md](./image_subscriber_sim.md),
+[aruco_detector_sim.md](./aruco_detector_sim.md),
+[calibration_broadcaster_sim.md](./calibration_broadcaster_sim.md).
+
 ---
 
 ## ImageSubscriberNode
@@ -33,7 +38,8 @@ classDiagram
 Plumbing-only smoke-test node: subscribes to the camera's image and
 camera_info topics and logs that data is arriving, via `cv_bridge`. No
 ArUco detection here — it exists to confirm the topics/conversion work
-before `ArucoDetectorNode` adds vision logic on top.
+before `ArucoDetectorNode` adds vision logic on top. Parameters:
+[image_subscriber_sim.md](./image_subscriber_sim.md).
 
 ### ImageSubscriberNode
 
@@ -97,6 +103,7 @@ feed and publishes its pose (camera optical frame → marker) as
 `CalibrationBroadcasterNode`'s job. Uses OpenCV's older free-function ArUco
 API (matching what ships with ROS 2 Humble) rather than the newer
 `ArucoDetector` class, to avoid conflicting with `cv_bridge`'s OpenCV ABI.
+Parameters: [aruco_detector_sim.md](./aruco_detector_sim.md).
 
 ### dictionaryFromName
 
@@ -228,12 +235,13 @@ classDiagram
     CalibrationBroadcasterNode ..> OrientationAveragingMethod : uses
 ```
 
-Orchestrates the whole calibration run as a `~/calibrate` action server. For
-each waypoint, it calls `trajectory_planner`'s `~/trace_path` with just that
-one pose (blocking until the arm is confirmed settled there), waits for a
-*fresh* marker detection published after that settle point, and takes
-exactly one sample from it. `trajectory_planner` itself is never told
-calibration exists — it only ever sees ordinary `~/trace_path` /
+Orchestrates the whole calibration run as a `~/calibrate` action server.
+Parameters: [calibration_broadcaster_sim.md](./calibration_broadcaster_sim.md).
+For each waypoint, it calls `trajectory_planner`'s `~/trace_path` with just
+that one pose (blocking until the arm is confirmed settled there), waits
+for a *fresh* marker detection published after that settle point, and
+takes exactly one sample from it. `trajectory_planner` itself is never
+told calibration exists — it only ever sees ordinary `~/trace_path` /
 `~/get_polygon_waypoints` calls, so all calibration-specific logic (waypoint
 iteration, sample timing, averaging, broadcasting) lives entirely in this
 class.

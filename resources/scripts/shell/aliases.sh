@@ -33,11 +33,16 @@ customkill() {
         [main1tmux]='tmux kill-session -t main1_term'
     )
 
-    if [[ -n "${commands[$key]}" ]]; then
+    if [[ "$key" == "all" ]]; then
+        for target_key in "${!commands[@]}"; do
+            echo "Killing: $target_key"
+            eval "${commands[$target_key]}"
+        done
+    elif [[ -n "${commands[$key]}" ]]; then
         eval "${commands[$key]}"
     else
         echo "Unknown target: $key"
-        echo "Available: ${!commands[*]}"
+        echo "Available: ${!commands[*]} all"
         return 1
     fi
 }
@@ -131,6 +136,15 @@ startcalibration() {
         visual_calibration_msgs/action/Calibrate {} --feedback
 }
 
+# Sim-only accuracy check: compares calibration_broadcaster_node's
+# broadcast TF against sim's own ground-truth camera TF. Run once
+# startcalibration has finished (a static TF, once broadcast, stays in
+# the tree — no need to re-run calibration first if it already succeeded).
+validatecalibrationsim() {
+    source ~/ros2_ws/install/setup.bash
+    ros2 run calibration_validation validate_calibration_sim.py
+}
+
 vcpkgbuild() {
     local pkg="${1}"
     cd ~/ros2_ws || return
@@ -147,13 +161,13 @@ vcpkgbuildsymlink() {
 
 vcbuild() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation
     source install/setup.bash
 }
 
 vcbuildsymlink() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception --symlink-install
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation --symlink-install
     source install/setup.bash
 }
 
@@ -163,13 +177,15 @@ vccleanbuild() {
     rm -rf build/aruco_moveit_config \
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
-        build/aruco_perception
+        build/aruco_perception \
+        build/calibration_validation
     rm -rf install/aruco_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
-        install/aruco_perception
+        install/aruco_perception \
+        install/calibration_validation
 
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation
     source install/setup.bash
 }
 
@@ -179,13 +195,15 @@ vccleanbuildsymlink() {
     rm -rf build/aruco_moveit_config \
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
-        build/aruco_perception
+        build/aruco_perception \
+        build/calibration_validation
     rm -rf install/aruco_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
-        install/aruco_perception
+        install/aruco_perception \
+        install/calibration_validation
 
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception --symlink-install
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation --symlink-install
     source install/setup.bash
 }
 
@@ -198,4 +216,10 @@ allcleanbuild() {
 
     colcon build
     source install/setup.bash
+}
+
+cleanlogs() {
+    cd ~/ros2_ws || return
+    
+    rm -rf log/
 }

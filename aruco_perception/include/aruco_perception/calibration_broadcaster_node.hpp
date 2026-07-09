@@ -45,6 +45,16 @@ struct CalibrationBroadcasterConfig
   /// TF frame at the end of the already-known chain, matching the physical
   /// marker's mount (e.g. "rg2_gripper_aruco_link").
   std::string marker_frame;
+  /// Appended to the detector's camera frame_id to form the broadcast TF's
+  /// child_frame_id (e.g. "wrist_rgbd_camera_depth_optical_frame" becomes
+  /// "..._calibrated"). Required: broadcasting under the exact same name
+  /// as an existing URDF-declared frame would conflict with it in the TF
+  /// tree (two disagreeing publishers for one frame) — this keeps our
+  /// computed result distinct from any physically-declared camera frame,
+  /// in both sim (where the URDF frame is sim's ground truth) and real
+  /// (where it just avoids colliding with whatever frame name the real
+  /// camera driver publishes, if any).
+  std::string broadcast_frame_suffix = "_calibrated";
   /// Number of samples to average before broadcasting — one sample is
   /// taken per waypoint visited, so this many waypoints get requested
   /// from trajectory_planner (wrapping around its polygon if num_samples

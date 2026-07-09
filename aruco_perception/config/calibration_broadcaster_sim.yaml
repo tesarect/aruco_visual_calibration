@@ -7,6 +7,12 @@ calibration_broadcaster_node:
     marker_pose_topic: "/aruco_perception/marker_pose"
     known_chain_frame: "base_link"
     marker_frame: "rg2_gripper_aruco_link"
+    # Appended to the detector's camera frame_id to form the broadcast TF's
+    # child_frame_id, e.g. "wrist_rgbd_camera_depth_optical_frame" becomes
+    # "wrist_rgbd_camera_depth_optical_frame_calibrated" — required so our
+    # computed result never collides with the URDF-declared frame of the
+    # same base name already in the TF tree (sim's ground truth, in this case).
+    broadcast_frame_suffix: "_calibrated"
     num_samples: 10
     # This node orchestrates trajectory_planner directly (fetches waypoints
     # via ~/get_polygon_waypoints, moves one at a time via ~/trace_path,

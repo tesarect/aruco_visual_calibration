@@ -157,5 +157,8 @@ differently once tested):
 spread numbers only tell you the ten measurements agreed with each other —
 they say nothing about whether they agree with the *true* camera position.
 The real accuracy check is comparing the broadcast TF against simulation's
-own ground-truth TF (`base_link → wrist_rgbd_camera_link`), which is still
-an open item — see `progress.md`'s Open Verification Items.
+own ground-truth TF (`base_link → wrist_rgbd_camera_depth_optical_frame`) —
+in simulation, this is now automated by `calibration_validation`'s
+`validate_calibration_sim.py`, which logs a position/orientation error and a
+GOOD/CHECK/BAD verdict once both TFs are available. See
+[calibration_validation.md](./calibration_validation.md).

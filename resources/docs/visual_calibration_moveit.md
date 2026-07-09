@@ -14,12 +14,14 @@ of the Starbots Cafeteria scene so planning avoids known obstacles.
 ```mermaid
 flowchart LR
     subgraph Clients
-        CALL_PATH["~/trace_path\n(explicit waypoint list)"]
-        CALL_POLY["~/trace_polygon\n(auto-generated spread)"]
+        CALL_PATH["~/trace_path\n(explicit waypoint list,\nplanning_mode per call)"]
+        CALL_POLY["~/trace_polygon\n(auto-generated spread,\nfixed planning_mode)"]
+        CALL_GETPOLY["~/get_polygon_waypoints\n(read-only, no motion)"]
     end
     TF["/tf: camera_frame\nin planning frame"] --> TP["trajectory_planner\n(TrajectoryPlanner)"]
     CALL_PATH --> TP
     CALL_POLY --> TP
+    CALL_GETPOLY --> TP
     TP -->|setEndEffectorLink + setPoseTarget,\nplan + execute| MGI["MoveGroupInterface"]
     MGI --> ARM["UR3e arm motion"]
 
@@ -53,12 +55,25 @@ Wraps a single `MoveGroupInterface` behind two services:
 
 - **`~/trace_path`** (`visual_calibration_msgs/TracePath`) — executes an
   explicit, ordered list of waypoint poses, planning and executing to each
-  one in turn and stopping at the first failure.
+  one in turn and stopping at the first failure. Each request also carries
+  a `planning_mode` field — `PLANNING_MODE_CARTESIAN` (the default:
+  straight-line, via `planAndExecuteCartesian()`, can fail partway near
+  limits/obstacles) or `PLANNING_MODE_JOINT_SPACE` (free-space, via
+  `planAndExecute()`, more robust but no straight-line guarantee).
 - **`~/trace_polygon`** (`std_srvs/Trigger`) — computes a polygon of
   waypoints around a "standoff" pose positioned `standoff_m` in front of a
   configured `camera_frame` (looked up from `/tf` in the planning frame),
   facing back toward the camera per `facing_rpy_rad`, then traces them via
-  the same waypoint-execution logic as `~/trace_path`.
+  the same waypoint-execution logic as `~/trace_path`. Since `Trigger` has
+  no request fields, the planning mode for this call is fixed at startup by
+  the `polygon_default_planning_mode` parameter instead of being chosen
+  per-call.
+- **`~/get_polygon_waypoints`** (`visual_calibration_msgs/GetPolygonWaypoints`)
+  — computes and returns the same polygon of waypoints as `~/trace_polygon`,
+  but read-only: the arm never moves. This is what
+  `calibration_broadcaster_node` calls once per `~/calibrate` goal so it can
+  drive the waypoints itself, one at a time, via `~/trace_path` — see
+  [aruco_perception.md](./aruco_perception.md).
 
 Both services plan against a configurable `end_effector_frame` rather than
 MoveIt's default end-effector link: every call to `planAndExecute` is

@@ -97,6 +97,14 @@ summarized here:
    available from the arm's own joint states), and chains the two into one
    sample of `known_chain_frame → camera`.
 
+Each `~/trace_path` call (and `calibration_broadcaster_node`'s own
+`planning_mode` parameter feeding it) selects `TracePath`'s
+`planning_mode` field — `cartesian` (straight-line, can fail partway near
+limits/obstacles) or `joint_space` (free-space, more robust, no
+straight-line guarantee) — see
+[visual_calibration_moveit.md](./visual_calibration_moveit.md) for how
+`trajectory_planner` executes each mode.
+
 This replaced an earlier passive-timer design (accept whatever arrived every
 `min_sample_interval_sec`, with no awareness of whether the arm was actually
 still moving) that produced motion-blur-corrupted samples — see
@@ -130,7 +138,12 @@ parameter interface:
   `std::invalid_argument`.
 
 The averaged position and orientation are broadcast as a static TF from
-`known_chain_frame` to the marker's own detected `frame_id`, and the action
+`known_chain_frame` to the detector's own camera `frame_id` with
+`broadcast_frame_suffix` appended (e.g.
+`wrist_rgbd_camera_depth_optical_frame_calibrated`) — never the bare
+detector `frame_id` itself, since in simulation that name is already taken
+by the URDF-declared ground-truth frame, and broadcasting under the same
+name would put two disagreeing publishers on one TF frame. The action
 result reports `max_spread_deg`/`mean_spread_deg` — the angular deviation of
 each sample's orientation from the final average — as a quality signal for
 how trustworthy that average is, independent of which averaging method

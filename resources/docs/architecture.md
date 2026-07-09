@@ -19,8 +19,9 @@ visual_calibration/
 │   ├── src/trajectory_planner/   # Services to plan/execute moves relative to a TF frame
 │   └── src/mtc_trajectory/       # MoveIt Task Constructor node; see visual_calibration_moveit.md
 ├── visual_calibration_msgs/     # Custom action/srv definitions shared by the above
-│                                   (Calibrate.action, TracePath.srv)
+│                                   (Calibrate.action, TracePath.srv, GetPolygonWaypoints.srv)
 ├── aruco_moveit_config/         # Project's MoveIt2 config for UR3e + RG2 gripper
+├── calibration_validation/      # Sim-only node: broadcast TF vs. ground-truth TF accuracy check
 └── resources/
     ├── docs/                    # This documentation set
     ├── info/                    # Captured TF trees, topic lists, observations (sim vs. real)
@@ -28,9 +29,13 @@ visual_calibration/
 ```
 
 Exposing control of the calibration pipeline via a web application is part of
-this project's overall goal, but no web app code, server, or frontend exists
-anywhere in the repository — the control surface for the pipeline described
-below is not represented by any package, node, or launch file at this time.
+this project's overall goal. That web dashboard (`webpage_ws/`, a separate
+npm-managed React app) is developed outside this workspace today and is not
+yet a package under `ros2_ws/src/visual_calibration/` — it is expected to be
+relocated here later. Until that happens, the control surface for the
+pipeline described below is reached the same way any other ROS 2 client
+would reach it (CLI, `rosbridge`, etc.), not through any web-app-specific
+package, node, or launch file living in this directory.
 
 ## Dependency on the wider workspace
 
@@ -55,15 +60,15 @@ below is not represented by any package, node, or launch file at this time.
 ## Working / flow
 
 The diagram below covers `aruco_perception` detecting the marker and
-chaining TFs, and `trajectory_planner` executing calibration-sampling and
-validation moves.
+chaining TFs, `trajectory_planner` executing calibration-sampling and
+validation moves, and `calibration_validation`'s automated accuracy check.
 
 ```mermaid
 flowchart TD
     subgraph Sim["Gazebo Sim (Starbots Cafeteria)"]
         CAM["/wrist_rgbd_depth_sensor/image_raw + camera_info"]
         TF_KNOWN["/tf: base_link -> ... -> rg2_gripper_aruco_link\n(known from joint states)"]
-        TF_GT["/tf: base_link -> wrist_rgbd_camera_link\n(ground truth, sim only)"]
+        TF_GT["/tf: base_link -> wrist_rgbd_camera_depth_optical_frame\n(ground truth, sim only)"]
     end
 
     subgraph AP["aruco_perception"]
@@ -79,16 +84,18 @@ flowchart TD
     CAM -->|image, camera_info| DET
     DET -->|"/aruco_perception/marker_pose\n(camera -> marker)"| CB
     TF_KNOWN -->|"lookupTransform\nbase_link -> rg2_gripper_aruco_link"| CB
-    CB -->|"broadcasts static TF\nbase_link -> camera\n(N samples, position + orientation averaged)"| TF_OUT["/tf: base_link -> camera (computed)"]
+    CB -->|"broadcasts static TF\nbase_link -> camera_frame_calibrated\n(N samples, position + orientation averaged)"| TF_OUT["/tf: base_link -> ..._calibrated\n(computed)"]
 
     CB -->|"~/get_polygon_waypoints (read-only),\nthen ~/trace_path per waypoint\n(blocks until settled)"| TP
     TP -.->|"lookupTransform camera_frame\nin planning frame"| TF_OUT
     TP -->|MoveGroupInterface plan+execute| ARM["UR3e arm motion"]
     PSS -->|collision objects| ARM
 
-    TF_OUT -.->|compare| TF_GT
-    TF_GT -.->|accuracy check, sim only| VALIDATE["Validation: computed vs. ground-truth TF"]
-    TF_OUT -.-> VALIDATE
+    subgraph CV["calibration_validation"]
+        VALIDATE["validate_calibration_sim.py\n(one-shot position + orientation\nerror vs. ground truth)"]
+    end
+    TF_OUT --> VALIDATE
+    TF_GT --> VALIDATE
 
     ARM -->|"settled pose triggers\na fresh marker detection"| DET
 ```
@@ -119,10 +126,12 @@ Flow narrative:
    samples across several physically distinct poses cancels both per-frame
    sensor noise and angle-dependent systematic error, not just noise from
    repeated shots at one fixed pose.
-5. In simulation, the computed `base_link → camera` TF can be compared against
-   Gazebo's ground-truth `base_link → wrist_rgbd_camera_link` TF to evaluate
-   accuracy — this comparison is a manual/scripted check against `/tf`, not an
-   automated node in the current codebase.
+5. In simulation, `calibration_validation`'s `validate_calibration_sim.py`
+   node automatically compares the computed `base_link → camera_..._calibrated`
+   TF against Gazebo's ground-truth `base_link → wrist_rgbd_camera_depth_optical_frame`
+   TF, logging a position error (cm) and orientation error (deg) with a
+   GOOD/CHECK/BAD verdict — see
+   [calibration_validation.md](./calibration_validation.md).
 6. `planning_scene_setup` runs independently to keep MoveIt aware of cafeteria
    obstacles (coffee machine, cupholder, countertop, wall) during any of the
    above arm motion.

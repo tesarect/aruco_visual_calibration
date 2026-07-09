@@ -10,6 +10,10 @@ Not documented: `MtcTrajectory` — a disabled stub (MoveIt Task Constructor
 build is unavailable upstream, see `README.md`'s known-limitation note), not
 real working code.
 
+Per-parameter YAML references:
+[scene_objects.md](./scene_objects.md),
+[trajectory_planner.md](./trajectory_planner.md).
+
 ---
 
 ## PlanningSceneSetup
@@ -32,7 +36,7 @@ classDiagram
 
 Publishes the cafeteria's static obstacles (coffee machine, cupholder,
 countertop, wall) into the MoveIt2 planning scene, so trajectory planning
-knows to avoid them.
+knows to avoid them. Parameters: [scene_objects.md](./scene_objects.md).
 
 ### PlanningSceneSetup
 
@@ -148,6 +152,7 @@ classDiagram
 Drives the arm via MoveIt2's `MoveGroupInterface`: plans and executes moves
 to a target pose, either as single shots or as a sequence of waypoints. Has
 no awareness of calibration — it's a plain mover other nodes call into.
+Parameters: [trajectory_planner.md](./trajectory_planner.md).
 
 ### TrajectoryPlanner
 

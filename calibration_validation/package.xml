@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>calibration_validation</name>
+  <version>0.0.0</version>
+  <description>Validates the visual calibration pipeline's output. Today: compares calibration_broadcaster_node's broadcast TF against simulation's own ground-truth TF (sim-only — no ground truth exists on the real robot). Later: Task 3's plan+execute trajectory verification (C++/MoveIt), once that work starts.</description>
+  <maintainer email="karthikn.balasubramanian@gmail.com">rosman</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf_transformations</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

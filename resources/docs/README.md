@@ -23,11 +23,11 @@ ArUco marker rigidly mounted on the arm's own end effector — and letting the
 camera work out where it is relative to the robot from that.
 
 **Why simulation first:** in the Starbots Cafeteria Gazebo simulation, Gazebo
-already publishes `base_link → wrist_rgbd_camera_link` as ground truth
-(it placed the camera model itself). The real robot has no such ground truth.
-Simulation is therefore used to validate the calibration pipeline's computed
-transform against a known-correct answer before ever trusting it on real
-hardware.
+already publishes `base_link → wrist_rgbd_camera_depth_optical_frame` as
+ground truth (it placed the camera model itself). The real robot has no such
+ground truth. Simulation is therefore used to validate the calibration
+pipeline's computed transform against a known-correct answer before ever
+trusting it on real hardware.
 
 ## Table of contents
 
@@ -46,6 +46,9 @@ hardware.
 - [aruco_moveit_config](./aruco_moveit_config.md) — this project's MoveIt2
   config for the UR3e + RG2 gripper, and specifically the one deliberate
   change made to it (the `tip_link` change in the SRDF).
+- [calibration_validation](./calibration_validation.md) — the sim-only node
+  that automatically checks the broadcast calibration TF against
+  simulation's own ground-truth camera TF.
 
 ## Class-level docs
 

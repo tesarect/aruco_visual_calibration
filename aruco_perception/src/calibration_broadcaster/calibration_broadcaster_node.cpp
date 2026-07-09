@@ -273,7 +273,12 @@ void CalibrationBroadcasterNode::finishCalibration(
   geometry_msgs::msg::TransformStamped broadcast_tf;
   broadcast_tf.header.stamp = get_clock()->now();
   broadcast_tf.header.frame_id = config_.known_chain_frame;
-  broadcast_tf.child_frame_id = last_sample_.header.frame_id;
+  // Suffixed, not the detector's raw frame_id: broadcasting under the
+  // exact same name as an existing URDF-declared frame (e.g. sim's
+  // wrist_rgbd_camera_depth_optical_frame) would conflict with it in the
+  // TF tree — two disagreeing publishers for one frame. See
+  // CalibrationBroadcasterConfig::broadcast_frame_suffix.
+  broadcast_tf.child_frame_id = last_sample_.header.frame_id + config_.broadcast_frame_suffix;
   broadcast_tf.transform.translation = average_position;
   broadcast_tf.transform.rotation = tf2::toMsg(orientation_result.averaged);
 
@@ -305,6 +310,7 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
   config.marker_pose_topic = get_parameter("marker_pose_topic").as_string();
   config.known_chain_frame = get_parameter("known_chain_frame").as_string();
   config.marker_frame = get_parameter("marker_frame").as_string();
+  config.broadcast_frame_suffix = get_parameter("broadcast_frame_suffix").as_string();
   config.num_samples = static_cast<int>(get_parameter("num_samples").as_int());
   config.sample_wait_timeout_sec = get_parameter("sample_wait_timeout_sec").as_double();
 
