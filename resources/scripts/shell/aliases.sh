@@ -109,6 +109,13 @@ startcalibrationbroadcaster() {
         --params-file ~/ros2_ws/src/visual_calibration/aruco_perception/config/calibration_broadcaster_"$env".yaml
 }
 
+# Moves through trajectory_planner's whole polygon in one call — useful
+# standalone (e.g. to sanity-check the arm actually moves/reaches all
+# corners) but NOT used by calibration anymore: calibration_broadcaster_node
+# now orchestrates trajectory_planner itself, one waypoint at a time, via
+# ~/get_polygon_waypoints + ~/trace_path (see calibration_broadcaster_node.hpp) —
+# so trace_polygon's single blocking call (no pause between corners for
+# sampling) is no longer in that loop.
 tracepolygon() {
     ros2 service call /trajectory_planner/trace_polygon std_srvs/srv/Trigger {}
 }
@@ -116,31 +123,12 @@ tracepolygon() {
 # Sends the ~/calibrate action goal and blocks, printing live feedback
 # (samples_collected/samples_total) until the action completes — includes
 # the final orientation spread (max/mean degrees) in the result.
+# calibration_broadcaster_node drives the whole sequence itself (fetch
+# waypoints, move one at a time, wait for the arm to settle, sample) — no
+# separate polygon-tracing loop needed alongside this anymore.
 startcalibration() {
     ros2 action send_goal /calibration_broadcaster_node/calibrate \
         visual_calibration_msgs/action/Calibrate {} --feedback
-}
-
-# Runs startcalibration in the background, then repeatedly calls
-# tracepolygon (spreading samples across several arm poses) until the
-# calibrate action finishes — so you don't have to manually call
-# tracepolygon the right number of times. max_polygon_calls bounds the
-# loop in case calibration never completes (e.g. marker stays out of
-# view) — each trace_polygon visits polygon_num_corners waypoints, so
-# this should comfortably exceed num_samples / polygon_num_corners.
-runcalibration() {
-    local max_polygon_calls="${1:-10}"
-
-    startcalibration &
-    local calibration_pid=$!
-
-    local i=0
-    while kill -0 "$calibration_pid" 2>/dev/null && [ "$i" -lt "$max_polygon_calls" ]; do
-        tracepolygon
-        i=$((i + 1))
-    done
-
-    wait "$calibration_pid"
 }
 
 vcpkgbuild() {

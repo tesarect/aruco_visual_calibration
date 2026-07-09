@@ -1,0 +1,11 @@
+# Read-only: computes and returns the polygon waypoints around the
+# standoff pose (see TrajectoryPlanner::polygonWaypointsAroundStandoff)
+# WITHOUT moving the arm. Lets a caller (e.g. calibration_broadcaster_node)
+# drive the waypoints itself one at a time via TracePath.srv, sampling
+# between moves, without duplicating trajectory_planner's standoff/polygon
+# geometry math or config (camera_frame, standoff_m, facing_rpy_rad,
+# polygon_num_corners, polygon_radius_m all stay owned by trajectory_planner).
+---
+bool success
+string message
+geometry_msgs/Pose[] waypoints

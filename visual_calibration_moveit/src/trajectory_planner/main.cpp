@@ -19,7 +19,12 @@ int main(int argc, char ** argv)
   visual_calibration_moveit::TrajectoryPlanner trajectory_planner(node);
   trajectory_planner.planAndExecuteInFrontOf();
 
-  rclcpp::shutdown();
+  // Keep the node alive after the initial move: ~/trace_path and
+  // ~/trace_polygon (see TrajectoryPlanner's constructor) are services,
+  // which need a live node to be callable at all. Exiting here right
+  // after the first move (the previous behavior) meant those services
+  // were never actually reachable.
   executor_thread.join();
+  rclcpp::shutdown();
   return 0;
 }

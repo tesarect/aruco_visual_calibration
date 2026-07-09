@@ -2,6 +2,17 @@
 # once all waypoints are visited, or on first planning/execution failure).
 # Poses are in the MoveGroupInterface's planning frame (see TrajectoryPlanner).
 geometry_msgs/Pose[] waypoints
+
+# Which MoveIt planning strategy to use for each waypoint-to-waypoint move.
+# PLANNING_MODE_CARTESIAN is the default: a straight-line interpolated
+# path between waypoints, useful for calibration (predictable geometry)
+# but can fail partway (collision/IK/joint-limit) — see TrajectoryPlanner's
+# planAndExecuteCartesian(). PLANNING_MODE_JOINT_SPACE is the older,
+# more-robust-but-unpredictable-path behavior (MoveGroupInterface::plan(),
+# no straight-line guarantee).
+uint8 PLANNING_MODE_JOINT_SPACE = 0
+uint8 PLANNING_MODE_CARTESIAN = 1
+uint8 planning_mode 1
 ---
 bool success
 string message

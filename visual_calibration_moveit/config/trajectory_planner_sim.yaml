@@ -26,3 +26,10 @@ trajectory_planner:
     # Keep radius_m small relative to max_reach_m above.
     polygon_num_corners: 4
     polygon_radius_m: 0.05
+    # Default planning strategy for ~/trace_polygon (a plain Trigger, no
+    # per-call field). ~/trace_path takes planning_mode explicitly per
+    # call instead — see TracePath.srv. "cartesian" = straight-line
+    # interpolated path (predictable geometry, can fail partway near
+    # limits/obstacles); "joint_space" = free-space planning (more robust,
+    # no straight-line guarantee).
+    polygon_default_planning_mode: "cartesian"

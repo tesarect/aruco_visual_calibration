@@ -12,6 +12,7 @@
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
 #include <visual_calibration_msgs/srv/trace_path.hpp>
 
 namespace visual_calibration_moveit
@@ -71,6 +72,13 @@ struct PolygonConfig
   /// Distance from center to each corner, in the standoff pose's local X/Y
   /// plane. Keep small relative to StandoffConfig::max_reach_m.
   double radius_m = 0.05;
+  /// Default planning_mode used by ~/trace_polygon (a plain Trigger, so it
+  /// has no per-call field for this) — one of
+  /// TracePath::Request::PLANNING_MODE_JOINT_SPACE/PLANNING_MODE_CARTESIAN.
+  /// Callers that need to choose per-call (e.g. calibration_broadcaster_node)
+  /// use ~/trace_path directly, which takes planning_mode as a request field.
+  uint8_t default_planning_mode =
+    visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN;
 };
 
 /// Trajectory generation via MoveGroupInterface: set a target pose (e.g.
@@ -88,9 +96,27 @@ public:
     const std::string & planning_group = "ur_manipulator");
 
   /// Plan and execute a trajectory to the given target pose
-  /// (in the MoveGroupInterface's planning frame). Returns true on
-  /// successful plan + execute.
+  /// (in the MoveGroupInterface's planning frame), via free-space
+  /// joint-space planning (MoveGroupInterface::plan()/execute()) — no
+  /// straight-line guarantee on the path shape, but generally more likely
+  /// to succeed than planAndExecuteCartesian() near limits/obstacles.
+  /// Returns true on successful plan + execute.
   bool planAndExecute(const geometry_msgs::msg::Pose & target_pose);
+
+  /// Plan and execute a straight-line Cartesian path from the current pose
+  /// to target_pose, via MoveGroupInterface::computeCartesianPath().
+  /// Collision-aware (checked against the planning scene, same as
+  /// planAndExecute). Fails (returns false, does not execute anything) if
+  /// the achieved fraction is below min_fraction — executing a partial
+  /// Cartesian path would stop short of target_pose, at an undefined
+  /// intermediate point, which is unsafe to treat as "the waypoint" for
+  /// calibration sampling. No automatic fallback to joint-space planning
+  /// on an incomplete path (see progress.md's Feature Additions for that
+  /// as a possible future addition) — callers needing that today should
+  /// retry via planAndExecute() themselves.
+  bool planAndExecuteCartesian(
+    const geometry_msgs::msg::Pose & target_pose,
+    double min_fraction = 0.95);
 
   /// Looks up config.camera_frame, computes a pose config.standoff_m in
   /// front of it (see offsetInFrontOf), then plans + executes so
@@ -111,12 +137,27 @@ public:
   bool planAndExecuteInFrontOf(
     rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0));
 
-  /// Visits each pose in waypoints in order (plan + execute per waypoint),
-  /// stopping at the first failure. Used to spread calibration samples
-  /// across several arm poses — see polygonWaypointsAroundStandoff for the
-  /// concrete shape used today. Returns true only if every waypoint
-  /// succeeded.
-  bool tracePath(const std::vector<geometry_msgs::msg::Pose> & waypoints);
+  /// Visits each pose in waypoints in order, stopping at the first
+  /// failure. planning_mode selects planAndExecute() (joint-space) or
+  /// planAndExecuteCartesian() (straight-line) for every waypoint-to-
+  /// waypoint move — see TracePath::Request::PLANNING_MODE_*. Used to
+  /// spread calibration samples across several arm poses — see
+  /// polygonWaypointsAroundStandoff for the concrete shape used today.
+  /// Returns true only if every waypoint succeeded.
+  bool tracePath(
+    const std::vector<geometry_msgs::msg::Pose> & waypoints,
+    uint8_t planning_mode =
+    visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN);
+
+  /// Computes and returns polygonWaypointsAroundStandoff's waypoints
+  /// WITHOUT moving the arm — lets a caller (e.g.
+  /// calibration_broadcaster_node) drive them one at a time itself via
+  /// ~/trace_path, without duplicating this node's standoff/polygon
+  /// geometry math or config. Returns an empty vector (and logs the
+  /// error) if the camera TF lookup fails — same failure mode as
+  /// polygonWaypointsAroundStandoff, which this wraps.
+  std::vector<geometry_msgs::msg::Pose> getPolygonWaypoints(
+    rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0)) const;
 
 private:
   /// Computes polygon_config_.num_corners waypoints forming a regular
@@ -132,16 +173,24 @@ private:
     rclcpp::Duration tf_timeout) const;
 
   /// Handles a TracePath service request by calling tracePath() with the
-  /// request's waypoints.
+  /// request's waypoints and planning_mode.
   void handleTracePath(
     const std::shared_ptr<visual_calibration_msgs::srv::TracePath::Request> request,
     std::shared_ptr<visual_calibration_msgs::srv::TracePath::Response> response);
 
   /// Handles a Trigger service request by computing
-  /// polygonWaypointsAroundStandoff and calling tracePath() with them.
+  /// polygonWaypointsAroundStandoff and calling tracePath() with them,
+  /// using polygon_config_.default_planning_mode (Trigger has no request
+  /// fields, so this can't be chosen per-call — see ~/trace_path for that).
   void handleTracePolygon(
     const std::shared_ptr<std_srvs::srv::Trigger::Request> request,
     std::shared_ptr<std_srvs::srv::Trigger::Response> response);
+
+  /// Handles a GetPolygonWaypoints service request by calling
+  /// getPolygonWaypoints() and returning the result — no motion.
+  void handleGetPolygonWaypoints(
+    const std::shared_ptr<visual_calibration_msgs::srv::GetPolygonWaypoints::Request> request,
+    std::shared_ptr<visual_calibration_msgs::srv::GetPolygonWaypoints::Response> response);
 
   /// Reads camera_frame, end_effector_frame, standoff_m, max_reach_m, and
   /// facing_rpy_rad (a 3-element array) from this node's declared
@@ -162,6 +211,8 @@ private:
   PolygonConfig polygon_config_;
   rclcpp::Service<visual_calibration_msgs::srv::TracePath>::SharedPtr trace_path_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr trace_polygon_service_;
+  rclcpp::Service<visual_calibration_msgs::srv::GetPolygonWaypoints>::SharedPtr
+    get_polygon_waypoints_service_;
 };
 
 }  // namespace visual_calibration_moveit

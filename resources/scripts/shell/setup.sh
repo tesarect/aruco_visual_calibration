@@ -24,6 +24,7 @@ echo "🔄 Updating package lists..."
 sudo apt-get update || true
 
 echo ">_ Installing Tmux..."
+sudo apt install -y xclip
 sudo apt install -y tmux
 
 echo "✅ Setup complete!"

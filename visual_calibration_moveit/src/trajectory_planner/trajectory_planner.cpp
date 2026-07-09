@@ -1,8 +1,10 @@
 #include "visual_calibration_moveit/trajectory_planner.hpp"
 
 #include <cmath>
+#include <stdexcept>
 #include <vector>
 
+#include <moveit_msgs/msg/robot_trajectory.hpp>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Vector3.h>
 #include <tf2/LinearMath/Transform.h>
@@ -63,6 +65,13 @@ TrajectoryPlanner::TrajectoryPlanner(
       &TrajectoryPlanner::handleTracePolygon, this, std::placeholders::_1,
       std::placeholders::_2));
 
+  get_polygon_waypoints_service_ =
+    node_->create_service<visual_calibration_msgs::srv::GetPolygonWaypoints>(
+    "~/get_polygon_waypoints",
+    std::bind(
+      &TrajectoryPlanner::handleGetPolygonWaypoints, this, std::placeholders::_1,
+      std::placeholders::_2));
+
   RCLCPP_INFO(
     node_->get_logger(), "trajectory_planner ready (planning group: '%s')",
     planning_group.c_str());
@@ -89,6 +98,47 @@ bool TrajectoryPlanner::planAndExecute(const geometry_msgs::msg::Pose & target_p
   }
 
   RCLCPP_INFO(node_->get_logger(), "Trajectory planned and executed successfully");
+  return true;
+}
+
+bool TrajectoryPlanner::planAndExecuteCartesian(
+  const geometry_msgs::msg::Pose & target_pose,
+  double min_fraction)
+{
+  const std::vector<geometry_msgs::msg::Pose> single_target_waypoint{target_pose};
+  moveit_msgs::msg::RobotTrajectory trajectory;
+
+  // eef_step = 0.01m: max distance between consecutive interpolated points
+  // along the line — fine enough to catch collisions/limits reliably
+  // without excessive planning cost for these short (few-cm) calibration
+  // moves. jump_threshold = 0.0 disables the jump-detection heuristic
+  // (deprecated/unreliable in recent MoveIt anyway); collision checking
+  // (the 4th positional bool, default true) stays on.
+  const double fraction = move_group_interface_.computeCartesianPath(
+    single_target_waypoint, 0.01, 0.0, trajectory);
+
+  if (fraction < min_fraction) {
+    RCLCPP_ERROR(
+      node_->get_logger(),
+      "Cartesian path only achieved %.1f%% of the straight-line path to target "
+      "(need >= %.1f%%) — refusing to execute a partial path. See "
+      "TrajectoryPlanner::planAndExecuteCartesian's doc comment.",
+      fraction * 100.0, min_fraction * 100.0);
+    return false;
+  }
+
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  plan.trajectory_ = trajectory;
+  const bool executed = static_cast<bool>(move_group_interface_.execute(plan));
+
+  if (!executed) {
+    RCLCPP_ERROR(node_->get_logger(), "Execution failed for the planned Cartesian trajectory");
+    return false;
+  }
+
+  RCLCPP_INFO(
+    node_->get_logger(), "Cartesian trajectory planned (%.1f%% achieved) and executed successfully",
+    fraction * 100.0);
   return true;
 }
 
@@ -137,13 +187,21 @@ bool TrajectoryPlanner::planAndExecuteInFrontOf(rclcpp::Duration tf_timeout)
   return planAndExecuteInFrontOf(standoff_config_, tf_timeout);
 }
 
-bool TrajectoryPlanner::tracePath(const std::vector<geometry_msgs::msg::Pose> & waypoints)
+bool TrajectoryPlanner::tracePath(
+  const std::vector<geometry_msgs::msg::Pose> & waypoints,
+  uint8_t planning_mode)
 {
   move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
 
   for (size_t i = 0; i < waypoints.size(); ++i) {
     RCLCPP_INFO(node_->get_logger(), "Tracing waypoint %zu/%zu", i + 1, waypoints.size());
-    if (!planAndExecute(waypoints[i])) {
+
+    const bool succeeded =
+      planning_mode == visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN ?
+      planAndExecuteCartesian(waypoints[i]) :
+      planAndExecute(waypoints[i]);
+
+    if (!succeeded) {
       RCLCPP_ERROR(
         node_->get_logger(), "tracePath stopped at waypoint %zu/%zu", i + 1, waypoints.size());
       return false;
@@ -208,13 +266,19 @@ std::vector<geometry_msgs::msg::Pose> TrajectoryPlanner::polygonWaypointsAroundS
   return waypoints;
 }
 
+std::vector<geometry_msgs::msg::Pose> TrajectoryPlanner::getPolygonWaypoints(
+  rclcpp::Duration tf_timeout) const
+{
+  return polygonWaypointsAroundStandoff(tf_timeout);
+}
+
 void TrajectoryPlanner::handleTracePath(
   const std::shared_ptr<visual_calibration_msgs::srv::TracePath::Request> request,
   std::shared_ptr<visual_calibration_msgs::srv::TracePath::Response> response)
 {
   const std::vector<geometry_msgs::msg::Pose> waypoints(
     request->waypoints.begin(), request->waypoints.end());
-  response->success = tracePath(waypoints);
+  response->success = tracePath(waypoints, request->planning_mode);
   response->message = response->success ?
     "Traced all waypoints successfully" : "Failed partway through tracing waypoints";
 }
@@ -232,9 +296,24 @@ void TrajectoryPlanner::handleTracePolygon(
     return;
   }
 
-  response->success = tracePath(waypoints);
+  response->success = tracePath(waypoints, polygon_config_.default_planning_mode);
   response->message = response->success ?
     "Traced polygon path successfully" : "Failed partway through tracing polygon path";
+}
+
+void TrajectoryPlanner::handleGetPolygonWaypoints(
+  const std::shared_ptr<visual_calibration_msgs::srv::GetPolygonWaypoints::Request>/*request*/,
+  std::shared_ptr<visual_calibration_msgs::srv::GetPolygonWaypoints::Response> response)
+{
+  const std::vector<geometry_msgs::msg::Pose> waypoints =
+    getPolygonWaypoints(rclcpp::Duration::from_seconds(3.0));
+
+  response->success = !waypoints.empty();
+  response->message = response->success ?
+    "Computed polygon waypoints successfully" :
+    "Could not compute polygon waypoints (see log for the error)";
+  response->waypoints = std::vector<geometry_msgs::msg::Pose>(
+    waypoints.begin(), waypoints.end());
 }
 
 StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const
@@ -257,6 +336,20 @@ PolygonConfig TrajectoryPlanner::loadPolygonConfigFromParams() const
   PolygonConfig config;
   config.num_corners = static_cast<int>(node_->get_parameter("polygon_num_corners").as_int());
   config.radius_m = node_->get_parameter("polygon_radius_m").as_double();
+
+  const std::string mode_name = node_->get_parameter("polygon_default_planning_mode").as_string();
+  if (mode_name == "cartesian") {
+    config.default_planning_mode =
+      visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN;
+  } else if (mode_name == "joint_space") {
+    config.default_planning_mode =
+      visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_JOINT_SPACE;
+  } else {
+    throw std::invalid_argument(
+            "Unknown polygon_default_planning_mode: '" + mode_name +
+            "' (expected 'cartesian' or 'joint_space')");
+  }
+
   return config;
 }
 

@@ -1,7 +1,10 @@
 #ifndef ARUCO_PERCEPTION__CALIBRATION_BROADCASTER_NODE_HPP_
 #define ARUCO_PERCEPTION__CALIBRATION_BROADCASTER_NODE_HPP_
 
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -14,6 +17,8 @@
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <visual_calibration_msgs/action/calibrate.hpp>
+#include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
+#include <visual_calibration_msgs/srv/trace_path.hpp>
 
 #include "aruco_perception/orientation_averaging.hpp"
 
@@ -40,12 +45,20 @@ struct CalibrationBroadcasterConfig
   /// TF frame at the end of the already-known chain, matching the physical
   /// marker's mount (e.g. "rg2_gripper_aruco_link").
   std::string marker_frame;
-  /// Number of samples to average before broadcasting.
+  /// Number of samples to average before broadcasting — one sample is
+  /// taken per waypoint visited, so this many waypoints get requested
+  /// from trajectory_planner (wrapping around its polygon if num_samples
+  /// exceeds the polygon's corner count).
   int num_samples = 10;
-  /// Minimum time between accepted samples — lets you move the arm/marker
-  /// between samples (e.g. via trajectory_planner's ~/trace_polygon) so
-  /// consecutive samples aren't correlated frames of a stationary pose.
-  double min_sample_interval_sec = 2.0;
+  /// How long to wait for a fresh marker_pose message (published after
+  /// the arm is confirmed settled at a waypoint — see
+  /// requestSampleAfterSettling) before giving up on that sample and
+  /// aborting the calibration run.
+  double sample_wait_timeout_sec = 5.0;
+  /// Planning mode requested on each ~/trace_path call — see
+  /// TracePath::Request::PLANNING_MODE_*.
+  uint8_t planning_mode =
+    visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN;
   /// Priority for OrientationAveragingMethod::kSumNormalize; 0 disables it.
   /// See selectAveragingMethod — lower positive number = tried first.
   int orientation_sum_normalize_priority = 1;
@@ -56,16 +69,27 @@ struct CalibrationBroadcasterConfig
   int orientation_markley_priority = 0;
 };
 
-/// Solves for the fixed transform between known_chain_frame and the
-/// camera, from N samples of (known_chain_frame -> marker_frame, from TF)
-/// chained with (camera -> marker_frame, from the detector's PoseStamped,
-/// inverted), then broadcasts it once as a static TF. Collection starts
-/// only when a ~/calibrate action goal is accepted — passive otherwise,
-/// ignoring marker_pose_topic entirely. An action (not a plain service) is
-/// used deliberately: calibration takes several seconds to minutes
-/// (depending on how quickly samples accumulate), and a future web UI
-/// needs live progress (samples_collected/samples_total feedback), not
-/// just a final result — see Calibrate.action.
+/// Orchestrates calibration: fetches waypoints from trajectory_planner
+/// (~/get_polygon_waypoints, read-only), then for each one — calls
+/// trajectory_planner's ~/trace_path with just that single waypoint
+/// (blocking until the arm is confirmed settled there), waits for a fresh
+/// marker_pose message published after that point, and takes exactly one
+/// sample from it. This replaces an earlier passive-timer design (accept
+/// whatever arrived every min_sample_interval_sec, regardless of whether
+/// the arm was mid-motion) that produced motion-blur-corrupted samples —
+/// see error-mitigation.md #19 and progress.md's Feature Additions entry
+/// on signal-based sync.
+///
+/// trajectory_planner is never told calibration exists — it only ever
+/// sees ordinary ~/trace_path/~/get_polygon_waypoints calls, so it stays a
+/// dumb mover with no calibration awareness. All orchestration logic
+/// (waypoint iteration, sample timing, averaging, broadcast) lives here.
+///
+/// Runs the whole per-goal sequence on a dedicated thread (spawned from
+/// handleAccepted), not inline in an action-server callback or the
+/// marker_pose subscription callback — both would block the executor that
+/// also needs to process the ~/trace_path service-client response and
+/// incoming marker_pose messages this loop depends on.
 ///
 /// Position: arithmetic mean of all samples. Orientation: averaged via
 /// whichever OrientationAveragingMethod selectAveragingMethod picks from
@@ -85,6 +109,8 @@ public:
 private:
   CalibrationBroadcasterConfig loadConfigFromParams() const;
 
+  /// Caches the latest message (with its receipt time) and notifies
+  /// sample_cv_ — see requestSampleAfterSettling.
   void markerPoseCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr & msg);
 
   /// Accepts a new goal unless calibration is already in progress.
@@ -92,22 +118,51 @@ private:
     const rclcpp_action::GoalUUID & uuid,
     std::shared_ptr<const Calibrate::Goal> goal);
 
-  /// Always accepts cancellation requests.
+  /// Always accepts cancellation requests — executeCalibration polls
+  /// goal_handle->is_canceling() between waypoints.
   rclcpp_action::CancelResponse handleCancel(
     const std::shared_ptr<GoalHandleCalibrate> goal_handle);
 
-  /// Stores goal_handle_ and resets collection state — the actual sample
-  /// collection happens in markerPoseCallback as marker_pose messages
-  /// arrive, not in a dedicated execution thread (no blocking work here).
+  /// Spawns a detached thread running executeCalibration(goal_handle) —
+  /// rclcpp_action requires handleAccepted to return quickly, not block.
   void handleAccepted(const std::shared_ptr<GoalHandleCalibrate> goal_handle);
+
+  /// The actual orchestration sequence, run on its own thread:
+  /// 1. Call ~/get_polygon_waypoints once.
+  /// 2. For each of config_.num_samples waypoints needed (cycling through
+  ///    the returned list if num_samples exceeds its length): call
+  ///    ~/trace_path with that single waypoint, wait for a fresh
+  ///    marker_pose (see requestSampleAfterSettling), record one sample,
+  ///    publish feedback. Aborts (goal_handle->abort) on any failure
+  ///    (waypoint fetch, trace_path, or sample-wait timeout) or on
+  ///    cancellation.
+  /// 3. On success, calls finishCalibration() to average + broadcast +
+  ///    complete the goal.
+  void executeCalibration(const std::shared_ptr<GoalHandleCalibrate> goal_handle);
+
+  /// Blocks (up to config_.sample_wait_timeout_sec) until a marker_pose
+  /// message is received whose receipt time is after `after`, then
+  /// returns it. Returns std::nullopt on timeout. This wait is what
+  /// guarantees a sample reflects the arm's settled pose — the previous
+  /// design sampled whatever the most recently cached message was,
+  /// regardless of whether it predated the settle.
+  std::optional<geometry_msgs::msg::PoseStamped> waitForFreshMarkerPose(
+    const rclcpp::Time & after);
+
+  /// Chains one fresh marker_pose (camera_frame -> marker, from the
+  /// detector) with the live known_chain_frame -> marker_frame TF into
+  /// one sample of known_chain_frame -> camera, and appends it to
+  /// collected_positions_/collected_orientations_. Returns false (logs
+  /// the error) if the TF lookup fails.
+  bool recordSample(const geometry_msgs::msg::PoseStamped & marker_pose);
 
   /// Averages collected_positions_ (arithmetic mean) and
   /// collected_orientations_ (via averaging_method_), broadcasts
   /// known_chain_frame -> the camera frame (from the most recent sample's
-  /// header.frame_id) as a static TF, and completes goal_handle_ with the
+  /// header.frame_id) as a static TF, and completes goal_handle with the
   /// result (see Calibrate.action). Logs the orientation spread metrics.
-  /// Clears both collected_ vectors and resets is_collecting_.
-  void finishCalibration();
+  /// Clears both collected_ vectors.
+  void finishCalibration(const std::shared_ptr<GoalHandleCalibrate> & goal_handle);
 
   CalibrationBroadcasterConfig config_;
   tf2_ros::Buffer tf_buffer_;
@@ -119,13 +174,17 @@ private:
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr marker_pose_sub_;
   rclcpp_action::Server<Calibrate>::SharedPtr calibrate_action_server_;
+  rclcpp::Client<visual_calibration_msgs::srv::GetPolygonWaypoints>::SharedPtr
+    get_polygon_waypoints_client_;
+  rclcpp::Client<visual_calibration_msgs::srv::TracePath>::SharedPtr trace_path_client_;
 
-  bool is_collecting_ = false;
-  /// The in-progress goal's handle — used to publish feedback per sample
-  /// and to complete with a result in finishCalibration(). Null when not
-  /// collecting.
-  std::shared_ptr<GoalHandleCalibrate> goal_handle_;
-  rclcpp::Time last_sample_time_;
+  /// Guards latest_marker_pose_/latest_marker_pose_stamp_, notified by
+  /// markerPoseCallback and waited on by waitForFreshMarkerPose.
+  std::mutex sample_mutex_;
+  std::condition_variable sample_cv_;
+  geometry_msgs::msg::PoseStamped latest_marker_pose_;
+  rclcpp::Time latest_marker_pose_stamp_;
+
   std::vector<geometry_msgs::msg::Vector3> collected_positions_;
   std::vector<tf2::Quaternion> collected_orientations_;
   /// The most recent sample's camera frame_id — carried through to the

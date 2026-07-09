@@ -8,10 +8,18 @@ calibration_broadcaster_node:
     known_chain_frame: "base_link"
     marker_frame: "rg2_gripper_aruco_link"
     num_samples: 10
-    # Gives time to move the arm/marker between samples (e.g. via
-    # trajectory_planner's ~/trace_polygon) so consecutive samples aren't
-    # correlated frames of a stationary pose.
-    min_sample_interval_sec: 2.0
+    # This node orchestrates trajectory_planner directly (fetches waypoints
+    # via ~/get_polygon_waypoints, moves one at a time via ~/trace_path,
+    # waits for a fresh marker_pose after each settled move) rather than
+    # passively collecting on a timer — see calibration_broadcaster_node.hpp.
+    # How long to wait for a fresh marker_pose after each move before
+    # aborting that sample (and the whole run) — e.g. marker out of view.
+    sample_wait_timeout_sec: 5.0
+    # Planning strategy requested on every ~/trace_path call this node
+    # makes — "cartesian" (straight-line, can fail partway near
+    # limits/obstacles) or "joint_space" (free-space, more robust, no
+    # straight-line guarantee). See TracePath.srv.
+    planning_mode: "cartesian"
     # Orientation-averaging method priority (0 = disabled, lower positive
     # number = tried first). Markley's method isn't implemented yet — leave
     # its priority at 0 until orientation_averaging.hpp adds it.
