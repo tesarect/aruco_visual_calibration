@@ -6,6 +6,7 @@
 # wait_for_node.sh (a ROS 2 node-list check, not a tmux dependency).
 
 SESSION="main1_term"
+# SESSION="Calib-Traj"
 WINDOW="calibration"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

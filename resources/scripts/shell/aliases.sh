@@ -13,6 +13,14 @@ alias pydir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/python/"
 alias viewcam="ros2 run rqt_image_view rqt_image_view /wrist_rgbd_depth_sensor/image_raw"
 alias viewoverlaycam="ros2 run rqt_image_view rqt_image_view /aruco_perception/overlay_image"
 
+alias installbase="bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup.sh"
+alias installbasereal="bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup_real.sh"
+alias installweb="bash ~/webpage_ws/setup_rosject.sh"
+alias initweb="source ~/webpage_ws/scripts/session_init.sh"
+alias statusweb="bash ~/webpage_ws/scripts/session_status.sh"
+
+alias startrosbridge="ros2 launch rosbridge_server rosbridge_websocket_launch.xml"
+
 # git
 cleanpull() {
     git reset --hard HEAD
@@ -31,6 +39,8 @@ customkill() {
         [gzclient]='pkill -f "^gzclient"'
         [basetmux]='tmux kill-session -t base_term'
         [main1tmux]='tmux kill-session -t main1_term'
+        [main2tmux]='tmux kill-session -t main2_term'
+        [main3tmux]='tmux kill-session -t main3_term'
     )
 
     if [[ "$key" == "all" ]]; then
@@ -55,6 +65,16 @@ tmuxbasesim() {
 tmuxmain1sim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
     bash ./sim_tmux_main1.sh
+}
+
+tmuxmain3sim() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./sim_tmux_main3.sh
+}
+
+tmuxmain2sim() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./sim_tmux_main2.sh
 }
 
 startsim() {
@@ -145,6 +165,28 @@ validatecalibrationsim() {
     ros2 run calibration_validation validate_calibration_sim.py
 }
 
+# Isolated YOLO venv management — see install_yolo.sh/remove_yolo.sh for
+# what these actually do and why the venv is kept fully separate from
+# ROS's system Python (cv_bridge/OpenCV 4.5.4 ABI conflict risk).
+installyolo() {
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
+}
+
+removeyolo() {
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/remove_yolo.sh
+}
+
+# Activates the YOLO venv in the current shell. Do not run ROS nodes that
+# import cv_bridge in a shell where this is active.
+yoloenv() {
+    if [ ! -d "$HOME/yolo_venv" ]; then
+        echo "No YOLO venv found — run installyolo first."
+        return 1
+    fi
+    # shellcheck disable=SC1091
+    source "$HOME/yolo_venv/bin/activate"
+}
+
 vcpkgbuild() {
     local pkg="${1}"
     cd ~/ros2_ws || return
@@ -222,4 +264,43 @@ cleanlogs() {
     cd ~/ros2_ws || return
     
     rm -rf log/
+}
+
+completesimsetup() {
+    # installbase
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup.sh
+    # installweb
+    bash ~/webpage_ws/setup_rosject.sh
+    # initweb
+    source ~/webpage_ws/scripts/session_init.sh
+    # statusweb
+    bash ~/webpage_ws/scripts/session_status.sh
+}
+
+completereaslsetup() {
+    # installbasereal
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup_real.sh
+    # installweb
+    bash ~/webpage_ws/setup_rosject.sh
+    # initweb
+    source ~/webpage_ws/scripts/session_init.sh
+    # statusweb
+    bash ~/webpage_ws/scripts/session_status.sh
+}
+
+webstatuscheck() {
+    cd ~/webpage_ws/scripts/
+    bash session_status.sh
+}
+
+srcweb() {
+    cd ~/webpage_ws/scripts/
+    source session_init.sh
+}
+
+shadcnadd() {
+    cd ~/webpage_ws/app
+    npx shadcn@latest add input
+    npm install
+    npm run build && PORT=7000 npm run preview
 }
