@@ -1,20 +1,20 @@
 #!/bin/bash
-# Same as sim_tmux_main1.sh, but tees trajectory_planner, aruco_detector_node,
+# Same as sim_tmux_trajcal.sh, but tees trajectory_planner, aruco_detector_node,
 # and calibration_broadcaster_node output into one combined log file, so
 # calibration-pipeline output can be reviewed after the fact without relying
 # on tmux pane scrollback. Does not log the base session (Gazebo, move_group,
 # rviz, planning scene, marker debugger) — that stays untouched in
 # sim_tmux_base.sh.
 
-SESSION="main1_term"
+SESSION="trajcal_term"
 WINDOW="calibration"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SHELL_DIR="$RESOURCES_DIR/shell"
 
-LOG_DIR="$RESOURCES_DIR/../log/main1"
+LOG_DIR="$RESOURCES_DIR/../log/trajcal"
 mkdir -p "$LOG_DIR"
-LOGFILE="$LOG_DIR/main1_$(date +%Y%m%d_%H%M%S).log"
+LOGFILE="$LOG_DIR/trajcal_$(date +%Y%m%d_%H%M%S).log"
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Killing existing tmux session: $SESSION"

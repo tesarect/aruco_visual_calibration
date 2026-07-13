@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
-"""Quick-and-dirty capture: saves RGB + depth frames from the real D415
-camera to disk, one file per received frame (or a fixed count).
+"""Quick-and-dirty capture: saves RGB + depth frames from the camera to
+disk, one file pair per received RGB frame (or a fixed count).
 
-Prereqs before running (see zenoh-pointcloud/README.md):
+Sim topics come straight from Gazebo (no extra setup). Real topics come
+over the Zenoh bridge — see zenoh-pointcloud/README.md — and require,
+before running this script:
     unset CYCLONEDDS_URI
     export ROS_DOMAIN_ID=1
     (Zenoh bridge running: ros2_ws/src/zenoh-pointcloud/init/rosject.sh)
 
 Usage:
-    python3 capture_real_camera.py                # save every frame until Ctrl+C
-    python3 capture_real_camera.py --count 5       # save 5 frames then exit
-    python3 capture_real_camera.py --out ~/captures --every 1.0   # 1 frame/sec
+    python3 capture_camera.py --env sim                 # save every frame until Ctrl+C
+    python3 capture_camera.py --env real --count 5       # save 5 frames then exit
+    python3 capture_camera.py --env sim --out ~/captures --every 1.0   # 1 frame/sec
 """
 
 import argparse
@@ -23,13 +25,21 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 
-RGB_TOPIC = "/D415/color/image_raw"
-DEPTH_TOPIC = "/D415/aligned_depth_to_color/image_raw"
+TOPICS = {
+    "sim": {
+        "rgb": "/wrist_rgbd_depth_sensor/image_raw",
+        "depth": "/wrist_rgbd_depth_sensor/depth/image_raw",
+    },
+    "real": {
+        "rgb": "/D415/color/image_raw",
+        "depth": "/D415/aligned_depth_to_color/image_raw",
+    },
+}
 
 
 class CameraCapture(Node):
 
-    def __init__(self, out_dir, count, every_sec):
+    def __init__(self, env, out_dir, count, every_sec):
         super().__init__("camera_capture")
         self.bridge = CvBridge()
         self.out_dir = out_dir
@@ -39,12 +49,15 @@ class CameraCapture(Node):
         self.last_save_time = 0.0
         self.latest_depth = None
 
+        rgb_topic = TOPICS[env]["rgb"]
+        depth_topic = TOPICS[env]["depth"]
+
         os.makedirs(out_dir, exist_ok=True)
 
-        self.create_subscription(Image, DEPTH_TOPIC, self.depth_cb, 10)
-        self.create_subscription(Image, RGB_TOPIC, self.rgb_cb, 10)
+        self.create_subscription(Image, depth_topic, self.depth_cb, 10)
+        self.create_subscription(Image, rgb_topic, self.rgb_cb, 10)
 
-        self.get_logger().info(f"Subscribed to {RGB_TOPIC} and {DEPTH_TOPIC}")
+        self.get_logger().info(f"Subscribed to {rgb_topic} and {depth_topic}")
         self.get_logger().info(f"Saving to {out_dir}")
 
     def depth_cb(self, msg):
@@ -56,6 +69,10 @@ class CameraCapture(Node):
             return
 
         try:
+            # desired_encoding="bgr8" converts regardless of the source
+            # encoding (sim publishes rgb8, real publishes bgr8) — see
+            # error-mitigation.md #15 for why toCvCopy/imgmsg_to_cv2
+            # (a real conversion, not zero-copy) is required here.
             rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
         except Exception as ex:
             self.get_logger().warn(f"RGB conversion failed: {ex}")
@@ -86,6 +103,7 @@ class CameraCapture(Node):
 
 def main():
     parser = argparse.ArgumentParser()
+    parser.add_argument("--env", choices=["sim", "real"], default="sim")
     parser.add_argument("--out", default=os.path.expanduser("~/camera_captures"))
     parser.add_argument("--count", type=int, default=None,
                          help="stop after N saved frames (default: run until Ctrl+C)")
@@ -94,7 +112,7 @@ def main():
     args = parser.parse_args()
 
     rclpy.init()
-    node = CameraCapture(args.out, args.count, args.every)
+    node = CameraCapture(args.env, args.out, args.count, args.every)
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:

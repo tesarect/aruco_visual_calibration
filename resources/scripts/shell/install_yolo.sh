@@ -21,11 +21,11 @@ set -euo pipefail
 VENV_DIR="$HOME/yolo_venv"
 
 if [ -d "$VENV_DIR" ]; then
-    echo "Removing existing venv at $VENV_DIR before reinstall..."
+    echo " ❌ Removing existing venv at $VENV_DIR before reinstall..."
     rm -rf "$VENV_DIR"
 fi
 
-echo "Creating venv at $VENV_DIR (isolated, no ROS system-site-packages)..."
+echo " ✚ Creating venv at $VENV_DIR (isolated, no ROS system-site-packages)..."
 python3 -m venv "$VENV_DIR"
 
 # shellcheck disable=SC1091
@@ -34,10 +34,10 @@ source "$VENV_DIR/bin/activate"
 echo "Upgrading pip..."
 pip install --upgrade pip --quiet
 
-echo "Installing CPU-only torch (skip if already resolved as CPU by ultralytics' own pin)..."
+echo " ⬇️ Installing CPU-only torch (skip if already resolved as CPU by ultralytics' own pin)..."
 pip install --quiet torch --index-url https://download.pytorch.org/whl/cpu
 
-echo "Installing ultralytics (YOLO) + opencv-python-headless..."
+echo " ⬇️ Installing ultralytics (YOLO) + opencv-python-headless..."
 pip install --quiet ultralytics opencv-python-headless
 
 echo "Fetching the nano checkpoint (smallest, ~6MB) so first run doesn't stall on a cold download..."

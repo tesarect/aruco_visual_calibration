@@ -50,12 +50,18 @@ PANE4=$(tmux split-window -t "$PANE2" -v -P -F "#{pane_id}")
 tmux send-keys -t "$PANE4" \
 "$SHELL_DIR/wait_for_node.sh move_group 30 && python3 $PYTHON_DIR/tf_debug_markers.py" C-m
 
-# Give each pane a descriptive title, matching sim_tmux_main1.sh's style.
+# Pane 5 — free scratch pane, ROS-sourced, for ad-hoc topic echo/debug.
+PANE5=$(tmux split-window -t "$PANE4" -v -P -F "#{pane_id}")
+tmux send-keys -t "$PANE5" \
+"source ~/ros2_ws/install/setup.bash && source $SHELL_DIR/aliases.sh" C-m
+
+# Give each pane a descriptive title, matching sim_tmux_trajcal.sh's style.
 tmux select-pane -t "$PANE0" -T "Simulation"
 tmux select-pane -t "$PANE1" -T "MoveIt move_group"
 tmux select-pane -t "$PANE2" -T "RViz"
 tmux select-pane -t "$PANE3" -T "Planning Scene"
 tmux select-pane -t "$PANE4" -T "Marker Debugger"
+tmux select-pane -t "$PANE5" -T "Scratch"
 tmux set-option -t "$SESSION" pane-border-status top
 tmux set-option -t "$SESSION" pane-border-format "#{?pane_active,#[fg=green]▶ ,}#{pane_title}"
 

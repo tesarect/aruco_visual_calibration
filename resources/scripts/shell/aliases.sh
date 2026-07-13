@@ -38,9 +38,11 @@ customkill() {
     declare -A commands=(
         [gzclient]='pkill -f "^gzclient"'
         [basetmux]='tmux kill-session -t base_term'
-        [main1tmux]='tmux kill-session -t main1_term'
-        [main2tmux]='tmux kill-session -t main2_term'
-        [main3tmux]='tmux kill-session -t main3_term'
+        [trajcaltmux]='tmux kill-session -t trajcal_term'
+        [perceptmux]='tmux kill-session -t percep_term'
+        [webstacktmux]='tmux kill-session -t webstack_term'
+        [gittmux]='tmux kill-session -t GIT'
+        [termstmux]='tmux kill-session -t terminals'
     )
 
     if [[ "$key" == "all" ]]; then
@@ -62,19 +64,29 @@ tmuxbasesim() {
     bash ./sim_tmux_base.sh
 }
 
-tmuxmain1sim() {
+tmuxtrajcalsim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
-    bash ./sim_tmux_main1.sh
+    bash ./sim_tmux_trajcal.sh
 }
 
-tmuxmain3sim() {
+tmuxwebstacksim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
-    bash ./sim_tmux_main3.sh
+    bash ./sim_tmux_webstack.sh
 }
 
-tmuxmain2sim() {
+tmuxpercepsim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
-    bash ./sim_tmux_main2.sh
+    bash ./sim_tmux_percep.sh
+}
+
+tmuxgit() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./tmuxsh.sh
+}
+
+tmuxterms() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./misl_terms.sh
 }
 
 startsim() {
@@ -275,9 +287,12 @@ completesimsetup() {
     source ~/webpage_ws/scripts/session_init.sh
     # statusweb
     bash ~/webpage_ws/scripts/session_status.sh
+    # install yolo
+    sudo apt install -y python3.10-venv
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
 }
 
-completereaslsetup() {
+completerealsetup() {
     # installbasereal
     bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup_real.sh
     # installweb
@@ -286,6 +301,11 @@ completereaslsetup() {
     source ~/webpage_ws/scripts/session_init.sh
     # statusweb
     bash ~/webpage_ws/scripts/session_status.sh
+    # install zehno - camera driver connectivity
+    bash ~/ros2_ws/src/zenoh-pointcloud/install_zenoh.sh
+    # install yolo
+    sudo apt install -y python3.10-venv
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
 }
 
 webstatuscheck() {

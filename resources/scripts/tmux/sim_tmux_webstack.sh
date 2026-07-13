@@ -5,8 +5,7 @@
 # move_group) to be up first, since panes here poll for them via
 # wait_for_node.sh (a ROS 2 node-list check, not a tmux dependency).
 
-SESSION="main3_term"
-# SESSION="Web-Stack"
+SESSION="webstack_term"
 WINDOW="web-interface"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

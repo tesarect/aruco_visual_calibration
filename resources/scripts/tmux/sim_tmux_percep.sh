@@ -12,7 +12,7 @@
 # conflict risk (error-mitigation.md #15). Pane 2 just activates the venv
 # and waits at a ready prompt.
 
-SESSION="main2_term"
+SESSION="percep_term"
 WINDOW="Image-Perception"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESOURCES_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -32,12 +32,12 @@ PANE0=$(tmux list-panes -t "$SESSION:$WINDOW" -F "#{pane_id}")
 tmux send-keys -t "$PANE0" \
 "$SHELL_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 run rqt_image_view rqt_image_view /wrist_rgbd_depth_sensor/image_raw" C-m
 
-# Pane 1 — capture_real_camera.py-style / sim capture helper, left at a
-# ready prompt (not auto-started — capture cadence/target dir is a
-# per-session choice, see capture_real_camera.py's --out/--count/--every).
+# Pane 1 — capture_camera.py, left at a ready prompt (not auto-started —
+# capture cadence/target dir is a per-session choice, see
+# capture_camera.py's --env/--out/--count/--every).
 PANE1=$(tmux split-window -t "$PANE0" -h -P -F "#{pane_id}")
 tmux send-keys -t "$PANE1" \
-"cd $PYTHON_DIR && source ~/ros2_ws/install/setup.bash && echo 'Ready. Run: python3 capture_real_camera.py --out ~/captures --count 10'" C-m
+"cd $PYTHON_DIR && source ~/ros2_ws/install/setup.bash && echo 'Ready. Run: python3 capture_camera.py --env sim --out ~/captures --count 10'" C-m
 
 # Pane 2 — isolated YOLO venv, ready prompt. Deliberately does NOT source
 # ROS's setup.bash — this pane is for YOLO-only work (ultralytics import,
