@@ -159,13 +159,21 @@ tracepolygon() {
 
 # Read-only: computes and returns the standoff pose (in front of
 # camera_frame) WITHOUT moving the arm — trajectory_planner no longer
-# auto-moves to standoff on startup (see todo.txt item 1). Use this to
-# check whether a deterministic standoff pose is available via TF before
-# deciding whether to move there (e.g. via tracepath) or fall back to a
-# preset pose.
+# auto-moves to standoff on startup (see todo.txt item 1). Falls back to
+# the "standoff" preset (preset_poses_sim.yaml/_real.yaml) if the camera
+# TF isn't available — check the response's used_fallback field to see
+# which source was used.
 getstandoffpose() {
     ros2 service call /trajectory_planner/get_standoff_pose \
         visual_calibration_msgs/srv/GetStandoffPose {}
+}
+
+# Read-only: returns a named preset pose (e.g. "standoff") WITHOUT moving
+# the arm — see preset_poses_sim.yaml/_real.yaml. Usage: getpresetpose standoff
+getpresetpose() {
+    local name="${1:?Usage: getpresetpose <preset_name>}"
+    ros2 service call /trajectory_planner/get_preset_pose \
+        visual_calibration_msgs/srv/GetPresetPose "{name: '$name'}"
 }
 
 # Sends the ~/calibrate action goal and blocks, printing live feedback

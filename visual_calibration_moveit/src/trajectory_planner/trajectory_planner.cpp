@@ -49,7 +49,8 @@ TrajectoryPlanner::TrajectoryPlanner(
   tf_buffer_(node_->get_clock()),
   tf_listener_(tf_buffer_),
   standoff_config_(loadStandoffConfigFromParams()),
-  polygon_config_(loadPolygonConfigFromParams())
+  polygon_config_(loadPolygonConfigFromParams()),
+  preset_poses_(node_)
 {
   // "~/..." resolves to a private, node-namespaced service name (e.g.
   // /trajectory_planner/trace_path), the standard ROS2 convention for a
@@ -77,6 +78,13 @@ TrajectoryPlanner::TrajectoryPlanner(
     "~/get_standoff_pose",
     std::bind(
       &TrajectoryPlanner::handleGetStandoffPose, this, std::placeholders::_1,
+      std::placeholders::_2));
+
+  get_preset_pose_service_ =
+    node_->create_service<visual_calibration_msgs::srv::GetPresetPose>(
+    "~/get_preset_pose",
+    std::bind(
+      &TrajectoryPlanner::handleGetPresetPose, this, std::placeholders::_1,
       std::placeholders::_2));
 
   RCLCPP_INFO(
@@ -194,7 +202,7 @@ bool TrajectoryPlanner::planAndExecuteInFrontOf(rclcpp::Duration tf_timeout)
   return planAndExecuteInFrontOf(standoff_config_, tf_timeout);
 }
 
-std::optional<geometry_msgs::msg::Pose> TrajectoryPlanner::getStandoffPose(
+std::optional<std::pair<geometry_msgs::msg::Pose, bool>> TrajectoryPlanner::getStandoffPose(
   rclcpp::Duration tf_timeout) const
 {
   const std::string & planning_frame = move_group_interface_.getPlanningFrame();
@@ -205,14 +213,31 @@ std::optional<geometry_msgs::msg::Pose> TrajectoryPlanner::getStandoffPose(
       planning_frame, standoff_config_.camera_frame, tf2::TimePointZero,
       tf2::durationFromSec(tf_timeout.seconds()));
   } catch (const tf2::TransformException & ex) {
-    RCLCPP_ERROR(
-      node_->get_logger(), "Could not look up '%s' in planning frame '%s': %s",
+    RCLCPP_WARN(
+      node_->get_logger(),
+      "Could not look up '%s' in planning frame '%s': %s — falling back to the "
+      "'standoff' preset pose, if one is configured.",
       standoff_config_.camera_frame.c_str(), planning_frame.c_str(), ex.what());
-    return std::nullopt;
+
+    const std::optional<geometry_msgs::msg::Pose> preset = preset_poses_.get("standoff");
+    if (!preset.has_value()) {
+      RCLCPP_ERROR(
+        node_->get_logger(),
+        "No 'standoff' preset configured either — cannot determine a standoff pose.");
+      return std::nullopt;
+    }
+    return std::make_pair(*preset, true /*used_fallback*/);
   }
 
-  return offsetInFrontOf(
+  const geometry_msgs::msg::Pose pose = offsetInFrontOf(
     camera_tf, standoff_config_.standoff_m, standoff_config_.facing_rpy_rad);
+  return std::make_pair(pose, false /*used_fallback*/);
+}
+
+std::optional<geometry_msgs::msg::Pose> TrajectoryPlanner::getPresetPose(
+  const std::string & name) const
+{
+  return preset_poses_.get(name);
 }
 
 bool TrajectoryPlanner::tracePath(
@@ -348,15 +373,34 @@ void TrajectoryPlanner::handleGetStandoffPose(
   const std::shared_ptr<visual_calibration_msgs::srv::GetStandoffPose::Request>/*request*/,
   std::shared_ptr<visual_calibration_msgs::srv::GetStandoffPose::Response> response)
 {
-  const std::optional<geometry_msgs::msg::Pose> standoff_pose =
-    getStandoffPose(rclcpp::Duration::from_seconds(3.0));
+  const auto result = getStandoffPose(rclcpp::Duration::from_seconds(3.0));
 
-  response->success = standoff_pose.has_value();
+  response->success = result.has_value();
+  response->used_fallback = result.has_value() && result->second;
+  if (!result.has_value()) {
+    response->message = "Could not compute standoff pose via TF or preset fallback "
+      "(see log for the error)";
+    return;
+  }
+
+  response->standoff_pose = result->first;
+  response->message = response->used_fallback ?
+    "Camera TF unavailable — returned the 'standoff' preset pose instead" :
+    "Computed standoff pose successfully via TF";
+}
+
+void TrajectoryPlanner::handleGetPresetPose(
+  const std::shared_ptr<visual_calibration_msgs::srv::GetPresetPose::Request> request,
+  std::shared_ptr<visual_calibration_msgs::srv::GetPresetPose::Response> response)
+{
+  const std::optional<geometry_msgs::msg::Pose> pose = getPresetPose(request->name);
+
+  response->success = pose.has_value();
   response->message = response->success ?
-    "Computed standoff pose successfully" :
-    "Could not compute standoff pose (see log for the error)";
-  if (standoff_pose.has_value()) {
-    response->standoff_pose = *standoff_pose;
+    "Found preset pose '" + request->name + "'" :
+    "No preset pose named '" + request->name + "' is configured";
+  if (pose.has_value()) {
+    response->pose = *pose;
   }
 }
 

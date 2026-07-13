@@ -39,6 +39,7 @@ ament_target_dependencies(planning_scene_setup
 
 add_executable(trajectory_planner
   src/trajectory_planner/trajectory_planner.cpp
+  src/trajectory_planner/preset_poses.cpp
   src/trajectory_planner/main.cpp
 )
 target_include_directories(trajectory_planner PRIVATE

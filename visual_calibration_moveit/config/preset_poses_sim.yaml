@@ -1,0 +1,28 @@
+# Named fallback poses for trajectory_planner, used when a deterministic
+# pose can't be computed via TF (see ~/get_standoff_pose and todo.txt item
+# 1). Sim always has a live camera_frame TF (the wrist-mounted camera is
+# in the URDF), so no preset should ever actually be needed here — this
+# file exists mainly so the real/sim config shapes match, and as a sanity
+# check: if sim ever DOES fall back to a preset, that's a bug (TF should
+# never be unavailable in sim), not expected behavior.
+#
+# Each preset is a Cartesian pose (position + quaternion) for
+# end_effector_frame (rg2_gripper_aruco_link), expressed in the planning
+# frame (base_link) — the same convention ~/trace_path already uses.
+# Recorded via pose_capture.py record (see resources/scripts/python/).
+#
+# For reference — sim's arm spawn pose (base_link -> rg2_gripper_aruco_link),
+# NOT a preset to move to, just the as-launched pose before any motion:
+#   xyz=(-0.0245, 0.2882, 0.6940)
+#   quat=(-0.4998, -0.4994, 0.5002, 0.5006)
+#   rpy_rad=(-1.5692, 0.0000, 1.5700)
+# Loaded into trajectory_planner's own parameter namespace (not a
+# separate node) — this file is passed as a second `parameters` entry
+# alongside trajectory_planner_sim.yaml in trajectory_planner.launch.py,
+# and PresetPoses reads preset_names/<name>.position/<name>.orientation
+# directly off the trajectory_planner node.
+trajectory_planner:
+  ros__parameters:
+    # Deliberately empty — sim should always resolve `standoff` via
+    # ~/get_standoff_pose (live TF), never this fallback. Leave unset.
+    preset_names: []

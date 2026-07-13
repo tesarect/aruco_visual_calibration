@@ -22,6 +22,20 @@ def generate_launch_description():
         params_filename,
     ])
 
+    # Second params file, same node namespace (trajectory_planner) — see
+    # preset_poses_sim.yaml/_real.yaml. ROS 2 merges multiple `parameters`
+    # entries for the same node, so preset_names/<name>.position/
+    # <name>.orientation land alongside camera_frame/standoff_m/etc.
+    preset_poses_filename = PythonExpression(
+        ["'preset_poses_' + '", LaunchConfiguration("env"), "' + '.yaml'"]
+    )
+
+    preset_poses_file = PathJoinSubstitution([
+        FindPackageShare("visual_calibration_moveit"),
+        "config",
+        preset_poses_filename,
+    ])
+
     # use_sim_time must match the environment: Gazebo publishes /clock on
     # sim time in env:=sim, while env:=real has no simulated clock at all.
     # This node calls get_clock()->now() and does TF lookups, so a mismatch
@@ -32,7 +46,7 @@ def generate_launch_description():
         package="visual_calibration_moveit",
         executable="trajectory_planner",
         output="screen",
-        parameters=[params_file, {"use_sim_time": use_sim_time}],
+        parameters=[params_file, preset_poses_file, {"use_sim_time": use_sim_time}],
     )
 
     return LaunchDescription([

@@ -9,6 +9,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/TracePath.srv"
   "srv/GetPolygonWaypoints.srv"
   "srv/GetStandoffPose.srv"
+  "srv/GetPresetPose.srv"
   "action/Calibrate.action"
   DEPENDENCIES geometry_msgs
 )

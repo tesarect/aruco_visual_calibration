@@ -4,6 +4,7 @@
 #include <array>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -14,8 +15,11 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
+#include <visual_calibration_msgs/srv/get_preset_pose.hpp>
 #include <visual_calibration_msgs/srv/get_standoff_pose.hpp>
 #include <visual_calibration_msgs/srv/trace_path.hpp>
+
+#include "visual_calibration_moveit/preset_poses.hpp"
 
 namespace visual_calibration_moveit
 {
@@ -162,13 +166,17 @@ public:
     rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0)) const;
 
   /// Computes the standoff pose (see offsetInFrontOf) from the configured
-  /// StandoffConfig WITHOUT moving the arm — lets a caller (e.g. a web
-  /// backend) check whether a deterministic standoff pose is available
-  /// before deciding whether to move there via ~/trace_path or fall back
-  /// to a preset pose. Returns std::nullopt (and logs the error) if the
-  /// camera TF lookup fails — same failure mode as planAndExecuteInFrontOf.
-  std::optional<geometry_msgs::msg::Pose> getStandoffPose(
+  /// StandoffConfig WITHOUT moving the arm. If the camera_frame TF lookup
+  /// fails, falls back to the "standoff" entry in preset_poses_ (see
+  /// PresetPoses) — used_fallback in the returned pair distinguishes which
+  /// source was used. Returns std::nullopt only if NEITHER a live TF
+  /// lookup NOR a "standoff" preset was available.
+  std::optional<std::pair<geometry_msgs::msg::Pose, bool /*used_fallback*/>> getStandoffPose(
     rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0)) const;
+
+  /// Returns the named preset's pose (see PresetPoses) WITHOUT moving the
+  /// arm. Returns std::nullopt if no preset with that name was loaded.
+  std::optional<geometry_msgs::msg::Pose> getPresetPose(const std::string & name) const;
 
 private:
   /// Computes polygon_config_.num_corners waypoints forming a regular
@@ -209,6 +217,12 @@ private:
     const std::shared_ptr<visual_calibration_msgs::srv::GetStandoffPose::Request> request,
     std::shared_ptr<visual_calibration_msgs::srv::GetStandoffPose::Response> response);
 
+  /// Handles a GetPresetPose service request by calling getPresetPose()
+  /// and returning the result — no motion.
+  void handleGetPresetPose(
+    const std::shared_ptr<visual_calibration_msgs::srv::GetPresetPose::Request> request,
+    std::shared_ptr<visual_calibration_msgs::srv::GetPresetPose::Response> response);
+
   /// Reads camera_frame, end_effector_frame, standoff_m, max_reach_m, and
   /// facing_rpy_rad (a 3-element array) from this node's declared
   /// parameters and returns them as a StandoffConfig. Requires the node to
@@ -226,12 +240,15 @@ private:
   tf2_ros::TransformListener tf_listener_;
   StandoffConfig standoff_config_;
   PolygonConfig polygon_config_;
+  PresetPoses preset_poses_;
   rclcpp::Service<visual_calibration_msgs::srv::TracePath>::SharedPtr trace_path_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr trace_polygon_service_;
   rclcpp::Service<visual_calibration_msgs::srv::GetPolygonWaypoints>::SharedPtr
     get_polygon_waypoints_service_;
   rclcpp::Service<visual_calibration_msgs::srv::GetStandoffPose>::SharedPtr
     get_standoff_pose_service_;
+  rclcpp::Service<visual_calibration_msgs::srv::GetPresetPose>::SharedPtr
+    get_preset_pose_service_;
 };
 
 }  // namespace visual_calibration_moveit

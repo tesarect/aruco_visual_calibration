@@ -1,0 +1,10 @@
+# Read-only: returns a named preset pose from
+# preset_poses_sim.yaml/_real.yaml WITHOUT moving the arm — e.g. "standoff",
+# "cupholder", or any other named entry under that file's preset_names.
+# Poses are Cartesian, for end_effector_frame, in the planning frame — same
+# convention as ~/trace_path's waypoints. See PresetPoses.
+string name
+---
+bool success
+string message
+geometry_msgs/Pose pose

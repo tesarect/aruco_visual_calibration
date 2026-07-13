@@ -1,0 +1,32 @@
+# Named fallback poses for trajectory_planner, used when a deterministic
+# pose can't be computed via TF (see ~/get_standoff_pose and todo.txt item
+# 1). The real camera is not URDF-attached (wall-mounted, not arm-mounted
+# — see CLAUDE.md's Real Robot Camera Setup), so there is no camera_frame
+# TF until calibration has already run once — `standoff` below is the
+# fallback for that bootstrap gap.
+#
+# Each preset is a Cartesian pose (position + quaternion) for
+# end_effector_frame (rg2_gripper_aruco_link), expressed in the planning
+# frame (base_link) — the same convention ~/trace_path already uses.
+# Recorded via pose_capture.py record (see resources/scripts/python/).
+#
+# PLACEHOLDER — `standoff` below is copied from SIM's computed standoff
+# pose, NOT measured on the real robot. It's a rough starting guess only
+# (real camera mounting/distance differs from sim's wrist-mount) — likely
+# gets the arm approximately into the area of interest, not exactly in
+# front of the real camera. Re-record once in the real lab: jog the arm
+# (or use pose_capture.py standoff --move) until the marker is
+# confirmed visible to the real camera, then `pose_capture.py record` to
+# capture the actual pose and replace the values below.
+#
+# Loaded into trajectory_planner's own parameter namespace (not a
+# separate node) — this file is passed as a second `parameters` entry
+# alongside trajectory_planner_real.yaml in trajectory_planner.launch.py,
+# and PresetPoses reads preset_names/<name>.position/<name>.orientation
+# directly off the trajectory_planner node.
+trajectory_planner:
+  ros__parameters:
+    preset_names: ["standoff"]
+
+    standoff.position: [-0.2385, -0.1750, -0.0165]
+    standoff.orientation: [0.1828, 0.1834, -0.6829, 0.6831]  # x, y, z, w

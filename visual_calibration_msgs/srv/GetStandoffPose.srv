@@ -3,7 +3,15 @@
 # a caller (e.g. a web backend) check whether a deterministic standoff pose
 # is available (camera_frame TF resolvable) before deciding whether to
 # move there or fall back to a preset pose — see todo.txt item 1.
+#
+# used_fallback is true when camera_frame TF wasn't available and
+# standoff_pose was instead read from the "standoff" entry in
+# preset_poses_sim.yaml/_real.yaml (see PresetPoses). success is still
+# true in that case — a caller only needs to check used_fallback if it
+# cares which source the pose came from. success is false only when
+# NEITHER a live TF lookup NOR a "standoff" preset was available.
 ---
 bool success
+bool used_fallback
 string message
 geometry_msgs/Pose standoff_pose
