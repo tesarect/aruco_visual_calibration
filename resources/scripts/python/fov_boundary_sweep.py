@@ -2,18 +2,37 @@
 """Real-robot quick tool: from the arm's current pose (place it so the
 ArUco marker is visible and roughly centered first, e.g. via
 pose_capture.py standoff), step the end effector outward along +X, -X, +Y,
--Y in turn, watching /aruco_perception/marker_pose after each step. For
-each direction, records the distance traveled from the starting pose to
-the last step where the marker was still detected, right before detection
-was lost. The four distances describe a usable area-of-interest rectangle
+-Y, +Z, -Z in turn, watching /aruco_perception/marker_pose after each step.
+For each direction, records the distance traveled from the starting pose
+to the last step where the marker was still detected, right before the
+sweep stopped. The six distances describe a usable area-of-interest box
 around the start pose — feed its half-widths into random_pose_capture.py's
 --cube-size (and center it on the start pose) so generated random poses
-stay within the region the camera can actually see the marker in.
+stay within the region the camera can actually see the marker in AND the
+arm can actually reach.
 
 Detection is read off /aruco_perception/marker_pose: aruco_detector_node
 only publishes on that topic when the configured marker_id is seen in the
 current frame (see aruco_detector_node.cpp) — so "no message within
 --detect-timeout seconds after a move" is treated as "not detected".
+
+A sweep in a given direction can stop for two DIFFERENT reasons, and the
+report labels which one happened — conflating them silently would report
+an arm-reachability limit as if it were a camera FOV edge:
+  - "fov"   — the move succeeded but the marker was no longer detected.
+              This is the boundary you actually want for --cube-size.
+  - "reach" — ~/trace_path itself failed (IK/Cartesian-fraction/collision).
+              The FOV may extend further than this; the arm just can't get
+              there on the current path. By default the step is retried
+              once in joint-space (free-space planning, more robust, no
+              straight-line guarantee) before being counted as a "reach"
+              boundary — pass --no-joint-space-retry to disable that and
+              report the very first planning failure as-is. There is no
+              YAML/param override for planAndExecuteCartesian's internal
+              min_fraction threshold today (it's a hardcoded C++ default in
+              trajectory_planner.hpp, not exposed via TracePath.srv or the
+              params file) — the joint-space retry is the only way to push
+              past a purely Cartesian-path failure from this script.
 
 Usage:
     python3 fov_boundary_sweep.py --step 0.01 --max-steps 30 --out ~/fov_area.txt
@@ -39,12 +58,14 @@ EE_FRAME = "rg2_gripper_aruco_link"
 BASE_FRAME = "base_link"
 MARKER_POSE_TOPIC = "/aruco_perception/marker_pose"
 
-# (label, unit vector in base_link X/Y)
+# (label, unit vector in base_link X/Y/Z)
 DIRECTIONS = [
-    ("+X", (1.0, 0.0)),
-    ("-X", (-1.0, 0.0)),
-    ("+Y", (0.0, 1.0)),
-    ("-Y", (0.0, -1.0)),
+    ("+X", (1.0, 0.0, 0.0)),
+    ("-X", (-1.0, 0.0, 0.0)),
+    ("+Y", (0.0, 1.0, 0.0)),
+    ("-Y", (0.0, -1.0, 0.0)),
+    ("+Z", (0.0, 0.0, 1.0)),
+    ("-Z", (0.0, 0.0, -1.0)),
 ]
 
 
@@ -87,23 +108,26 @@ class FovBoundarySweep(Node):
                 rclpy.spin_once(self, timeout_sec=0.2)
         raise RuntimeError(f"Could not look up {BASE_FRAME} -> {EE_FRAME}")
 
-    def move_to(self, pose):
+    def move_to(self, pose, joint_space=None):
+        """joint_space=None uses --joint-space's default; pass True/False
+        to force a specific planning mode for this call (used by the
+        Cartesian-failure retry in sweep_direction)."""
+        use_joint_space = self.args.joint_space if joint_space is None else joint_space
         request = TracePath.Request()
         request.waypoints = [pose]
         request.planning_mode = (
             TracePath.Request.PLANNING_MODE_JOINT_SPACE
-            if self.args.joint_space else TracePath.Request.PLANNING_MODE_CARTESIAN
+            if use_joint_space else TracePath.Request.PLANNING_MODE_CARTESIAN
         )
         future = self.trace_path_client.call_async(request)
         rclpy.spin_until_future_complete(self, future, timeout_sec=30.0)
         result = future.result()
         if result is None:
             self.get_logger().error("~/trace_path call timed out.")
-            return False
+            return False, "~/trace_path call timed out"
         if not result.success:
-            self.get_logger().warn(f"~/trace_path failed: {result.message}")
-            return False
-        return True
+            return False, result.message
+        return True, ""
 
     def marker_visible(self):
         """True if a marker_pose message has arrived within
@@ -122,31 +146,38 @@ class FovBoundarySweep(Node):
                 return True
         return False
 
-    def sweep_direction(self, label, unit_xy, start_pose):
-        dx, dy = unit_xy
-        distance = 0.0
+    def sweep_direction(self, label, unit_xyz, start_pose):
+        dx, dy, dz = unit_xyz
         last_good_distance = 0.0
+        boundary_reason = "max_steps"
         pose = Pose()
-        pose.position.x = start_pose.position.x
-        pose.position.y = start_pose.position.y
-        pose.position.z = start_pose.position.z
         pose.orientation = start_pose.orientation
 
         for step_num in range(1, self.args.max_steps + 1):
             distance = step_num * self.args.step
             pose.position.x = start_pose.position.x + dx * distance
             pose.position.y = start_pose.position.y + dy * distance
+            pose.position.z = start_pose.position.z + dz * distance
 
-            if not self.move_to(pose):
+            moved, message = self.move_to(pose)
+            if not moved and not self.args.no_joint_space_retry and not self.args.joint_space:
                 self.get_logger().warn(
-                    f"{label}: move failed at {distance:.3f}m (reach/IK limit?) — "
-                    "treating as boundary.")
+                    f"{label}: Cartesian move failed at {distance:.3f}m "
+                    f"({message}) — retrying in joint-space.")
+                moved, message = self.move_to(pose, joint_space=True)
+
+            if not moved:
+                self.get_logger().warn(
+                    f"{label}: move failed at {distance:.3f}m ({message}) — "
+                    "reach/IK limit, not a camera FOV edge.")
+                boundary_reason = "reach"
                 break
 
             if not self.marker_visible():
                 self.get_logger().info(
                     f"{label}: marker lost at {distance:.3f}m "
                     f"(last seen at {last_good_distance:.3f}m)")
+                boundary_reason = "fov"
                 break
 
             last_good_distance = distance
@@ -154,9 +185,10 @@ class FovBoundarySweep(Node):
         else:
             self.get_logger().warn(
                 f"{label}: reached --max-steps ({self.args.max_steps}) without "
-                "losing the marker — area may extend further; increase --max-steps.")
+                "losing the marker or failing to move — area may extend "
+                "further; increase --max-steps.")
 
-        return last_good_distance
+        return last_good_distance, boundary_reason
 
     def run(self):
         if not self.wait_for_service():
@@ -175,8 +207,8 @@ class FovBoundarySweep(Node):
             return None
 
         results = {}
-        for label, unit_xy in DIRECTIONS:
-            results[label] = self.sweep_direction(label, unit_xy, start_pose)
+        for label, unit_xyz in DIRECTIONS:
+            results[label] = self.sweep_direction(label, unit_xyz, start_pose)
             # Return to start before sweeping the next direction so each
             # direction is measured independently from the same origin.
             self.move_to(start_pose)
@@ -185,24 +217,42 @@ class FovBoundarySweep(Node):
 
 
 def write_report(args, start_pose, results):
-    half_x = min(results["+X"], results["-X"])
-    half_y = min(results["+Y"], results["-Y"])
+    # results[label] = (distance, reason) where reason is "fov", "reach",
+    # or "max_steps". Only "fov" boundaries are true camera-visibility
+    # limits — a "reach" boundary means the FOV might extend further than
+    # reported, the arm just couldn't get there on this path.
+    half_x = min(results["+X"][0], results["-X"][0])
+    half_y = min(results["+Y"][0], results["-Y"][0])
+    half_z = min(results["+Z"][0], results["-Z"][0])
+    any_reach_limited = any(reason == "reach" for _, reason in results.values())
+
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
     lines = [
         f"[{stamp}] FOV boundary sweep from {BASE_FRAME}-relative start pose "
         f"xyz=({start_pose.position.x:.4f}, {start_pose.position.y:.4f}, "
         f"{start_pose.position.z:.4f})",
-        f"  +X: {results['+X']:.4f} m",
-        f"  -X: {results['-X']:.4f} m",
-        f"  +Y: {results['+Y']:.4f} m",
-        f"  -Y: {results['-Y']:.4f} m",
+    ]
+    for label in ("+X", "-X", "+Y", "-Y", "+Z", "-Z"):
+        distance, reason = results[label]
+        lines.append(f"  {label}: {distance:.4f} m  (boundary: {reason})")
+    lines.append(
         f"  Symmetric area-of-interest half-widths (min of each axis pair): "
-        f"x={half_x:.4f} m, y={half_y:.4f} m",
+        f"x={half_x:.4f} m, y={half_y:.4f} m, z={half_z:.4f} m")
+    if any_reach_limited:
+        lines.append(
+            "  NOTE: at least one direction stopped on a 'reach' boundary "
+            "(arm/IK limit), not a camera FOV edge — the true FOV may "
+            "extend further there. The half-width above is still a safe "
+            "--cube-size bound (random poses will stay reachable), but is "
+            "NOT necessarily the camera's actual visibility limit on that "
+            "axis.")
+    lines.append(
         f"  Suggested random_pose_capture.py args: "
         f"--center-x {start_pose.position.x:.4f} --center-y {start_pose.position.y:.4f} "
-        f"--center-z {start_pose.position.z:.4f} --cube-size {2 * min(half_x, half_y):.4f}",
-        "",
-    ]
+        f"--center-z {start_pose.position.z:.4f} "
+        f"--cube-size {2 * min(half_x, half_y, half_z):.4f}")
+    lines.append("")
+
     text = "\n".join(lines)
     print(text)
     if args.out:
@@ -223,7 +273,10 @@ def build_parser():
                          help="Seconds to wait for a marker_pose message before "
                               "declaring the marker not detected")
     parser.add_argument("--joint-space", action="store_true",
-                         help="Use joint-space planning instead of Cartesian")
+                         help="Use joint-space planning instead of Cartesian for every move")
+    parser.add_argument("--no-joint-space-retry", action="store_true",
+                         help="Don't retry a failed Cartesian move in joint-space before "
+                              "counting it as a 'reach' boundary (default: retry once)")
     parser.add_argument("--out", default=None, help="Optional text file to append the report to")
     return parser
 

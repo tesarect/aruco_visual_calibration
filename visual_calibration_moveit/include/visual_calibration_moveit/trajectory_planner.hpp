@@ -2,6 +2,7 @@
 #define VISUAL_CALIBRATION_MOVEIT__TRAJECTORY_PLANNER_HPP_
 
 #include <array>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,7 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
+#include <visual_calibration_msgs/srv/get_standoff_pose.hpp>
 #include <visual_calibration_msgs/srv/trace_path.hpp>
 
 namespace visual_calibration_moveit
@@ -159,6 +161,15 @@ public:
   std::vector<geometry_msgs::msg::Pose> getPolygonWaypoints(
     rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0)) const;
 
+  /// Computes the standoff pose (see offsetInFrontOf) from the configured
+  /// StandoffConfig WITHOUT moving the arm — lets a caller (e.g. a web
+  /// backend) check whether a deterministic standoff pose is available
+  /// before deciding whether to move there via ~/trace_path or fall back
+  /// to a preset pose. Returns std::nullopt (and logs the error) if the
+  /// camera TF lookup fails — same failure mode as planAndExecuteInFrontOf.
+  std::optional<geometry_msgs::msg::Pose> getStandoffPose(
+    rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0)) const;
+
 private:
   /// Computes polygon_config_.num_corners waypoints forming a regular
   /// polygon of radius polygon_config_.radius_m, in the standoff pose's own
@@ -192,6 +203,12 @@ private:
     const std::shared_ptr<visual_calibration_msgs::srv::GetPolygonWaypoints::Request> request,
     std::shared_ptr<visual_calibration_msgs::srv::GetPolygonWaypoints::Response> response);
 
+  /// Handles a GetStandoffPose service request by calling
+  /// getStandoffPose() and returning the result — no motion.
+  void handleGetStandoffPose(
+    const std::shared_ptr<visual_calibration_msgs::srv::GetStandoffPose::Request> request,
+    std::shared_ptr<visual_calibration_msgs::srv::GetStandoffPose::Response> response);
+
   /// Reads camera_frame, end_effector_frame, standoff_m, max_reach_m, and
   /// facing_rpy_rad (a 3-element array) from this node's declared
   /// parameters and returns them as a StandoffConfig. Requires the node to
@@ -213,6 +230,8 @@ private:
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr trace_polygon_service_;
   rclcpp::Service<visual_calibration_msgs::srv::GetPolygonWaypoints>::SharedPtr
     get_polygon_waypoints_service_;
+  rclcpp::Service<visual_calibration_msgs::srv::GetStandoffPose>::SharedPtr
+    get_standoff_pose_service_;
 };
 
 }  // namespace visual_calibration_moveit

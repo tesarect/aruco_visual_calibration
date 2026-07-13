@@ -15,17 +15,17 @@ varies, matching how trajectory_planner already treats its own polygon
 waypoints (position varies, facing_rpy_rad fixed).
 
 Usage:
-    python3 random_pose_capture.py \\
-        --center-x 0.0 --center-y 0.0 --center-z 0.3 \\
-        --roll 3.14159265 --pitch 0.0 --yaw 0.0 \\
-        --cube-size 0.15 --count 40 --out ~/yolo_captures \\
+    python3 random_pose_capture.py \
+        --center-x 0.0 --center-y 0.0 --center-z 0.3 \
+        --roll 3.14159265 --pitch 0.0 --yaw 0.0 \
+        --cube-size 0.15 --count 40 --out ~/yolo_captures \
         --env real
 
 Nodes that must already be running:
     - trajectory_planner_node (moves the arm to each sampled pose)
     - Camera driver publishing the RGB topic (real: /D415/color/image_raw,
       sim: /wrist_rgbd_depth_sensor/image_raw)
-    - (real robot) Zenoh bridge if capturing over Zenoh — see CLAUDE.md
+    - (real robot) Zenoh bridge if capturing over Zenoh
 """
 
 import argparse

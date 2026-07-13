@@ -157,6 +157,17 @@ tracepolygon() {
     ros2 service call /trajectory_planner/trace_polygon std_srvs/srv/Trigger {}
 }
 
+# Read-only: computes and returns the standoff pose (in front of
+# camera_frame) WITHOUT moving the arm — trajectory_planner no longer
+# auto-moves to standoff on startup (see todo.txt item 1). Use this to
+# check whether a deterministic standoff pose is available via TF before
+# deciding whether to move there (e.g. via tracepath) or fall back to a
+# preset pose.
+getstandoffpose() {
+    ros2 service call /trajectory_planner/get_standoff_pose \
+        visual_calibration_msgs/srv/GetStandoffPose {}
+}
+
 # Sends the ~/calibrate action goal and blocks, printing live feedback
 # (samples_collected/samples_total) until the action completes — includes
 # the final orientation spread (max/mean degrees) in the result.

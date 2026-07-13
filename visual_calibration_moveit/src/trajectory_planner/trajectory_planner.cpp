@@ -72,6 +72,13 @@ TrajectoryPlanner::TrajectoryPlanner(
       &TrajectoryPlanner::handleGetPolygonWaypoints, this, std::placeholders::_1,
       std::placeholders::_2));
 
+  get_standoff_pose_service_ =
+    node_->create_service<visual_calibration_msgs::srv::GetStandoffPose>(
+    "~/get_standoff_pose",
+    std::bind(
+      &TrajectoryPlanner::handleGetStandoffPose, this, std::placeholders::_1,
+      std::placeholders::_2));
+
   RCLCPP_INFO(
     node_->get_logger(), "trajectory_planner ready (planning group: '%s')",
     planning_group.c_str());
@@ -185,6 +192,27 @@ bool TrajectoryPlanner::planAndExecuteInFrontOf(
 bool TrajectoryPlanner::planAndExecuteInFrontOf(rclcpp::Duration tf_timeout)
 {
   return planAndExecuteInFrontOf(standoff_config_, tf_timeout);
+}
+
+std::optional<geometry_msgs::msg::Pose> TrajectoryPlanner::getStandoffPose(
+  rclcpp::Duration tf_timeout) const
+{
+  const std::string & planning_frame = move_group_interface_.getPlanningFrame();
+
+  geometry_msgs::msg::TransformStamped camera_tf;
+  try {
+    camera_tf = tf_buffer_.lookupTransform(
+      planning_frame, standoff_config_.camera_frame, tf2::TimePointZero,
+      tf2::durationFromSec(tf_timeout.seconds()));
+  } catch (const tf2::TransformException & ex) {
+    RCLCPP_ERROR(
+      node_->get_logger(), "Could not look up '%s' in planning frame '%s': %s",
+      standoff_config_.camera_frame.c_str(), planning_frame.c_str(), ex.what());
+    return std::nullopt;
+  }
+
+  return offsetInFrontOf(
+    camera_tf, standoff_config_.standoff_m, standoff_config_.facing_rpy_rad);
 }
 
 bool TrajectoryPlanner::tracePath(
@@ -314,6 +342,22 @@ void TrajectoryPlanner::handleGetPolygonWaypoints(
     "Could not compute polygon waypoints (see log for the error)";
   response->waypoints = std::vector<geometry_msgs::msg::Pose>(
     waypoints.begin(), waypoints.end());
+}
+
+void TrajectoryPlanner::handleGetStandoffPose(
+  const std::shared_ptr<visual_calibration_msgs::srv::GetStandoffPose::Request>/*request*/,
+  std::shared_ptr<visual_calibration_msgs::srv::GetStandoffPose::Response> response)
+{
+  const std::optional<geometry_msgs::msg::Pose> standoff_pose =
+    getStandoffPose(rclcpp::Duration::from_seconds(3.0));
+
+  response->success = standoff_pose.has_value();
+  response->message = response->success ?
+    "Computed standoff pose successfully" :
+    "Could not compute standoff pose (see log for the error)";
+  if (standoff_pose.has_value()) {
+    response->standoff_pose = *standoff_pose;
+  }
 }
 
 StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const

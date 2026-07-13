@@ -1,0 +1,9 @@
+# Read-only: computes and returns the standoff pose (see
+# TrajectoryPlanner::planAndExecuteInFrontOf) WITHOUT moving the arm. Lets
+# a caller (e.g. a web backend) check whether a deterministic standoff pose
+# is available (camera_frame TF resolvable) before deciding whether to
+# move there or fall back to a preset pose — see todo.txt item 1.
+---
+bool success
+string message
+geometry_msgs/Pose standoff_pose
