@@ -21,8 +21,16 @@
 # alongside trajectory_planner_sim.yaml in trajectory_planner.launch.py,
 # and PresetPoses reads preset_names/<name>.position/<name>.orientation
 # directly off the trajectory_planner node.
+#
+# preset_names is a sentinel-only placeholder ("__none__"), NOT a real
+# preset name — an empty YAML list (`preset_names: []`) has no element
+# type ROS 2 can infer, which crashed the node at startup
+# (InvalidParameterValueException: No parameter value set) before
+# PresetPoses's constructor ever got to run any guard against it. A
+# single-element string array has an unambiguous type and declares
+# cleanly. PresetPoses skips "__none__" rather than treating it as a
+# real preset (see preset_poses.cpp) — sim should always resolve
+# `standoff` via ~/get_standoff_pose (live TF) anyway, never a preset.
 trajectory_planner:
   ros__parameters:
-    # Deliberately empty — sim should always resolve `standoff` via
-    # ~/get_standoff_pose (live TF), never this fallback. Leave unset.
-    preset_names: []
+    preset_names: ["__none__"]

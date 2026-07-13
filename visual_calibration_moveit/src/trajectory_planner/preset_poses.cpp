@@ -3,6 +3,17 @@
 namespace visual_calibration_moveit
 {
 
+namespace
+{
+/// A YAML `preset_names: []` (empty list) has no element type ROS 2 can
+/// infer, and crashes the node at startup (InvalidParameterValueException)
+/// before any node code runs — see preset_poses_sim.yaml's comment. Files
+/// with no real presets use this single-element sentinel array instead,
+/// which declares cleanly (unambiguous string type) — skip it here rather
+/// than treating it as a real preset name.
+constexpr const char * kNoPresetsSentinel = "__none__";
+}  // namespace
+
 PresetPoses::PresetPoses(const rclcpp::Node::SharedPtr & node)
 {
   if (!node->has_parameter("preset_names")) {
@@ -13,6 +24,10 @@ PresetPoses::PresetPoses(const rclcpp::Node::SharedPtr & node)
     node->get_parameter("preset_names").as_string_array();
 
   for (const std::string & name : preset_names) {
+    if (name == kNoPresetsSentinel) {
+      continue;
+    }
+
     const std::vector<double> position =
       node->get_parameter(name + ".position").as_double_array();
     const std::vector<double> orientation =
