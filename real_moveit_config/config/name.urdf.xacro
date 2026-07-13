@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="name">
+    <!-- Renamed from "initial_positions_file" to avoid colliding with the
+         same-named arg declared in real_ur3e_robotiq85.urdf.xacro (included
+         below) — xacro args share one global namespace per process, so an
+         identically-named arg here would silently win and feed this
+         package's wrapped-YAML-shape file into the arm's ros2_control block,
+         which expects a flat shape. Same fix pattern as aruco_moveit_config's
+         ros2_control_initial_positions_file — see error-mitigation.md #1/#3. -->
+    <xacro:arg name="ros2_control_initial_positions_file" default="$(find real_moveit_config)/config/initial_positions.yaml" />
+
+    <!-- Import name urdf file -->
+    <xacro:include filename="$(find real_ur3e_description)/urdf/real_ur3e_robotiq85.urdf.xacro" />
+
+    <!-- Import control_xacro -->
+    <xacro:include filename="name.ros2_control.xacro" />
+
+
+    <xacro:name_ros2_control name="FakeSystem" initial_positions_file="$(arg ros2_control_initial_positions_file)"/>
+
+</robot>

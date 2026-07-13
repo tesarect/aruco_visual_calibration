@@ -234,13 +234,13 @@ vcpkgbuildsymlink() {
 
 vcbuild() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
     source install/setup.bash
 }
 
 vcbuildsymlink() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation --symlink-install
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
     source install/setup.bash
 }
 
@@ -251,14 +251,16 @@ vccleanbuild() {
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
         build/aruco_perception \
-        build/calibration_validation
+        build/calibration_validation \
+        build/real_ur3e_description
     rm -rf install/aruco_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
         install/aruco_perception \
-        install/calibration_validation
+        install/calibration_validation \
+        install/real_ur3e_description
 
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
     source install/setup.bash
 }
 
@@ -269,14 +271,16 @@ vccleanbuildsymlink() {
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
         build/aruco_perception \
-        build/calibration_validation
+        build/calibration_validation \
+        build/real_ur3e_description
     rm -rf install/aruco_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
         install/aruco_perception \
-        install/calibration_validation
+        install/calibration_validation \
+        install/real_ur3e_description
 
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation --symlink-install
+    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
     source install/setup.bash
 }
 

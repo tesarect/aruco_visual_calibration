@@ -1,0 +1,48 @@
+# MoveIt uses this configuration for controller management.
+#
+# ur_manipulator_controller (Setup Assistant's default name) renamed to
+# scaled_joint_trajectory_controller — the actual controller name exposed
+# by the real robot's controller_manager (confirmed via diagnose_env.sh on
+# real: `scaled_joint_trajectory_controller` present, `joint_trajectory_
+# controller` is NOT what's running there). move_group only ever sends
+# FollowJointTrajectory goals to whatever controller name is listed here —
+# it never talks to this package's own xacro-declared ros2_control block
+# (a Setup Assistant scaffolding artifact using mock_components/
+# GenericSystem, inert/unused at runtime — same as aruco_moveit_config's
+# sim config, where real motion actually comes from Gazebo's own separately
+# -launched controller_manager, not this file). So this name must match
+# the real controller_manager's actual controller, nothing else needs to
+# change for this to route correctly.
+#
+# gripper_controller left as Setup Assistant generated it (FollowJointTrajectory)
+# but is NOT currently usable on the real robot — no ros2_control gripper
+# controller was found active there (only joint_state_broadcaster + other
+# broadcasters; the gripper is driven by a separate /robotiq_85_driver node
+# via /gripper/cmd, not FollowJointTrajectory). Out of scope for now (no
+# task requires gripper actuation) — see todo.txt Thread B5. Revisit if
+# gripper control is ever needed.
+
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+moveit_simple_controller_manager:
+  controller_names:
+    - scaled_joint_trajectory_controller
+    - gripper_controller
+
+  scaled_joint_trajectory_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+  gripper_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - robotiq_85_left_knuckle_joint
