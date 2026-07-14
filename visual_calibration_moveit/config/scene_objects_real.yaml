@@ -1,44 +1,76 @@
-# PLACEHOLDER — not measured on the real robot yet.
-# The real lab layout (Barista body, table, wall-to-camera/arm distances) is
-# visually similar to the sim but NOT identical — do not copy sim values here.
-# Values below must be measured/verified against the real cell before use.
+# INTERIM SAFETY PLACEHOLDER (2026-07-XX) — after a real-robot collision
+# incident during manual jogging (RViz collision display was off), all four
+# objects below are TEMPORARILY set to large, deliberately oversized generic
+# boxes at rough estimated positions — NOT the sim-copied mesh values that
+# were here before (those were wrong AND meshes, compounding the risk: wrong
+# shape at a wrong position gives false confidence). The goal right now is
+# "some real collision protection immediately," not precision — err toward
+# boxes that are bigger/closer than reality, never smaller/further, so
+# MoveIt treats more space as forbidden than is strictly necessary rather
+# than less.
+#
+# TODO: replace each with an accurately measured box via the corner-jog
+# workflow (measure_scene_box.py / measurecorner+measurecompute aliases —
+# see resources/scripts/python/measure_scene_box.py) once that can be done
+# safely (RViz collision-aware jogging, slow, one object at a time, another
+# person spotting). Until then:
+#   - Fill in YOUR_ESTIMATE_* placeholders below with a rough tape-measure/
+#     eyeball distance from base_link to each object, then pad generously
+#     (add margin, don't just guess the object's real edges).
+#   - ALWAYS confirm "Collision-Aware" / collision display is enabled in
+#     RViz's MotionPlanning panel before any further jogging near these
+#     objects, regardless of how good these numbers are.
 planning_scene_setup:
   ros__parameters:
     planning_frame: "base_link"
 
-    coffee_machine.shape_type: "mesh"
-    coffee_machine.pose.x: 0.1
-    coffee_machine.pose.y: 0.86
+    # Per-object on/off switch — set any of these to false to remove that
+    # object from the scene without deleting its config. All default true
+    # if omitted.
+    coffee_machine.enabled: true
+    cupholder.enabled: true
+    countertop.enabled: true
+    wall.enabled: true
+
+    # Coffee machine — rough box, padded. Fill in real rough distances.
+    coffee_machine.shape_type: "box"
+    coffee_machine.pose.x: 0.5
+    coffee_machine.pose.y: 0.88
     coffee_machine.pose.z: -0.032
     coffee_machine.pose.yaw: 1.57
-    coffee_machine.mesh_path: "package://the_construct_office_gazebo/models/coffee_machine/meshes/cafeteria.dae"
+    coffee_machine.box_names: ["body"]
+    coffee_machine.boxes.body.size: [0.6, 0.6, 0.8]
+    coffee_machine.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
 
-    cupholder.shape_type: "mesh"
+    # Barista cupholder/top — rough box, padded.
+    cupholder.shape_type: "box"
     cupholder.pose.x: -0.26
     cupholder.pose.y: 0.04
     cupholder.pose.z: -0.632
     cupholder.pose.yaw: 1.57
-    cupholder.mesh_path: "package://the_construct_office_gazebo/models/barista_model/meshes/TOP_colour_1.dae"
+    cupholder.box_names: ["body"]
+    cupholder.boxes.body.size: [0.5, 0.5, 0.9]
+    cupholder.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
 
+    # Countertop/table surface — rough box, padded, tall enough to cover
+    # from floor-ish up to table height as one solid block (simpler/safer
+    # than 2 stacked boxes until precisely measured).
     countertop.shape_type: "box"
-    countertop.pose.x: 0.3
+    countertop.pose.x: 0.42
     countertop.pose.y: 0.36
-    countertop.pose.z: -0.532
+    countertop.pose.z: -0.601
     countertop.pose.yaw: 0.0
-
-    countertop.box_names: ["body", "top"]
-    countertop.boxes.body.size: [0.5, 1.8, 1.0]
+    countertop.box_names: ["body"]
+    countertop.boxes.body.size: [1.0, 2.0, 1.2]
     countertop.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
 
-    countertop.boxes.top.size: [0.85, 1.81, 0.05]
-    countertop.boxes.top.local_pose: [0.0, 0.0, 0.5, 0.0]
-
+    # Wall — rough box, padded thicker than sim's 0.03m (a thin wall is
+    # easy to clip through in a rough estimate; err thick).
     wall.shape_type: "box"
     wall.pose.x: 0.3
     wall.pose.y: -0.56
     wall.pose.z: -0.032
     wall.pose.yaw: 0.0
-
     wall.box_names: ["body"]
-    wall.boxes.body.size: [2.0, 0.03, 2.0]
+    wall.boxes.body.size: [2.0, 0.3, 2.0]
     wall.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]

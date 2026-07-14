@@ -2,6 +2,14 @@ planning_scene_setup:
   ros__parameters:
     planning_frame: "base_link"
 
+    # Per-object on/off switch — set any of these to false to remove that
+    # object from the scene without deleting its config. All default true
+    # if omitted.
+    coffee_machine.enabled: true
+    cupholder.enabled: true
+    countertop.enabled: true
+    wall.enabled: true
+
     coffee_machine.shape_type: "mesh"
     coffee_machine.pose.x: 0.1
     coffee_machine.pose.y: 0.86

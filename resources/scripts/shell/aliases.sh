@@ -176,6 +176,28 @@ getpresetpose() {
         visual_calibration_msgs/srv/GetPresetPose "{name: '$name'}"
 }
 
+# Records the current tool0 position (base_link-relative) as one corner of
+# a planning-scene box object being measured — see measure_scene_box.py.
+# Jog the arm's end-effector to touch a corner via RViz first, THEN call
+# this (reads live TF only, triggers no motion). Call twice per object
+# (once per opposite corner), appending to the same --out file.
+measurecorner() {
+    local out="${1:?Usage: measurecorner <out_file.txt>}"
+    python3 ~/ros2_ws/src/visual_calibration/resources/scripts/python/measure_scene_box.py \
+        corner --out "$out"
+}
+
+# Computes a box's center pose + size from 2 recorded corners (see
+# measurecorner) and prints scene_objects_real.yaml-ready lines for the
+# given object name (e.g. coffee_machine, cupholder). Usage:
+#   measurecompute ~/coffee_machine_corners.txt coffee_machine
+measurecompute() {
+    local in_file="${1:?Usage: measurecompute <in_file.txt> <object_name>}"
+    local name="${2:?Usage: measurecompute <in_file.txt> <object_name>}"
+    python3 ~/ros2_ws/src/visual_calibration/resources/scripts/python/measure_scene_box.py \
+        compute --in "$in_file" --name "$name"
+}
+
 # Sends the ~/calibrate action goal and blocks, printing live feedback
 # (samples_collected/samples_total) until the action completes — includes
 # the final orientation spread (max/mean degrees) in the result.
@@ -327,8 +349,8 @@ completerealsetup() {
     # install zehno - camera driver connectivity
     bash ~/ros2_ws/src/zenoh-pointcloud/install_zenoh.sh
     # install yolo
-    sudo apt install -y python3.10-venv
-    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
+    # sudo apt install -y python3.10-venv
+    # bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
 }
 
 webstatuscheck() {
@@ -339,6 +361,10 @@ webstatuscheck() {
 srcweb() {
     cd ~/webpage_ws/scripts/
     source session_init.sh
+}
+
+realrobotstatuscheck(){
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/check_real_driver.sh
 }
 
 shadcnadd() {

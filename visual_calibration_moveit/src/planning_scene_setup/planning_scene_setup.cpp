@@ -53,6 +53,15 @@ void PlanningSceneSetup::declareParameters()
 {
   declare_parameter("planning_frame", "base_link");
 
+  // Per-object on/off switch — defaults true (every object published,
+  // matching prior behavior) unless explicitly set to false in a params
+  // file, e.g. to keep just one object active while testing/jogging near
+  // it in isolation. See loadSceneObjects()'s enabled check.
+  declare_parameter("coffee_machine.enabled", true);
+  declare_parameter("cupholder.enabled", true);
+  declare_parameter("countertop.enabled", true);
+  declare_parameter("wall.enabled", true);
+
   declare_parameter("coffee_machine.shape_type", "mesh");
   declare_parameter("coffee_machine.pose.x", 0.1);
   declare_parameter("coffee_machine.pose.y", 0.86);
@@ -61,6 +70,16 @@ void PlanningSceneSetup::declareParameters()
   declare_parameter(
     "coffee_machine.mesh_path",
     "package://the_construct_office_gazebo/models/coffee_machine/meshes/cafeteria.dae");
+  // Box params — unused while shape_type stays "mesh" (sim), but must be
+  // declared unconditionally: this node doesn't use
+  // automatically_declare_parameters_from_overrides, so any key present in
+  // a params file (e.g. scene_objects_real.yaml using shape_type: "box")
+  // that isn't declared here throws ParameterNotDeclaredException at
+  // startup, before loadSceneObjects() even runs.
+  declare_parameter("coffee_machine.box_names", std::vector<std::string>{"body"});
+  declare_parameter("coffee_machine.boxes.body.size", std::vector<double>{0.5, 0.5, 0.5});
+  declare_parameter(
+    "coffee_machine.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 
   declare_parameter("cupholder.shape_type", "mesh");
   declare_parameter("cupholder.pose.x", -0.26);
@@ -70,6 +89,10 @@ void PlanningSceneSetup::declareParameters()
   declare_parameter(
     "cupholder.mesh_path",
     "package://the_construct_office_gazebo/models/barista_model/meshes/TOP_colour_1.dae");
+  declare_parameter("cupholder.box_names", std::vector<std::string>{"body"});
+  declare_parameter("cupholder.boxes.body.size", std::vector<double>{0.5, 0.5, 0.5});
+  declare_parameter(
+    "cupholder.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 
   // Countertop is modeled in the Gazebo SDF as two stacked box primitives
   // (body + a thinner top slab), not a mesh — see
@@ -108,6 +131,11 @@ std::vector<SceneObjectConfig> PlanningSceneSetup::loadSceneObjects()
 
   for (const auto & id : kKnownObjectIds) {
     const std::string prefix = toParamPrefix(id);
+
+    if (!get_parameter(prefix + ".enabled").as_bool()) {
+      RCLCPP_INFO(get_logger(), "Skipping '%s' (enabled: false)", prefix.c_str());
+      continue;
+    }
 
     SceneObjectConfig config;
     config.id = id;
