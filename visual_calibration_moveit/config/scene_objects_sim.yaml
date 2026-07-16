@@ -17,12 +17,22 @@ planning_scene_setup:
     coffee_machine.pose.yaw: 1.57
     coffee_machine.mesh_path: "package://the_construct_office_gazebo/models/coffee_machine/meshes/cafeteria.dae"
 
-    cupholder.shape_type: "mesh"
+    # Switched from mesh to box: the instructor's updated
+    # the_construct_office_gazebo package removed the barista_model/
+    # directory entirely (was the source of TOP_colour_1.dae), so the old
+    # mesh path no longer resolves. Box size is a placeholder matching
+    # scene_objects_real.yaml's cupholder box — not yet measured against
+    # the new sim world; retune once sim can be launched again (gzserver
+    # is currently crashing on startup, unrelated to this package — see
+    # resources/docs/aruco_real_tuning_log.md-adjacent notes / todo.txt).
+    cupholder.shape_type: "box"
     cupholder.pose.x: -0.26
     cupholder.pose.y: 0.04
     cupholder.pose.z: -0.632
     cupholder.pose.yaw: 1.57
-    cupholder.mesh_path: "package://the_construct_office_gazebo/models/barista_model/meshes/TOP_colour_1.dae"
+    cupholder.box_names: ["body"]
+    cupholder.boxes.body.size: [0.5, 0.5, 0.9]
+    cupholder.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
 
     # Countertop = starbots_bartender_dispenser, modeled in Gazebo as two
     # stacked box primitives (body + thin top slab), not a mesh.

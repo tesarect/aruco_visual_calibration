@@ -1,0 +1,40 @@
+# MoveIt uses this configuration for controller management.
+#
+# Simulation only — controller is joint_trajectory_controller, no
+# "scaled_" prefix (confirmed via diagnose_env.sh sim:
+# /joint_trajectory_controller/follow_joint_trajectory and
+# /gripper_controller/gripper_cmd are the active action servers in Gazebo).
+# This is the one file that differs from the instructor's real-robot
+# ur3e_moveit_config (which uses scaled_joint_trajectory_controller) — see
+# sim_ur3e_moveit_config's package.xml description for why this package
+# exists as a separate copy rather than editing ur3e_moveit_config
+# in-place. Using the wrong controller name for the wrong environment
+# causes MoveIt to accept a plan but abort execution, since it dispatches
+# to an action server that doesn't exist in that environment — this is
+# exactly what caused the sim "Plan and Execute request aborted" failure
+# when ur3e_moveit_config's real-robot file was used for sim too.
+
+moveit_controller_manager: moveit_simple_controller_manager/MoveItSimpleControllerManager
+
+moveit_simple_controller_manager:
+  controller_names:
+    - joint_trajectory_controller
+    - gripper_controller
+
+  joint_trajectory_controller:
+    type: FollowJointTrajectory
+    action_ns: follow_joint_trajectory
+    default: true
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
+  gripper_controller:
+    type: GripperCommand
+    action_ns: gripper_cmd
+    default: true
+    joints:
+      - robotiq_85_left_knuckle_joint

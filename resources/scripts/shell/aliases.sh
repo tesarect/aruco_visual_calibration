@@ -38,6 +38,7 @@ customkill() {
     declare -A commands=(
         [gzclient]='pkill -f "^gzclient"'
         [basetmux]='tmux kill-session -t base_term'
+        [baserealtmux]='tmux kill-session -t base_real_term'
         [trajcaltmux]='tmux kill-session -t trajcal_term'
         [perceptmux]='tmux kill-session -t percep_term'
         [webstacktmux]='tmux kill-session -t webstack_term'
@@ -62,6 +63,15 @@ customkill() {
 tmuxbasesim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
     bash ./sim_tmux_base.sh
+}
+
+# Real robot equivalent of tmuxbasesim — move_group, rviz, planning scene,
+# marker-debugger. Does NOT start the robot driver itself; run
+# `realrobotstatuscheck` first and confirm /joint_states + /tf are
+# publishing before starting this session (see real_tmux_base.sh header).
+tmuxbasereal() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./real_tmux_base.sh
 }
 
 tmuxtrajcalsim() {
@@ -99,14 +109,24 @@ startmoveitconfig() {
     ros2 launch moveit_setup_assistant setup_assistant.launch.py
 }
 
+# env: sim -> sim_ur3e_moveit_config (project-owned, joint_trajectory_controller)
+#      real -> ur3e_moveit_config (instructor-provided, scaled_joint_trajectory_controller)
+# See sim_ur3e_moveit_config/package.xml's description for why these are
+# separate packages instead of one shared one.
 startmoveitgroup() {
+    local env="${1:-sim}"
+    local pkg="sim_ur3e_moveit_config"
+    [[ "$env" == "real" ]] && pkg="ur3e_moveit_config"
     source ~/ros2_ws/install/setup.bash
-    ros2 launch aruco_moveit_config move_group.launch.py
+    ros2 launch "$pkg" move_group.launch.py
 }
 
 startrviz() {
+    local env="${1:-sim}"
+    local pkg="sim_ur3e_moveit_config"
+    [[ "$env" == "real" ]] && pkg="ur3e_moveit_config"
     source ~/ros2_ws/install/setup.bash
-    ros2 launch aruco_moveit_config moveit_rviz.launch.py
+    ros2 launch "$pkg" moveit_rviz.launch.py
 }
 
 viewtf() {
@@ -256,53 +276,55 @@ vcpkgbuildsymlink() {
 
 vcbuild() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
+    # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
+    colcon build --packages-up-to sim_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
     source install/setup.bash
 }
 
 vcbuildsymlink() {
     cd ~/ros2_ws || return
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
+    # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
+    colcon build --packages-up-to sim_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
     source install/setup.bash
 }
 
 vccleanbuild() {
     cd ~/ros2_ws || return
 
-    rm -rf build/aruco_moveit_config \
+    rm -rf build/sim_ur3e_moveit_config \
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
         build/aruco_perception \
         build/calibration_validation \
         build/real_ur3e_description
-    rm -rf install/aruco_moveit_config \
+    rm -rf install/sim_ur3e_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
         install/aruco_perception \
         install/calibration_validation \
         install/real_ur3e_description
 
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
+    colcon build --packages-up-to sim_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
     source install/setup.bash
 }
 
 vccleanbuildsymlink() {
     cd ~/ros2_ws || return
 
-    rm -rf build/aruco_moveit_config \
+    rm -rf build/sim_ur3e_moveit_config \
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
         build/aruco_perception \
         build/calibration_validation \
         build/real_ur3e_description
-    rm -rf install/aruco_moveit_config \
+    rm -rf install/sim_ur3e_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
         install/aruco_perception \
         install/calibration_validation \
         install/real_ur3e_description
 
-    colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
+    colcon build --packages-up-to sim_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
     source install/setup.bash
 }
 
@@ -348,7 +370,7 @@ completerealsetup() {
     bash ~/webpage_ws/scripts/session_status.sh
     # install zehno - camera driver connectivity
     bash ~/ros2_ws/src/zenoh-pointcloud/install_zenoh.sh
-    # install yolo
+    # install yolo [TODO: zenoh installation asks for installation confirmation. need to pass in `-y`]
     # sudo apt install -y python3.10-venv
     # bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
 }

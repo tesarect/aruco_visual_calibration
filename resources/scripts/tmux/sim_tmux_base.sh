@@ -29,13 +29,13 @@ tmux send-keys -t "$PANE0" \
 # launches directly (no further poll available before it starts).
 PANE1=$(tmux split-window -t "$PANE0" -h -P -F "#{pane_id}")
 tmux send-keys -t "$PANE1" \
-"sleep 5 && source ~/ros2_ws/install/setup.bash && ros2 launch aruco_moveit_config move_group.launch.py" C-m
+"sleep 5 && source ~/ros2_ws/install/setup.bash && ros2 launch sim_ur3e_moveit_config move_group.launch.py" C-m
 
 # Pane 2 — rviz. Polls for move_group before launching (rviz's
 # MotionPlanning plugin needs move_group up to be useful).
 PANE2=$(tmux split-window -t "$PANE0" -v -P -F "#{pane_id}")
 tmux send-keys -t "$PANE2" \
-"$SHELL_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 launch aruco_moveit_config moveit_rviz.launch.py" C-m
+"$SHELL_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 launch sim_ur3e_moveit_config moveit_rviz.launch.py" C-m
 
 # Pane 3 — planning scene setup (one-shot: populates the scene, then
 # exits). Polls for move_group first (PlanningSceneInterface needs it).
