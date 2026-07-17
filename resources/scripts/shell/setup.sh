@@ -27,22 +27,17 @@ echo ">_ Installing Tmux..."
 sudo apt install -y xclip
 sudo apt install -y tmux
 
+echo "🖱️  Installing tmux.conf (mouse mode, prefix, clipboard, etc.)..."
+TMUX_CONF_SRC="$HOME/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf"
+TMUX_CONF_DST="$HOME/.tmux.conf"
+# Overwrites any existing ~/.tmux.conf — this was previously a
+# commented-out no-op block, meaning tmux.conf's settings (mouse on,
+# prefix, clipboard) never actually reached tmux on any rosject, no
+# matter how the file itself was edited. Always overwrite (not just
+# copy-if-missing) so project changes to tmux.conf propagate on every
+# fresh setup run, rather than only the very first one.
+if [ -f "$TMUX_CONF_SRC" ]; then
+    cp "$TMUX_CONF_SRC" "$TMUX_CONF_DST"
+fi
+
 echo "✅ Setup complete!"
-
-#----place them in you bashrc
-# TMUX_CONF_SRC="$HOME/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf"
-# TMUX_CONF_DST="$HOME/.tmux.conf"
-
-# - copies only if not present at ~/
-# if [ -f "$TMUX_CONF_SRC" ] && [ ! -f "$TMUX_CONF_DST" ]; then
-#     cp "$TMUX_CONF_SRC" "$TMUX_CONF_DST"
-# fi
-
-# - overwrites existing
-# if [ -f "$TMUX_CONF_SRC" ]; then
-#     cp "$TMUX_CONF_SRC" "$TMUX_CONF_DST"
-# fi
-
-# - or redirect the path
-# tmux -f /workspaces/configs/.tmux.conf
-# tmux -f ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf

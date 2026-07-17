@@ -1,0 +1,32 @@
+moveit_setup_assistant_config:
+  urdf:
+    # Was package: ur_description, relative_path: urdf/ur.urdf.xacro — the
+    # SAME file sim's ur3e_moveit_config points at. MoveItConfigsBuilder
+    # re-reads this file live at EVERY move_group/rsp/rviz launch (no
+    # baked copy in this package), so real's own rviz launch broke the
+    # moment the instructor switched ur.urdf.xacro's gripper to RG2 for
+    # sim's benefit — even with no sim process running concurrently. Error
+    # was "Variable 'rg2_gripper_finger_left_joint' is not known to model
+    # 'ur3e'" (model name + gripper both came from sim's current URDF).
+    #
+    # ur_description's OTHER file, ur_moveit.urdf.xacro, is not the fix
+    # either — CLAUDE.md documents it as stale/deprecated (previously
+    # caused "joint not found" errors against the RG2 sim in the old
+    # my_moveit_config package), and it also drags in sensor_r430 (a
+    # simulated wrist camera) and a mismatched default robot name ("ur",
+    # not "name").
+    #
+    # Correct fix: point at real_ur3e_description's own xacro instead — a
+    # project-owned, stripped copy of ur_moveit.urdf.xacro (Robotiq 85,
+    # no sensor_r430/ground_plane_box, name="name" matching this SRDF) —
+    # see real_ur3e_description/urdf/real_ur3e_robotiq85.urdf.xacro's own
+    # header comment. Fully decoupled from whatever ur.urdf.xacro
+    # currently expands to for sim.
+    package: real_ur3e_description
+    relative_path: urdf/real_ur3e_robotiq85.urdf.xacro
+  srdf:
+    relative_path: config/name.srdf
+  package_settings:
+    author_name: aezquerro
+    author_email: aezquerro@theconstructsim.com
+    generated_timestamp: 1693503750

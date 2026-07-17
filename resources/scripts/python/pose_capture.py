@@ -12,17 +12,19 @@ Use this to get the arm roughly in front of wherever you've physically
 placed the camera, then fine-tune by hand/teach-pendant.
 
 Usage:
-    # Record the current rg2_gripper_aruco_link pose (base_link-relative)
-    # to a text file — run this once you've manually jogged the arm to a
-    # pose where the camera can see the marker.
-    python3 pose_capture.py record --out ~/poses.txt
+    # Record the current marker-frame pose (base_link-relative) to a text
+    # file — run this once you've manually jogged the arm to a pose where
+    # the camera can see the marker. --env picks the right frame name:
+    # sim -> rg2_gripper_aruco_link, real -> aruco_link.
+    python3 pose_capture.py record --env sim --out ~/poses.txt
+    python3 pose_capture.py record --env real --out ~/poses.txt
 
     # Compute a standoff pose: 0.3m along +Z, 0.0/0.0m along X/Y, from
     # base_link's origin, facing back along -Z (roll=pi so the marker
     # faces the camera placed further along +Z). Prints the target pose
     # and, with --move, sends it to trajectory_planner's ~/trace_path.
-    python3 pose_capture.py standoff --z 0.3 --roll 3.14159265 --out ~/standoff_pose.txt
-    python3 pose_capture.py standoff --z 0.3 --roll 3.14159265 --move
+    python3 pose_capture.py standoff --env sim --z 0.3 --roll 3.14159265 --out ~/standoff_pose.txt
+    python3 pose_capture.py standoff --env real --z 0.3 --roll 3.14159265 --move
 
 Nodes that must already be running:
     - Real robot driver / joint_state_broadcaster publishing TF (for `record`)
@@ -42,7 +44,16 @@ from tf_transformations import euler_from_quaternion, quaternion_from_euler
 from geometry_msgs.msg import Pose
 from visual_calibration_msgs.srv import TracePath
 
-EE_FRAME = "rg2_gripper_aruco_link"
+# Marker frame name differs by environment: sim still spawns the RG2
+# gripper (rg2_gripper_aruco_link, confirmed in new_diagnostics/
+# diagnose_sim_*.txt), while real has been swapped to Robotiq 85
+# (aruco_link, parent 'robotiq_85_base_link' — confirmed in
+# new_diagnostics/diagnose_real_*.txt view_frames dump; a static
+# transform, i.e. a fixed joint, not a live-detected frame).
+EE_FRAME_BY_ENV = {
+    "sim": "rg2_gripper_aruco_link",
+    "real": "aruco_link",
+}
 BASE_FRAME = "base_link"
 
 
@@ -73,19 +84,20 @@ def format_pose_line(label, tf):
 
 
 def cmd_record(args):
+    ee_frame = EE_FRAME_BY_ENV[args.env]
     rclpy.init()
     node = Node("pose_capture_record")
     tf_buffer = Buffer()
     TransformListener(tf_buffer, node)
 
     try:
-        tf = lookup_pose(node, tf_buffer, EE_FRAME, BASE_FRAME, args.timeout)
+        tf = lookup_pose(node, tf_buffer, ee_frame, BASE_FRAME, args.timeout)
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         rclpy.shutdown()
         sys.exit(1)
 
-    line = format_pose_line(f"{BASE_FRAME} -> {EE_FRAME}", tf)
+    line = format_pose_line(f"{BASE_FRAME} -> {ee_frame}", tf)
     print(line.strip())
     with open(args.out, "a") as f:
         f.write(line)
@@ -95,6 +107,7 @@ def cmd_record(args):
 
 
 def cmd_standoff(args):
+    ee_frame = EE_FRAME_BY_ENV[args.env]
     q = quaternion_from_euler(args.roll, args.pitch, args.yaw)
     pose = Pose()
     pose.position.x = args.x
@@ -107,7 +120,7 @@ def cmd_standoff(args):
 
     stamp = datetime.datetime.now().isoformat(timespec="seconds")
     line = (
-        f"[{stamp}] standoff target ({BASE_FRAME}-relative, for {EE_FRAME}): "
+        f"[{stamp}] standoff target ({BASE_FRAME}-relative, for {ee_frame}): "
         f"xyz=({pose.position.x:.4f}, {pose.position.y:.4f}, {pose.position.z:.4f}) "
         f"quat=({q[0]:.4f}, {q[1]:.4f}, {q[2]:.4f}, {q[3]:.4f}) "
         f"rpy_rad=({args.roll:.4f}, {args.pitch:.4f}, {args.yaw:.4f})\n"
@@ -158,12 +171,16 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_record = sub.add_parser("record", help="Record current EE pose to a text file")
+    p_record.add_argument("--env", choices=EE_FRAME_BY_ENV.keys(), required=True,
+                           help="Which environment's marker frame to look up")
     p_record.add_argument("--out", default="poses.txt", help="Output text file (appended)")
     p_record.add_argument("--timeout", type=float, default=5.0, help="TF lookup timeout (s)")
     p_record.set_defaults(func=cmd_record)
 
     p_standoff = sub.add_parser(
         "standoff", help="Compute (and optionally move to) a candidate standoff pose")
+    p_standoff.add_argument("--env", choices=EE_FRAME_BY_ENV.keys(), required=True,
+                             help="Which environment's marker frame this pose targets")
     p_standoff.add_argument("--x", type=float, default=0.0, help=f"X offset from {BASE_FRAME} (m)")
     p_standoff.add_argument("--y", type=float, default=0.0, help=f"Y offset from {BASE_FRAME} (m)")
     p_standoff.add_argument("--z", type=float, default=0.3, help=f"Z offset from {BASE_FRAME} (m)")

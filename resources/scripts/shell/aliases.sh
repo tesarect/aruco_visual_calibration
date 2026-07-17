@@ -110,13 +110,18 @@ startmoveitconfig() {
 }
 
 # env: sim -> sim_ur3e_moveit_config (project-owned, joint_trajectory_controller)
-#      real -> ur3e_moveit_config (instructor-provided, scaled_joint_trajectory_controller)
-# See sim_ur3e_moveit_config/package.xml's description for why these are
-# separate packages instead of one shared one.
+#      real -> real_ur3e_moveit_config (project-owned, scaled_joint_trajectory_controller)
+# Both are project-owned copies under visual_calibration/, NOT
+# universal_robot_ros2/ur3e_moveit_config directly — that instructor
+# package's moveit_controllers.yaml was found to have drifted to
+# joint_trajectory_controller (sim's controller name) at some point;
+# real_ur3e_moveit_config preserves the correct scaled_ version. See
+# sim_ur3e_moveit_config/package.xml's description for the same reasoning
+# on the sim side.
 startmoveitgroup() {
     local env="${1:-sim}"
     local pkg="sim_ur3e_moveit_config"
-    [[ "$env" == "real" ]] && pkg="ur3e_moveit_config"
+    [[ "$env" == "real" ]] && pkg="real_ur3e_moveit_config"
     source ~/ros2_ws/install/setup.bash
     ros2 launch "$pkg" move_group.launch.py
 }
@@ -124,7 +129,7 @@ startmoveitgroup() {
 startrviz() {
     local env="${1:-sim}"
     local pkg="sim_ur3e_moveit_config"
-    [[ "$env" == "real" ]] && pkg="ur3e_moveit_config"
+    [[ "$env" == "real" ]] && pkg="real_ur3e_moveit_config"
     source ~/ros2_ws/install/setup.bash
     ros2 launch "$pkg" moveit_rviz.launch.py
 }
@@ -277,14 +282,14 @@ vcpkgbuildsymlink() {
 vcbuild() {
     cd ~/ros2_ws || return
     # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
-    colcon build --packages-up-to sim_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
+    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
     source install/setup.bash
 }
 
 vcbuildsymlink() {
     cd ~/ros2_ws || return
     # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
-    colcon build --packages-up-to sim_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
+    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
     source install/setup.bash
 }
 
@@ -292,19 +297,21 @@ vccleanbuild() {
     cd ~/ros2_ws || return
 
     rm -rf build/sim_ur3e_moveit_config \
+        build/real_ur3e_moveit_config \
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
         build/aruco_perception \
         build/calibration_validation \
         build/real_ur3e_description
     rm -rf install/sim_ur3e_moveit_config \
+        install/real_ur3e_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
         install/aruco_perception \
         install/calibration_validation \
         install/real_ur3e_description
 
-    colcon build --packages-up-to sim_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
+    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
     source install/setup.bash
 }
 
@@ -312,19 +319,21 @@ vccleanbuildsymlink() {
     cd ~/ros2_ws || return
 
     rm -rf build/sim_ur3e_moveit_config \
+        build/real_ur3e_moveit_config \
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
         build/aruco_perception \
         build/calibration_validation \
         build/real_ur3e_description
     rm -rf install/sim_ur3e_moveit_config \
+        install/real_ur3e_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
         install/aruco_perception \
         install/calibration_validation \
         install/real_ur3e_description
 
-    colcon build --packages-up-to sim_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
+    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
     source install/setup.bash
 }
 
@@ -345,31 +354,46 @@ cleanlogs() {
     rm -rf log/
 }
 
+# Ensures every script under resources/scripts/{shell,tmux,python} is
+# executable. Needed because a plain file copy (cp -r / rsync without -p,
+# scp, drag-and-drop in some editors) does not preserve the executable
+# bit — this bit us repeatedly with tmux/python scripts run as
+# `./script.sh` or invoked directly by other scripts (not via `bash
+# script.sh`, which works regardless of the bit). Safe to run anytime,
+# idempotent, and called automatically by completesimsetup/completerealsetup
+# so a fresh rosject copy never needs a manual chmod pass again.
+fixscriptperms() {
+    find ~/ros2_ws/src/visual_calibration/resources/scripts \
+        \( -name "*.sh" -o -name "*.py" \) -exec chmod +x {} +
+    echo "🛂🔑-Fixed executable permissions under resources/scripts/"
+}
+
 completesimsetup() {
+    fixscriptperms
     # installbase
     bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup.sh
     # installweb
-    bash ~/webpage_ws/setup_rosject.sh
-    # initweb
-    source ~/webpage_ws/scripts/session_init.sh
-    # statusweb
-    bash ~/webpage_ws/scripts/session_status.sh
-    # install yolo
-    sudo apt install -y python3.10-venv
-    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
+    # bash ~/webpage_ws/setup_rosject.sh
+    # # initweb
+    # source ~/webpage_ws/scripts/session_init.sh
+    # # statusweb
+    # bash ~/webpage_ws/scripts/session_status.sh
+    # # install yolo
+    # sudo apt install -y python3.10-venv
+    # bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
 }
 
 completerealsetup() {
+    fixscriptperms
     # installbasereal
     bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup_real.sh
     # installweb
-    bash ~/webpage_ws/setup_rosject.sh
-    # initweb
-    source ~/webpage_ws/scripts/session_init.sh
-    # statusweb
-    bash ~/webpage_ws/scripts/session_status.sh
-    # install zehno - camera driver connectivity
-    bash ~/ros2_ws/src/zenoh-pointcloud/install_zenoh.sh
+    # bash ~/webpage_ws/setup_rosject.sh
+    # # initweb
+    # source ~/webpage_ws/scripts/session_init.sh
+    # # statusweb
+    # bash ~/webpage_ws/scripts/session_status.sh
+    # Install zehno - camera driver - done by setup_real.sh
     # install yolo [TODO: zenoh installation asks for installation confirmation. need to pass in `-y`]
     # sudo apt install -y python3.10-venv
     # bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
@@ -387,6 +411,20 @@ srcweb() {
 
 realrobotstatuscheck(){
     bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/check_real_driver.sh
+}
+
+# Checks scaled_joint_trajectory_controller's state on the real robot's
+# controller_manager and activates it if it dropped to inactive (seen
+# happening intermittently on real — root cause not yet diagnosed). Safe
+# to run repeatedly: no-ops if already active. Requires controller_manager
+# to be up (i.e. the real robot driver running) — run realrobotstatuscheck
+# first if unsure. Wraps ensure_controller_active.sh, which takes any
+# controller_manager/controller_name pair — call that directly for other
+# controllers (e.g. gripper_controller) if needed.
+ensurerealcontroller() {
+    source ~/ros2_ws/install/setup.bash
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/ensure_controller_active.sh \
+        /controller_manager scaled_joint_trajectory_controller
 }
 
 shadcnadd() {

@@ -18,18 +18,21 @@ fi
 
 tmux new-session -d -s "$SESSION" -n "$WINDOW"
 
-# Pane 0 — simulation. No clean topic/service readiness signal for "Gazebo
-# fully up" exists, so downstream panes gate on a fixed sleep instead of a
-# poll (see wait_for_node.sh for the panes that *can* poll).
+# Pane 0 — simulation.
 PANE0=$(tmux list-panes -t "$SESSION:$WINDOW" -F "#{pane_id}")
 tmux send-keys -t "$PANE0" \
 "source ~/ros2_ws/install/setup.bash && ros2 launch the_construct_office_gazebo starbots_ur3e.launch.xml" C-m
 
-# Pane 1 — move_group. Waits a fixed 5s for Gazebo to be underway, then
-# launches directly (no further poll available before it starts).
+# Pane 1 — move_group. Waits for joint_state_broadcaster to be active on
+# controller_manager (a real readiness signal — Gazebo's
+# gazebo_ros2_control plugin has finished loading hardware AND
+# controller_manager has activated it), not a fixed sleep — a flat `sleep
+# N` raced against Gazebo's variable startup time and sometimes wasn't
+# long enough (move_group would start while the sim controllers were
+# still mid-load). See wait_for_controllers.sh.
 PANE1=$(tmux split-window -t "$PANE0" -h -P -F "#{pane_id}")
 tmux send-keys -t "$PANE1" \
-"sleep 5 && source ~/ros2_ws/install/setup.bash && ros2 launch sim_ur3e_moveit_config move_group.launch.py" C-m
+"$SHELL_DIR/wait_for_controllers.sh /controller_manager 60 && source ~/ros2_ws/install/setup.bash && ros2 launch sim_ur3e_moveit_config move_group.launch.py" C-m
 
 # Pane 2 — rviz. Polls for move_group before launching (rviz's
 # MotionPlanning plugin needs move_group up to be useful).

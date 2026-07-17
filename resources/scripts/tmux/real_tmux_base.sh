@@ -21,17 +21,26 @@ fi
 
 tmux new-session -d -s "$SESSION" -n "$WINDOW"
 
-# Pane 0 — move_group (real robot's own instructor-provided package, no
-# sim_ prefix). Assumes the robot driver is already up — check first with
-# `realrobotstatuscheck`.
+# Pane 0 — move_group. Uses real_ur3e_moveit_config (project-owned copy
+# under visual_calibration/, mirroring sim_ur3e_moveit_config's pattern)
+# — NOT universal_robot_ros2/ur3e_moveit_config directly, since that
+# instructor-provided package's moveit_controllers.yaml was found to have
+# drifted to sim's controller name (joint_trajectory_controller, no
+# scaled_ prefix) at some point — real_ur3e_moveit_config has the correct
+# scaled_joint_trajectory_controller. Assumes the robot driver is already
+# up — check first with `realrobotstatuscheck`. Runs
+# ensure_controller_active.sh first: scaled_joint_trajectory_controller
+# has been observed dropping to inactive intermittently on real (root
+# cause not yet diagnosed) — this activates it if needed before
+# move_group starts relying on it.
 PANE0=$(tmux list-panes -t "$SESSION:$WINDOW" -F "#{pane_id}")
 tmux send-keys -t "$PANE0" \
-"source ~/ros2_ws/install/setup.bash && ros2 launch ur3e_moveit_config move_group.launch.py" C-m
+"source ~/ros2_ws/install/setup.bash && $SHELL_DIR/ensure_controller_active.sh /controller_manager scaled_joint_trajectory_controller; ros2 launch real_ur3e_moveit_config move_group.launch.py" C-m
 
 # Pane 1 — rviz. Polls for move_group before launching.
 PANE1=$(tmux split-window -t "$PANE0" -h -P -F "#{pane_id}")
 tmux send-keys -t "$PANE1" \
-"$SHELL_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 launch ur3e_moveit_config moveit_rviz.launch.py" C-m
+"$SHELL_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 launch real_ur3e_moveit_config moveit_rviz.launch.py" C-m
 
 # Pane 2 — planning scene setup (one-shot: populates the scene, then
 # exits). Polls for move_group first (PlanningSceneInterface needs it).

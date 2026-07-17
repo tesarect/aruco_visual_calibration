@@ -2,6 +2,20 @@
 
 set -e  # exit on any error
 
+# This rosject container doesn't run systemd as PID 1 (common in
+# Docker-based cloud IDEs). zenoh-bridge-ros2dds's postinstall script tries
+# to register/start a systemd service and hard-fails without this — which
+# then aborts apt's whole transaction (via set -e below), taking tmux/xclip
+# down with it even though they're unrelated packages. SYSTEMD_OFFLINE=1
+# tells that postinstall script to skip the systemd calls instead of
+# failing. Exported for the whole script since apt is called multiple
+# times below. dpkg --configure -a defensively re-runs configuration for
+# anything left half-installed from a PRIOR failed run of this script
+# (e.g. if the container was reset mid-install last time) — safe/no-op if
+# nothing is broken.
+export SYSTEMD_OFFLINE=1
+sudo -E dpkg --configure -a || true
+
 echo "🔧 Removing old ROS sources..."
 sudo rm -f /etc/apt/sources.list.d/ros*.list
 
@@ -24,33 +38,24 @@ echo "🔄 Updating package lists..."
 sudo apt-get update || true
 
 echo ">_ Installing Tmux..."
-sudo apt install -y xclip
-sudo apt install -y tmux
+sudo -E apt install -y xclip
+sudo -E apt install -y tmux
+
+echo "🖱️  Installing tmux.conf (mouse mode, prefix, clipboard, etc.)..."
+TMUX_CONF_SRC="$HOME/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf"
+TMUX_CONF_DST="$HOME/.tmux.conf"
+# Overwrites any existing ~/.tmux.conf — see setup.sh's matching block for
+# why (this was previously a commented-out no-op on every rosject).
+if [ -f "$TMUX_CONF_SRC" ]; then
+    cp "$TMUX_CONF_SRC" "$TMUX_CONF_DST"
+fi
 
 echo "🎦 Installing Zenoh..."
 cd ~/ros2_ws/src/zenoh-pointcloud/
 ./install_zenoh.sh
 
-echo "🎦 Start Zenoh..."
-cd ~/ros2_ws/src/zenoh-pointcloud/init
-./rosject.sh
+# echo "🎦 Start Zenoh..."
+# cd ~/ros2_ws/src/zenoh-pointcloud/init
+# ./rosject.sh
 
 echo "✅ Setup complete!"
-
-#----place them in you bashrc
-# TMUX_CONF_SRC="$HOME/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf"
-# TMUX_CONF_DST="$HOME/.tmux.conf"
-
-# - copies only if not present at ~/
-# if [ -f "$TMUX_CONF_SRC" ] && [ ! -f "$TMUX_CONF_DST" ]; then
-#     cp "$TMUX_CONF_SRC" "$TMUX_CONF_DST"
-# fi
-
-# - overwrites existing
-# if [ -f "$TMUX_CONF_SRC" ]; then
-#     cp "$TMUX_CONF_SRC" "$TMUX_CONF_DST"
-# fi
-
-# - or redirect the path
-# tmux -f /workspaces/configs/.tmux.conf
-# tmux -f ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf
