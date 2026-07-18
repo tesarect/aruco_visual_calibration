@@ -40,6 +40,7 @@ customkill() {
         [basetmux]='tmux kill-session -t base_term'
         [baserealtmux]='tmux kill-session -t base_real_term'
         [trajcaltmux]='tmux kill-session -t trajcal_term'
+        [trajcalrealtmux]='tmux kill-session -t trajcal_real_term'
         [perceptmux]='tmux kill-session -t percep_term'
         [webstacktmux]='tmux kill-session -t webstack_term'
         [gittmux]='tmux kill-session -t GIT'
@@ -65,9 +66,9 @@ tmuxbasesim() {
     bash ./sim_tmux_base.sh
 }
 
-# Real robot equivalent of tmuxbasesim — move_group, rviz, planning scene,
-# marker-debugger. Does NOT start the robot driver itself; run
-# `realrobotstatuscheck` first and confirm /joint_states + /tf are
+# Real robot equivalent of tmuxbasesim — Zenoh bridge, move_group, rviz,
+# planning scene, marker-debugger. Does NOT start the robot driver itself;
+# run `realrobotstatuscheck` first and confirm /joint_states + /tf are
 # publishing before starting this session (see real_tmux_base.sh header).
 tmuxbasereal() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
@@ -77,6 +78,16 @@ tmuxbasereal() {
 tmuxtrajcalsim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
     bash ./sim_tmux_trajcal.sh
+}
+
+# Real robot equivalent of tmuxtrajcalsim — trajectory_planner,
+# aruco_detector_node. Does NOT start calibration_broadcaster_node yet
+# (calibration_broadcaster_real.yaml doesn't exist, see todo.txt B4). Run
+# `tmuxbasereal` first — this session's panes poll for move_group +
+# planning scene readiness, which come from there.
+tmuxtrajcalreal() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./real_tmux_trajcal.sh
 }
 
 tmuxwebstacksim() {
@@ -373,11 +384,11 @@ completesimsetup() {
     # installbase
     bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup.sh
     # installweb
-    # bash ~/webpage_ws/setup_rosject.sh
-    # # initweb
-    # source ~/webpage_ws/scripts/session_init.sh
-    # # statusweb
-    # bash ~/webpage_ws/scripts/session_status.sh
+    bash ~/webpage_ws/setup_rosject.sh
+    # initweb
+    source ~/webpage_ws/scripts/session_init.sh
+    # statusweb
+    bash ~/webpage_ws/scripts/session_status.sh
     # # install yolo
     # sudo apt install -y python3.10-venv
     # bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh

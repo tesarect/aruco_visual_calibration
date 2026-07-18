@@ -10,7 +10,21 @@
     <!--CHAINS: When a chain is specified, all the links along the chain (including endpoints) are included in the group. Additionally, all the joints that are parents to included links are also included. This means that joints along the chain and the parent joint of the base link are included in the group-->
     <!--SUBGROUPS: Groups can also be formed by referencing to already defined group names-->
     <group name="ur_manipulator">
-        <chain base_link="base_link" tip_link="tool0"/>
+        <!-- tip_link extended from tool0 to robotiq_85_base_link (a fixed,
+             non-actuated joint between them — see tool0 -> robotiq_85_base_link
+             in the live /tf_static dump, zero translation, fixed rotation) so
+             MoveIt can plan/move this link directly, matching sim's pattern of
+             extending the chain to a gripper-mounted frame
+             (rg2_gripper_aruco_link). Does NOT add any new DOF to plan for.
+             aruco_link was considered instead (the actual ArUco marker frame)
+             but its only known source on the real robot was an ad-hoc, manually
+             -started `ros2 run tf2_ros static_transform_publisher` process with
+             no tracked launch file and no verified measurement behind its
+             values — not safe to depend on structurally yet. robotiq_85_base_link
+             is used as an interim, verified-safe end effector until the real
+             camera->marker offset is properly measured (todo.txt B2) and baked
+             in as a permanent fixed joint. -->
+        <chain base_link="base_link" tip_link="robotiq_85_base_link"/>
     </group>
     <group name="gripper">
         <joint name="robotiq_85_base_joint"/>

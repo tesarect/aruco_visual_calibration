@@ -2,6 +2,7 @@
 #define VISUAL_CALIBRATION_MOVEIT__TRAJECTORY_PLANNER_HPP_
 
 #include <array>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -11,9 +12,11 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
+#include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
+#include <visual_calibration_msgs/msg/planning_failure.hpp>
 #include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
 #include <visual_calibration_msgs/srv/get_preset_pose.hpp>
 #include <visual_calibration_msgs/srv/get_standoff_pose.hpp>
@@ -85,6 +88,56 @@ struct PolygonConfig
   /// use ~/trace_path directly, which takes planning_mode as a request field.
   uint8_t default_planning_mode =
     visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN;
+};
+
+/// Tuning for the sequenced-goal stay/lift/standby behavior (see
+/// ArmState), loaded from a parameter file alongside StandoffConfig/
+/// PolygonConfig.
+struct SequenceConfig
+{
+  /// How long to stay AT a sequenced goal (e.g. a hole/cupholder pose)
+  /// before automatically lifting away from it.
+  double stay_seconds_at_goal = 4.0;
+  /// Absolute Z coordinate (in the planning frame, i.e. base_link's own
+  /// Z — 0.0 means level with base_link's origin) the arm lifts to after
+  /// stay_seconds_at_goal, keeping the goal's X/Y/orientation unchanged.
+  /// NOT a relative offset added to the goal's Z — an absolute target
+  /// height, per project convention ("lift to roughly base_link's Z
+  /// plane").
+  double lift_target_z_m = 0.0;
+  /// How long to wait at the lifted pose, with no new sequenced goal
+  /// arriving, before automatically moving to the "standby" preset.
+  double lift_wait_seconds = 8.0;
+};
+
+/// TrajectoryPlanner has no built-in understanding of the robot's task —
+/// it doesn't know what "calibration" or "inspection" means, only "move to
+/// this pose". This enum is the small amount of bookkeeping it keeps about
+/// its OWN recent activity, so it can automatically stay-then-lift-then-
+/// standby after a "sequenced goal" (see TracePath.srv's is_sequenced_goal
+/// field) without a caller having to drive every step of that dance
+/// itself. In plain terms: the node remembers "did I just visit a regular
+/// goal, and if so, what pose was that", and runs two timers off of that
+/// one fact — it is not reasoning about the overall workflow, just
+/// reacting mechanically to a flag it's told. Unlike an earlier version of
+/// this design, it does NOT return to wherever the arm happened to be
+/// before the goal — every sequenced goal always resolves to the SAME two
+/// destinations (a lift straight up from the goal, then "standby"), never
+/// an arbitrary prior pose.
+enum class ArmState
+{
+  /// No sequenced goal is pending stay/lift/standby handling — this is
+  /// also the state right after startup/home/cal_ready moves, which never
+  /// trigger this machinery (see is_sequenced_goal doc comment).
+  IDLE,
+  /// Just reached a sequenced goal; waiting out stay_seconds_at_goal
+  /// before lifting straight up from it.
+  SETTLED_AT_GOAL,
+  /// Lifted to Z = lift_target_z_m; waiting out lift_wait_seconds with no
+  /// new sequenced goal before moving to "standby".
+  LIFTED_IDLE,
+  /// At the "standby" preset — stays here until the next sequenced goal.
+  STANDBY,
 };
 
 /// Trajectory generation via MoveGroupInterface: set a target pose (e.g.
@@ -234,12 +287,75 @@ private:
   /// declared parameters and returns them as a PolygonConfig.
   PolygonConfig loadPolygonConfigFromParams() const;
 
+  /// Reads stay_seconds_at_goal, lift_target_z_m, and lift_wait_seconds from
+  /// this node's declared parameters and returns them as a SequenceConfig.
+  SequenceConfig loadSequenceConfigFromParams() const;
+
+  /// Called after a successful is_sequenced_goal move (see handleTracePath).
+  /// Cancels any pending stay/lift timer, transitions to
+  /// ArmState::SETTLED_AT_GOAL, and (re)starts stay_timer_ for
+  /// sequence_config_.stay_seconds_at_goal, at the end of which
+  /// onStayTimerFired runs. goal_pose is the pose the arm just reached —
+  /// stay_timer_'s lift is computed from THIS, not from any pose the arm
+  /// was at before the goal (this design does not track/return-to prior
+  /// poses at all, see ArmState's doc comment).
+  void onSequencedGoalReached(const geometry_msgs::msg::Pose & goal_pose);
+
+  /// Fires once stay_timer_ elapses. Plans and executes to goal_pose_ with
+  /// Z set to sequence_config_.lift_target_z_m (same X/Y/orientation,
+  /// absolute Z target — see SequenceConfig::lift_target_z_m). On success,
+  /// transitions to ArmState::LIFTED_IDLE and starts lift_wait_timer_ for
+  /// sequence_config_.lift_wait_seconds (see onLiftWaitTimerFired). On
+  /// failure, reports via publishPlanningFailure (context "lift") and
+  /// returns to ArmState::IDLE — does NOT proceed to standby from a failed
+  /// lift, since the arm's actual position at that point is uncertain.
+  void onStayTimerFired();
+
+  /// Fires once lift_wait_timer_ elapses with no new sequenced goal having
+  /// arrived in the meantime (a new sequenced goal cancels this timer via
+  /// onSequencedGoalReached instead). Plans and executes to the "standby"
+  /// preset; on success transitions to ArmState::STANDBY and publishes
+  /// "standby" via publishCurrentPoseName. On failure (missing preset or
+  /// plan/execute failure), reports via publishPlanningFailure (context
+  /// "standby") and returns to ArmState::IDLE.
+  void onLiftWaitTimerFired();
+
+  /// Called once from the constructor. If move_to_home_on_startup (a
+  /// declared param, see trajectory_planner_sim.yaml/_real.yaml) is true,
+  /// plans and executes to the "home" preset pose — an explicit, opt-in
+  /// reversal of this node's original "never move on startup" design (see
+  /// main.cpp's history / todo.txt item 1); the param makes the choice to
+  /// auto-move an auditable config decision rather than silent behavior.
+  /// On failure (missing "home" preset, or plan/execute failure), logs the
+  /// error and reports it via ~/planning_failure (see PlanningFailure.msg)
+  /// — does not throw, does not block node startup either way.
+  void runStartupSequence();
+
+  /// Publishes name on ~/current_pose_name (transient_local, so a late
+  /// subscriber — e.g. the web bridge reconnecting — immediately gets the
+  /// last-published value instead of nothing). Called after every
+  /// successful move that lands on a known named pose. Not called on
+  /// arbitrary/unnamed trace_path waypoints (e.g. calibration polygon
+  /// corners) — those aren't meaningful to show a human as a "current
+  /// pose name".
+  void publishCurrentPoseName(const std::string & name);
+
+  /// Publishes one PlanningFailure message on ~/planning_failure — an
+  /// event, not a state, so plain reliable QoS (no transient_local): a
+  /// failure that already happened has no "current value" worth replaying
+  /// to a late subscriber. context is a short machine-readable label (e.g.
+  /// "startup_home"), message is the human-readable reason. Also logs via
+  /// RCLCPP_ERROR at the call site — this only handles the web-facing
+  /// side.
+  void publishPlanningFailure(const std::string & context, const std::string & message);
+
   rclcpp::Node::SharedPtr node_;
   moveit::planning_interface::MoveGroupInterface move_group_interface_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   StandoffConfig standoff_config_;
   PolygonConfig polygon_config_;
+  SequenceConfig sequence_config_;
   PresetPoses preset_poses_;
   rclcpp::Service<visual_calibration_msgs::srv::TracePath>::SharedPtr trace_path_service_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr trace_polygon_service_;
@@ -249,6 +365,45 @@ private:
     get_standoff_pose_service_;
   rclcpp::Service<visual_calibration_msgs::srv::GetPresetPose>::SharedPtr
     get_preset_pose_service_;
+  /// transient_local: late subscribers get the last-published name
+  /// immediately instead of waiting for the next state change. Event-driven
+  /// (published only on transitions), not on a timer — does not add
+  /// periodic DDS traffic alongside perception topics.
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr current_pose_name_pub_;
+  /// Plain reliable QoS, published once per failure event — see
+  /// publishPlanningFailure's doc comment for why this is NOT
+  /// transient_local (unlike current_pose_name_pub_).
+  rclcpp::Publisher<visual_calibration_msgs::msg::PlanningFailure>::SharedPtr
+    planning_failure_pub_;
+
+  /// Guards arm_state_/goal_pose_/stay_timer_/lift_wait_timer_ below.
+  /// Required since main.cpp switched to a MultiThreadedExecutor (see its
+  /// comment) — service callbacks (handleTracePath) and timer callbacks
+  /// (onStayTimerFired/onLiftWaitTimerFired) can now genuinely run on
+  /// different threads concurrently, e.g. a new sequenced goal arriving
+  /// right as a pending timer fires.
+  std::mutex state_mutex_;
+  /// See ArmState's doc comment — this class's only memory of its own
+  /// recent activity, used solely to drive the sequenced-goal stay/lift/
+  /// standby dance. Starts IDLE; runStartupSequence's home move does not
+  /// touch this (only is_sequenced_goal calls do). Guarded by
+  /// state_mutex_.
+  ArmState arm_state_ = ArmState::IDLE;
+  /// The most recently reached sequenced goal's pose — only meaningful
+  /// while arm_state_ is SETTLED_AT_GOAL or LIFTED_IDLE. The lift pose
+  /// (see onStayTimerFired) is computed from this, not from any pose the
+  /// arm was at before the goal. Guarded by state_mutex_.
+  geometry_msgs::msg::Pose goal_pose_;
+  /// One-shot timer for SequenceConfig::stay_seconds_at_goal — see
+  /// onSequencedGoalReached/onStayTimerFired. Guarded by state_mutex_.
+  rclcpp::TimerBase::SharedPtr stay_timer_;
+  /// One-shot timer for SequenceConfig::lift_wait_seconds — see
+  /// onStayTimerFired/onLiftWaitTimerFired. Cancelled and restarted by any
+  /// new sequenced goal that arrives while pending (see
+  /// onSequencedGoalReached) — this cancel-and-restart IS the "idle"
+  /// signal: the timer only ever fires if nothing new showed up in time.
+  /// Guarded by state_mutex_.
+  rclcpp::TimerBase::SharedPtr lift_wait_timer_;
 };
 
 }  // namespace visual_calibration_moveit

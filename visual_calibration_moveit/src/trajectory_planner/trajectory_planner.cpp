@@ -50,6 +50,7 @@ TrajectoryPlanner::TrajectoryPlanner(
   tf_listener_(tf_buffer_),
   standoff_config_(loadStandoffConfigFromParams()),
   polygon_config_(loadPolygonConfigFromParams()),
+  sequence_config_(loadSequenceConfigFromParams()),
   preset_poses_(node_)
 {
   // "~/..." resolves to a private, node-namespaced service name (e.g.
@@ -87,9 +88,66 @@ TrajectoryPlanner::TrajectoryPlanner(
       &TrajectoryPlanner::handleGetPresetPose, this, std::placeholders::_1,
       std::placeholders::_2));
 
+  // transient_local + depth 1: a late subscriber (e.g. the web bridge
+  // reconnecting) immediately receives the last-published name instead of
+  // waiting for the next state change. Published only on transitions, not
+  // on a timer — see publishCurrentPoseName.
+  current_pose_name_pub_ = node_->create_publisher<std_msgs::msg::String>(
+    "~/current_pose_name",
+    rclcpp::QoS(1).transient_local().reliable());
+
+  // Event topic, not a state — plain reliable QoS, no transient_local. See
+  // publishPlanningFailure's doc comment.
+  planning_failure_pub_ = node_->create_publisher<visual_calibration_msgs::msg::PlanningFailure>(
+    "~/planning_failure",
+    rclcpp::QoS(10).reliable());
+
   RCLCPP_INFO(
     node_->get_logger(), "trajectory_planner ready (planning group: '%s')",
     planning_group.c_str());
+
+  runStartupSequence();
+}
+
+void TrajectoryPlanner::runStartupSequence()
+{
+  const bool move_to_home_on_startup =
+    node_->get_parameter("move_to_home_on_startup").as_bool();
+
+  if (!move_to_home_on_startup) {
+    RCLCPP_INFO(
+      node_->get_logger(),
+      "move_to_home_on_startup is false — staying at the current pose.");
+    return;
+  }
+
+  const std::optional<geometry_msgs::msg::Pose> home_pose = preset_poses_.get("home");
+  if (!home_pose.has_value()) {
+    const std::string message =
+      "move_to_home_on_startup is true but no 'home' preset is configured — "
+      "staying at the current pose. See preset_poses_sim.yaml/_real.yaml.";
+    RCLCPP_ERROR(node_->get_logger(), "%s", message.c_str());
+    publishPlanningFailure("startup_home", message);
+    return;
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "Moving to 'home' pose on startup...");
+  // Preset poses are captured against end_effector_frame (e.g.
+  // rg2_gripper_aruco_link, see pose_capture.py), not whatever link the
+  // SRDF defaults MoveGroupInterface's end effector to — must match
+  // tracePath()/planAndExecuteInFrontOf()'s existing pattern, or the
+  // target pose gets applied to the wrong link and planning fails/aborts
+  // against an unreachable target.
+  move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
+  const bool succeeded = planAndExecute(*home_pose);
+  if (!succeeded) {
+    const std::string message = "Startup move to 'home' pose failed.";
+    RCLCPP_ERROR(node_->get_logger(), "%s", message.c_str());
+    publishPlanningFailure("startup_home", message);
+    return;
+  }
+
+  publishCurrentPoseName("home");
 }
 
 bool TrajectoryPlanner::planAndExecute(const geometry_msgs::msg::Pose & target_pose)
@@ -331,9 +389,31 @@ void TrajectoryPlanner::handleTracePath(
 {
   const std::vector<geometry_msgs::msg::Pose> waypoints(
     request->waypoints.begin(), request->waypoints.end());
+
   response->success = tracePath(waypoints, request->planning_mode);
   response->message = response->success ?
     "Traced all waypoints successfully" : "Failed partway through tracing waypoints";
+
+  // Only single-waypoint, named calls correspond to a meaningful "current
+  // pose"/failure context for a human to see — see TracePath.srv's
+  // pose_name doc comment.
+  if (!request->pose_name.empty() && waypoints.size() == 1) {
+    if (response->success) {
+      publishCurrentPoseName(request->pose_name);
+    } else {
+      publishPlanningFailure(
+        request->pose_name, "Move to '" + request->pose_name + "' failed: " + response->message);
+    }
+  }
+
+  // See TracePath.srv's is_sequenced_goal doc comment — only single-waypoint
+  // calls that opted in, and only once the move actually succeeded, start
+  // the stay/lift/standby dance. waypoints[0] (the pose just reached) is
+  // what onSequencedGoalReached computes the lift pose from — this design
+  // does not track/return to any pose the arm was at before the goal.
+  if (response->success && request->is_sequenced_goal && waypoints.size() == 1) {
+    onSequencedGoalReached(waypoints[0]);
+  }
 }
 
 void TrajectoryPlanner::handleTracePolygon(
@@ -439,6 +519,140 @@ PolygonConfig TrajectoryPlanner::loadPolygonConfigFromParams() const
   }
 
   return config;
+}
+
+SequenceConfig TrajectoryPlanner::loadSequenceConfigFromParams() const
+{
+  SequenceConfig config;
+  config.stay_seconds_at_goal =
+    node_->get_parameter("stay_seconds_at_goal").as_double();
+  config.lift_target_z_m =
+    node_->get_parameter("lift_target_z_m").as_double();
+  config.lift_wait_seconds =
+    node_->get_parameter("lift_wait_seconds").as_double();
+  return config;
+}
+
+void TrajectoryPlanner::publishCurrentPoseName(const std::string & name)
+{
+  std_msgs::msg::String msg;
+  msg.data = name;
+  current_pose_name_pub_->publish(msg);
+}
+
+void TrajectoryPlanner::publishPlanningFailure(
+  const std::string & context, const std::string & message)
+{
+  visual_calibration_msgs::msg::PlanningFailure msg;
+  msg.context = context;
+  msg.message = message;
+  planning_failure_pub_->publish(msg);
+}
+
+void TrajectoryPlanner::onSequencedGoalReached(const geometry_msgs::msg::Pose & goal_pose)
+{
+  // Held across the whole function, including timer creation — under
+  // MultiThreadedExecutor a second sequenced goal could otherwise race in
+  // between the cancel() calls below and the new timer being armed.
+  std::lock_guard<std::mutex> lock(state_mutex_);
+
+  // A new sequenced goal arriving mid-dance (e.g. while already
+  // SETTLED_AT_GOAL or LIFTED_IDLE) cancels whatever was pending and
+  // restarts fresh from here — this cancel is also the "idle" signal for
+  // lift_wait_timer_ (see its member doc comment).
+  if (stay_timer_) {
+    stay_timer_->cancel();
+  }
+  if (lift_wait_timer_) {
+    lift_wait_timer_->cancel();
+  }
+
+  goal_pose_ = goal_pose;
+  arm_state_ = ArmState::SETTLED_AT_GOAL;
+
+  stay_timer_ = node_->create_wall_timer(
+    std::chrono::duration<double>(sequence_config_.stay_seconds_at_goal),
+    [this]() {
+      stay_timer_->cancel();  // one-shot: this timer's only job is done
+      onStayTimerFired();
+    });
+}
+
+void TrajectoryPlanner::onStayTimerFired()
+{
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "Stayed at sequenced goal for %.1fs — lifting to Z=%.3fm.",
+    sequence_config_.stay_seconds_at_goal, sequence_config_.lift_target_z_m);
+
+  // Held across planAndExecute() deliberately — a concurrent sequenced
+  // goal arriving mid-lift must wait for this move to finish (or be
+  // cleanly superseded afterward), not race the arm's motion commands.
+  std::lock_guard<std::mutex> lock(state_mutex_);
+
+  // Absolute Z target in the planning frame (base_link) — NOT an offset
+  // added to the goal's Z. X/Y/orientation stay identical to the goal —
+  // see SequenceConfig::lift_target_z_m.
+  geometry_msgs::msg::Pose lift_pose = goal_pose_;
+  lift_pose.position.z = sequence_config_.lift_target_z_m;
+
+  // See runStartupSequence's matching comment — preset/goal poses are
+  // captured against end_effector_frame, must match it before planning.
+  move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
+  const bool succeeded = planAndExecute(lift_pose);
+  if (!succeeded) {
+    const std::string message = "Failed to lift away from the sequenced goal.";
+    RCLCPP_ERROR(node_->get_logger(), "%s", message.c_str());
+    publishPlanningFailure("lift", message);
+    arm_state_ = ArmState::IDLE;
+    return;
+  }
+
+  arm_state_ = ArmState::LIFTED_IDLE;
+  lift_wait_timer_ = node_->create_wall_timer(
+    std::chrono::duration<double>(sequence_config_.lift_wait_seconds),
+    [this]() {
+      lift_wait_timer_->cancel();  // one-shot: this timer's only job is done
+      onLiftWaitTimerFired();
+    });
+}
+
+void TrajectoryPlanner::onLiftWaitTimerFired()
+{
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "Idle for %.1fs with no new sequenced goal — moving to 'standby'.",
+    sequence_config_.lift_wait_seconds);
+
+  // Held across the lookup + planAndExecute() — same reasoning as
+  // onStayTimerFired.
+  std::lock_guard<std::mutex> lock(state_mutex_);
+
+  const std::optional<geometry_msgs::msg::Pose> standby_pose = preset_poses_.get("standby");
+  if (!standby_pose.has_value()) {
+    const std::string message =
+      "Idle timeout reached but no 'standby' preset is configured — staying at the "
+      "current pose. See preset_poses_sim.yaml/_real.yaml.";
+    RCLCPP_ERROR(node_->get_logger(), "%s", message.c_str());
+    publishPlanningFailure("standby", message);
+    arm_state_ = ArmState::IDLE;
+    return;
+  }
+
+  // See runStartupSequence's matching comment — preset poses are captured
+  // against end_effector_frame, must match it before planning.
+  move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
+  const bool succeeded = planAndExecute(*standby_pose);
+  if (!succeeded) {
+    const std::string message = "Move to 'standby' pose failed.";
+    RCLCPP_ERROR(node_->get_logger(), "%s", message.c_str());
+    publishPlanningFailure("standby", message);
+    arm_state_ = ArmState::IDLE;
+    return;
+  }
+
+  arm_state_ = ArmState::STANDBY;
+  publishCurrentPoseName("standby");
 }
 
 }  // namespace visual_calibration_moveit

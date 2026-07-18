@@ -12,7 +12,26 @@
 trajectory_planner:
   ros__parameters:
     camera_frame: "camera_depth_optical_frame"
-    end_effector_frame: "rg2_gripper_aruco_link"
+    # robotiq_85_base_link, NOT rg2_gripper_aruco_link (real's gripper
+    # swapped RG2 -> Robotiq 85, see project_universal_robot_ros2_instructor_update
+    # memory) and NOT aruco_link either — investigated 2026-07-17: aruco_link
+    # is a genuine live TF frame on the real robot, but its only known
+    # source was an ad-hoc, manually-started
+    # `ros2 run tf2_ros static_transform_publisher` process (confirmed via
+    # `ros2 node list` showing a random-suffixed node name that changes
+    # every restart, e.g. static_transform_publisher_KWiu6a23DUWVwuTe /
+    # _a0SdibPLzjdiAama across two checks) — not in /tf_static, not from
+    # any tracked launch file, not from the robot's own URDF/xacro sources
+    # (confirmed via grep across universal_robot_ros2/). Not safe to depend
+    # on structurally until the real camera->marker offset is properly
+    # measured (todo.txt B2) and baked into a permanent fixed joint.
+    # robotiq_85_base_link is a real, always-present, already-in-the-SRDF-
+    # chain link (see real_ur3e_moveit_config/config/name.srdf) — used as
+    # an interim, verified-safe end effector for standoff/cal_ready moves
+    # until that measurement lands. The marker sits rigidly on/near the
+    # gripper, so positioning this link in front of the camera should keep
+    # the marker in view too.
+    end_effector_frame: "robotiq_85_base_link"
     standoff_m: 0.25
     max_reach_m: 0.5
     facing_rpy_rad: [3.14159265, 0.0, 1.57079633]
@@ -30,3 +49,38 @@ trajectory_planner:
     # limits/obstacles); "joint_space" = free-space planning (more robust,
     # no straight-line guarantee).
     polygon_default_planning_mode: "cartesian"
+
+    # If true, TrajectoryPlanner moves to the "home" preset once on startup
+    # (see runStartupSequence, called from the constructor) — requires a
+    # "home" entry in preset_poses_real.yaml (measured, see that file). Set
+    # false to disable without a code change.
+    #
+    # Re-enabled 2026-07-18 — the false-timeout/mid-motion-cancellation
+    # issue is fixed (root cause: move_group.launch.py never actually
+    # loaded trajectory_execution.yaml's content at all; fixed via a
+    # SetParameter override for allowed_execution_duration_scaling instead
+    # — see real_ur3e_moveit_config/launch/move_group.launch.py). Verified
+    # via `ros2 param get /move_group
+    # trajectory_execution.allowed_execution_duration_scaling` returning
+    # 4.0 on a live move_group instance.
+    move_to_home_on_startup: true
+
+    # Sequenced-goal stay/lift/standby timing (see ArmState /
+    # TracePath.srv's is_sequenced_goal doc comment) — only applies to
+    # ~/trace_path calls that explicitly set is_sequenced_goal: true.
+    # Every sequenced goal resolves to the SAME two destinations (a lift
+    # straight up, then "standby") — it does NOT return to wherever the
+    # arm was before the goal.
+    # stay_seconds_at_goal: how long to stay AT the goal (e.g. a hole/
+    # cupholder pose) before automatically lifting away from it.
+    # lift_target_z_m: absolute Z (base_link's own Z; 0.0 = level with
+    # base_link's origin) to lift to — NOT an offset added to the goal's
+    # Z. X/Y/orientation stay identical to the goal. PLACEHOLDER — not
+    # re-verified for the real cell yet, see file header.
+    # lift_wait_seconds: how long to then wait at the lifted pose, with no
+    # new sequenced goal arriving, before automatically moving to
+    # "standby" (requires a "standby" entry in preset_poses_real.yaml,
+    # measured).
+    stay_seconds_at_goal: 4.0
+    lift_target_z_m: 0.0
+    lift_wait_seconds: 8.0

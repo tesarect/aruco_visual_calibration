@@ -26,7 +26,7 @@ tmux send-keys -t "$PANE0" \
 # Pane 1 — vite fast dev server call
 PANE1=$(tmux split-window -t "$PANE0" -h -P -F "#{pane_id}")
 tmux send-keys -t "$PANE1" \
-"source ~/webpage_ws/scripts/session_init.sh && cd ~/webpage_ws/app && PORT=7000 npm run build dev && PORT=7000 npm run preview" C-m
+"source ~/webpage_ws/scripts/session_init.sh && cd ~/webpage_ws/app && PORT=7000 npm run build && PORT=7000 npm run preview" C-m
 
 
 # Give each pane a title

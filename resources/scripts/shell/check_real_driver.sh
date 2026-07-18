@@ -28,7 +28,15 @@ check_node() {
 echo "=== Driver stack ==="
 check_node "robot_state_publisher" "robot_state_publisher"
 check_node "controller_manager" "controller_manager (ros2_control)"
-check_node "ur_ros2_control_node|ur_robot_driver" "UR driver"
+# Pattern updated 2026-07-18: the original ur_ros2_control_node|ur_robot_driver
+# pattern never matched this driver version's actual node names — a live
+# session showed /ur_tool_comm, /ur_configuration_controller,
+# /urscript_interface, /dashboard_client, /ur_robot_state_helper instead,
+# causing a false "MISSING" even though the driver (confirmed via active
+# scaled_joint_trajectory_controller + publishing /joint_states and /tf)
+# was actually fine. Match on any of the driver-specific node names
+# instead of guessing a single expected name.
+check_node "ur_tool_comm|ur_configuration_controller|urscript_interface|ur_robot_state_helper" "UR driver"
 
 echo
 echo "=== Topics ==="

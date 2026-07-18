@@ -13,6 +13,44 @@ geometry_msgs/Pose[] waypoints
 uint8 PLANNING_MODE_JOINT_SPACE = 0
 uint8 PLANNING_MODE_CARTESIAN = 1
 uint8 planning_mode 1
+
+# Optional: name of the destination pose (e.g. "home", "cal_ready",
+# "standby", or any preset_poses_*.yaml entry), for ~/current_pose_name
+# reporting. Leave empty for arbitrary/unnamed waypoints (e.g. calibration
+# polygon corners) — those aren't meaningful to show a human as "the
+# current pose". Only applies when waypoints has exactly one pose; ignored
+# for multi-waypoint calls.
+string pose_name
+
+# Optional: marks this call as a "sequenced goal" — one of the arm's
+# regular working stops, as opposed to a special named stop like
+# "home"/"cal_ready"/"standoff"/"standby". Only single-waypoint calls with
+# this set to true trigger TrajectoryPlanner's wait/return/standby
+# behavior (see trajectory_planner.hpp's ArmState doc comment). Default
+# false — every existing caller (home, cal_ready, the calibration polygon
+# sweep) is unaffected unless it explicitly opts in.
+#
+# In plain terms: TrajectoryPlanner itself has no idea what a waypoint
+# "means" — it just moves to whatever pose it's given. This flag is the
+# caller explicitly saying "treat this one as a regular stop, not a
+# special one" — the node isn't guessing that from the pose's name or
+# position, it's being told outright, the same way planning_mode above
+# already tells it which planning strategy to use.
+#
+# Once set, TrajectoryPlanner tracks a small amount of bookkeeping about
+# its OWN recent activity — "did I just execute a move that was flagged as
+# a sequenced goal, and if so, what pose was I at right before that move,
+# and has enough time passed since." That's it. It's not reasoning about
+# the robot's task or intent, just remembering one fact (the previous
+# pose) and running two timers off it. The "state" (IDLE/SETTLED_AT_GOAL/
+# RETURNING_IDLE/STANDBY, see ArmState) is really just naming those
+# bookkeeping phases, not the node understanding anything new about the
+# world — trajectory_planner goes from "purely stateless, forgets
+# everything the instant a call finishes" to "remembers one previous pose
+# and runs a couple of timers", a small, bounded amount of self-awareness,
+# not general awareness of "where it is in the overall calibration
+# workflow."
+bool is_sequenced_goal false
 ---
 bool success
 string message

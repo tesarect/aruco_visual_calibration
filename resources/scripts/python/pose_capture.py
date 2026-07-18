@@ -7,15 +7,17 @@ There is no camera_frame TF on the real robot yet (that's what this whole
 project is computing) — so `standoff` here does NOT look up a camera TF
 like trajectory_planner_node does. Instead it takes a reference frame you
 already trust (default: base_link) and an explicit offset you supply, and
-prints/saves the resulting rg2_gripper_aruco_link target pose in base_link.
-Use this to get the arm roughly in front of wherever you've physically
-placed the camera, then fine-tune by hand/teach-pendant.
+prints/saves the resulting end-effector target pose in base_link (see
+EE_FRAME_BY_ENV below for which link, per environment). Use this to get
+the arm roughly in front of wherever you've physically placed the camera,
+then fine-tune by hand/teach-pendant.
 
 Usage:
     # Record the current marker-frame pose (base_link-relative) to a text
     # file — run this once you've manually jogged the arm to a pose where
     # the camera can see the marker. --env picks the right frame name:
-    # sim -> rg2_gripper_aruco_link, real -> aruco_link.
+    # sim -> rg2_gripper_aruco_link, real -> robotiq_85_base_link (see
+    # EE_FRAME_BY_ENV's comment for why not aruco_link).
     python3 pose_capture.py record --env sim --out ~/poses.txt
     python3 pose_capture.py record --env real --out ~/poses.txt
 
@@ -46,13 +48,22 @@ from visual_calibration_msgs.srv import TracePath
 
 # Marker frame name differs by environment: sim still spawns the RG2
 # gripper (rg2_gripper_aruco_link, confirmed in new_diagnostics/
-# diagnose_sim_*.txt), while real has been swapped to Robotiq 85
-# (aruco_link, parent 'robotiq_85_base_link' — confirmed in
-# new_diagnostics/diagnose_real_*.txt view_frames dump; a static
-# transform, i.e. a fixed joint, not a live-detected frame).
+# diagnose_sim_*.txt), while real has been swapped to Robotiq 85.
+# real does NOT use aruco_link here — investigated 2026-07-17: aruco_link
+# IS a real TF frame on the real robot, but its only known source is an
+# ad-hoc, manually-started `ros2 run tf2_ros static_transform_publisher`
+# process (random node name each restart, not in /tf_static, not from any
+# tracked launch file or the robot's own URDF/xacro) — NOT a fixed joint
+# baked into the robot description, contrary to what this comment
+# previously claimed. Not safe to depend on until the real camera->marker
+# offset is properly measured (todo.txt B2) and baked into a permanent
+# fixed joint. robotiq_85_base_link is used instead — a real, always-
+# present, already-in-the-SRDF-chain link (see
+# real_ur3e_moveit_config/config/name.srdf) that the marker sits rigidly
+# on/near, so poses captured against it move together with the marker.
 EE_FRAME_BY_ENV = {
     "sim": "rg2_gripper_aruco_link",
-    "real": "aruco_link",
+    "real": "robotiq_85_base_link",
 }
 BASE_FRAME = "base_link"
 

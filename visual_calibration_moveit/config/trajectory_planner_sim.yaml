@@ -33,3 +33,27 @@ trajectory_planner:
     # limits/obstacles); "joint_space" = free-space planning (more robust,
     # no straight-line guarantee).
     polygon_default_planning_mode: "cartesian"
+
+    # If true, TrajectoryPlanner moves to the "home" preset once on startup
+    # (see runStartupSequence, called from the constructor) — requires a
+    # "home" entry in preset_poses_sim.yaml. Set false to disable without a
+    # code change.
+    move_to_home_on_startup: true
+
+    # Sequenced-goal stay/lift/standby timing (see ArmState /
+    # TracePath.srv's is_sequenced_goal doc comment) — only applies to
+    # ~/trace_path calls that explicitly set is_sequenced_goal: true.
+    # Every sequenced goal resolves to the SAME two destinations (a lift
+    # straight up, then "standby") — it does NOT return to wherever the
+    # arm was before the goal.
+    # stay_seconds_at_goal: how long to stay AT the goal (e.g. a hole/
+    # cupholder pose) before automatically lifting away from it.
+    # lift_target_z_m: absolute Z (base_link's own Z; 0.0 = level with
+    # base_link's origin) to lift to — NOT an offset added to the goal's
+    # Z. X/Y/orientation stay identical to the goal.
+    # lift_wait_seconds: how long to then wait at the lifted pose, with no
+    # new sequenced goal arriving, before automatically moving to
+    # "standby" (requires a "standby" entry in preset_poses_sim.yaml).
+    stay_seconds_at_goal: 4.0
+    lift_target_z_m: 0.0
+    lift_wait_seconds: 8.0

@@ -19,10 +19,17 @@ fi
 tmux new-session -d -s "$SESSION" -n "$WINDOW"
 
 # Pane 0 — trajectory_planner. Polls for move_group (MoveGroupInterface
-# needs it to connect).
+# needs it to connect), THEN for the planning scene to actually contain
+# 'countertop'/'wall' (not just move_group being reachable) — trajectory_
+# planner's move_to_home_on_startup (see trajectory_planner_sim.yaml) plans
+# and moves as soon as its constructor runs, and collision checking can
+# only avoid obstacles already in the scene at that moment. Without this,
+# starting this session before sim_tmux_base.sh's planning_scene_setup
+# pane has finished could let the startup home-move plan against an empty
+# scene. See wait_for_planning_scene.sh.
 PANE0=$(tmux list-panes -t "$SESSION:$WINDOW" -F "#{pane_id}")
 tmux send-keys -t "$PANE0" \
-"$SHELL_DIR/wait_for_node.sh move_group 30 && source ~/ros2_ws/install/setup.bash && ros2 launch visual_calibration_moveit trajectory_planner.launch.py env:=sim" C-m
+"$SHELL_DIR/wait_for_node.sh move_group 30 && $SHELL_DIR/wait_for_planning_scene.sh 30 && source ~/ros2_ws/install/setup.bash && ros2 launch visual_calibration_moveit trajectory_planner.launch.py env:=sim" C-m
 
 # Pane 1 — aruco_detector_node. Only needs the camera topics (published by
 # Gazebo directly, not move_group), but polling for move_group keeps the
