@@ -12,6 +12,7 @@
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
 #include <moveit/move_group_interface/move_group_interface.h>
+#include <robotiq_85_msgs/msg/gripper_cmd.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <tf2_ros/buffer.h>
@@ -20,6 +21,7 @@
 #include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
 #include <visual_calibration_msgs/srv/get_preset_pose.hpp>
 #include <visual_calibration_msgs/srv/get_standoff_pose.hpp>
+#include <visual_calibration_msgs/srv/move_to_preset.hpp>
 #include <visual_calibration_msgs/srv/trace_path.hpp>
 
 #include "visual_calibration_moveit/preset_poses.hpp"
@@ -90,6 +92,44 @@ struct PolygonConfig
     visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN;
 };
 
+/// OMPL planning request tuning applied to every MoveGroupInterface plan
+/// call in this node (planAndExecute/planAndExecuteCartesian), loaded from
+/// a parameter file alongside StandoffConfig/PolygonConfig. Without this,
+/// MoveGroupInterface falls back to whatever the OMPL pipeline config's
+/// default_planner_config is with 1 attempt (see
+/// {sim,real}_ur3e_moveit_config/config/ompl_planning.yaml) — pinning
+/// these here keeps planning behavior correct/auditable even if that
+/// yaml's default ever changes, and num_planning_attempts > 1 lets
+/// MoveGroupInterface automatically keep the shortest-path plan among
+/// several tries within the time budget, rather than settling for
+/// whichever one happens to be found first.
+struct PlannerConfig
+{
+  /// Planning pipeline ID passed to MoveGroupInterface::setPlanningPipelineId,
+  /// e.g. "ompl" — must match a pipeline move_group.launch.py actually
+  /// loads via MoveItConfigsBuilder's .planning_pipelines(pipelines=[...]).
+  /// Only "ompl" is configured/tested in this project (ompl_planning.yaml
+  /// exists in both {sim,real}_ur3e_moveit_config); do not set this to
+  /// "chomp" or "pilz_industrial_motion_planner" — no chomp_planning.yaml/
+  /// pilz config exists, and move_group.launch.py deliberately restricts
+  /// its pipeline list to ["ompl"] specifically to keep CHOMP (which
+  /// MoveItConfigsBuilder otherwise auto-loads with a built-in default
+  /// even with no yaml present, and which cannot handle pose-target goals
+  /// — see move_group.launch.py's comment) from silently stealing
+  /// planAndExecute()'s requests. Changing this value alone, without also
+  /// updating move_group.launch.py's pipeline list and adding the
+  /// corresponding pipeline yaml, will not work.
+  std::string planning_pipeline_id;
+  /// OMPL planner ID, e.g. "RRTstarkConfigDefault" — must be one of
+  /// ur_manipulator's planner_configs entries in ompl_planning.yaml.
+  std::string planner_id;
+  /// Seconds allotted per planning attempt (MoveGroupInterface::setPlanningTime).
+  double planning_time_s = 5.0;
+  /// Number of planning attempts; MoveGroupInterface keeps the
+  /// shortest-path plan among them (MoveGroupInterface::setNumPlanningAttempts).
+  int num_planning_attempts = 1;
+};
+
 /// Tuning for the sequenced-goal stay/lift/standby behavior (see
 /// ArmState), loaded from a parameter file alongside StandoffConfig/
 /// PolygonConfig.
@@ -108,6 +148,23 @@ struct SequenceConfig
   /// How long to wait at the lifted pose, with no new sequenced goal
   /// arriving, before automatically moving to the "standby" preset.
   double lift_wait_seconds = 8.0;
+  /// Global settle delay applied inside tracePath(), after EVERY
+  /// successful waypoint move (single or multi-waypoint calls alike —
+  /// home, cal_ready, sequenced goals, and each polygon corner all funnel
+  /// through tracePath()). No race condition to guard against here: the
+  /// trace_path service response already can't return until
+  /// MoveGroupInterface::execute() has finished, so this delay is purely
+  /// "give a real camera time to catch up" (a sim viewer/RViz shows the
+  /// arm arriving instantly; a real wall/ceiling camera may need a beat to
+  /// produce a fresh, non-motion-blurred frame) — not a synchronization
+  /// fix. 0.0 disables it entirely (skips the sleep).
+  double waypoint_settle_seconds = 1.0;
+  /// How long to pause after publishing the startup gripper-close command
+  /// (see closeGripperOnStartup) before runStartupSequence proceeds to the
+  /// home move — there is no completion feedback to wait on, so this is a
+  /// fixed guess at how long the real robotiq_85_driver takes to physically
+  /// close, not a confirmed measurement.
+  double gripper_close_settle_seconds = 2.0;
 };
 
 /// TrajectoryPlanner has no built-in understanding of the robot's task —
@@ -161,6 +218,26 @@ public:
   /// to succeed than planAndExecuteCartesian() near limits/obstacles.
   /// Returns true on successful plan + execute.
   bool planAndExecute(const geometry_msgs::msg::Pose & target_pose);
+
+  /// Overload: plan and execute directly to a joint configuration (in the
+  /// planning group's own joint order — MoveGroupInterface::setJointValueTarget's
+  /// convention, matching the order MoveGroupInterface::getJointValueTarget/
+  /// robot_model reports, which is what a preset's joint_values array must
+  /// be captured in — see PresetPoses.hpp), via
+  /// MoveGroupInterface::setJointValueTarget() instead of setPoseTarget().
+  /// No IK involved — unlike the Pose overload, there is no ambiguity about
+  /// which of the UR3e's multiple valid IK solutions gets used, since this
+  /// specifies the exact joint values directly. Use this (via a joint-value
+  /// preset, see planAndExecuteToPreset) when a specific joint
+  /// configuration — not just a Cartesian pose — has been verified to work
+  /// (e.g. cal_ready's joint-value preset, added 2026-07-20 after
+  /// confirming two different joint-space paths to the SAME Cartesian
+  /// cal_ready pose produced joint configurations differing by 90-250° on
+  /// several joints, only one of which left enough margin for the
+  /// downstream Cartesian polygon-corner moves to succeed).
+  /// joint_values.size() must equal the planning group's DOF count (6 for
+  /// ur_manipulator) — returns false without planning if it doesn't.
+  bool planAndExecute(const std::vector<double> & joint_values);
 
   /// Plan and execute a straight-line Cartesian path from the current pose
   /// to target_pose, via MoveGroupInterface::computeCartesianPath().
@@ -231,16 +308,32 @@ public:
   /// arm. Returns std::nullopt if no preset with that name was loaded.
   std::optional<geometry_msgs::msg::Pose> getPresetPose(const std::string & name) const;
 
+  /// Returns the named preset's joint values (see PresetPoses) WITHOUT
+  /// moving the arm. Returns std::nullopt if no joint-value preset with
+  /// that name was loaded (including if that name only has a Cartesian
+  /// pose preset — see getPresetPose).
+  std::optional<std::vector<double>> getPresetJointValues(const std::string & name) const;
+
+  /// Moves to the named preset, preferring a joint-value preset (via the
+  /// planAndExecute(joint_values) overload — pins the exact IK branch,
+  /// see that overload's doc comment) if one is loaded for name;
+  /// otherwise falls back to the Cartesian pose preset (via
+  /// planAndExecute(pose)) if one is loaded instead. Returns false without
+  /// planning if NEITHER a joint-value nor a Cartesian preset exists for
+  /// name. Callers that need TF-first-then-preset-fallback behavior (e.g.
+  /// cal_ready's live camera_frame lookup) should use getStandoffPose()/
+  /// planAndExecuteInFrontOf() instead — this method only ever consults
+  /// presets, never TF.
+  bool planAndExecuteToPreset(const std::string & name);
+
 private:
   /// Computes polygon_config_.num_corners waypoints forming a regular
-  /// polygon of radius polygon_config_.radius_m, in the standoff pose's own
-  /// local X/Y plane, centered on the standoff pose computed from
-  /// standoff_config_ (see planAndExecuteInFrontOf). Every corner keeps the
-  /// same facing_rpy_rad-derived orientation as the center — only position
-  /// varies — so the target link keeps facing the camera at each corner.
+  /// polygon of radius polygon_config_.radius_m, in the arm's own current
+  /// pose's local X/Y plane, centered on that current pose (NOT the
+  /// camera's TF — see this function's body comment for why). Every corner
+  /// keeps the same orientation as the center — only position varies.
   /// Corners are visited in angular order (not skipping around), so
-  /// consecutive waypoints are always adjacent. Returns an empty vector (and
-  /// logs the error) if the camera TF lookup fails.
+  /// consecutive waypoints are always adjacent.
   std::vector<geometry_msgs::msg::Pose> polygonWaypointsAroundStandoff(
     rclcpp::Duration tf_timeout) const;
 
@@ -276,6 +369,12 @@ private:
     const std::shared_ptr<visual_calibration_msgs::srv::GetPresetPose::Request> request,
     std::shared_ptr<visual_calibration_msgs::srv::GetPresetPose::Response> response);
 
+  /// Handles a MoveToPreset service request by calling
+  /// planAndExecuteToPreset() and returning the result — moves the arm.
+  void handleMoveToPreset(
+    const std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Request> request,
+    std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Response> response);
+
   /// Reads camera_frame, end_effector_frame, standoff_m, max_reach_m, and
   /// facing_rpy_rad (a 3-element array) from this node's declared
   /// parameters and returns them as a StandoffConfig. Requires the node to
@@ -287,8 +386,13 @@ private:
   /// declared parameters and returns them as a PolygonConfig.
   PolygonConfig loadPolygonConfigFromParams() const;
 
-  /// Reads stay_seconds_at_goal, lift_target_z_m, and lift_wait_seconds from
-  /// this node's declared parameters and returns them as a SequenceConfig.
+  /// Reads planner_id, planning_time_s, and num_planning_attempts from
+  /// this node's declared parameters and returns them as a PlannerConfig.
+  PlannerConfig loadPlannerConfigFromParams() const;
+
+  /// Reads stay_seconds_at_goal, lift_target_z_m, lift_wait_seconds,
+  /// waypoint_settle_seconds, and gripper_close_settle_seconds from this
+  /// node's declared parameters and returns them as a SequenceConfig.
   SequenceConfig loadSequenceConfigFromParams() const;
 
   /// Called after a successful is_sequenced_goal move (see handleTracePath).
@@ -319,6 +423,24 @@ private:
   /// plan/execute failure), reports via publishPlanningFailure (context
   /// "standby") and returns to ArmState::IDLE.
   void onLiftWaitTimerFired();
+
+  /// Publishes one close command on ~/gripper/cmd (robotiq_85_msgs/GripperCmd,
+  /// position: 0.0 = fully closed per the real robotiq_85_driver's
+  /// convention) — called once, unconditionally, as the very first step of
+  /// runStartupSequence(), before the home move. Unconditional (not an
+  /// "if open, close" check) because the real gripper's /joint_states
+  /// entries were confirmed 2026-07-20 to report the same static value
+  /// regardless of actual open/closed state — there is no reliable signal
+  /// available today to check first, so this always commands closed
+  /// instead (harmless no-op if it's already closed). Runs on both sim and
+  /// real: on sim there is no robotiq_85_driver node subscribed to
+  /// ~/gripper/cmd, so the publish reaches zero subscribers and does
+  /// nothing — this is deliberately not gated by an env check (see
+  /// todo.txt B6). Does not wait for or verify the close completed (no
+  /// feedback signal exists to wait on) — only gives it a brief pause
+  /// (gripper_close_settle_seconds) before runStartupSequence proceeds to
+  /// the home move.
+  void closeGripperOnStartup();
 
   /// Called once from the constructor. If move_to_home_on_startup (a
   /// declared param, see trajectory_planner_sim.yaml/_real.yaml) is true,
@@ -355,6 +477,7 @@ private:
   tf2_ros::TransformListener tf_listener_;
   StandoffConfig standoff_config_;
   PolygonConfig polygon_config_;
+  PlannerConfig planner_config_;
   SequenceConfig sequence_config_;
   PresetPoses preset_poses_;
   rclcpp::Service<visual_calibration_msgs::srv::TracePath>::SharedPtr trace_path_service_;
@@ -365,6 +488,8 @@ private:
     get_standoff_pose_service_;
   rclcpp::Service<visual_calibration_msgs::srv::GetPresetPose>::SharedPtr
     get_preset_pose_service_;
+  rclcpp::Service<visual_calibration_msgs::srv::MoveToPreset>::SharedPtr
+    move_to_preset_service_;
   /// transient_local: late subscribers get the last-published name
   /// immediately instead of waiting for the next state change. Event-driven
   /// (published only on transitions), not on a timer — does not add
@@ -375,6 +500,15 @@ private:
   /// transient_local (unlike current_pose_name_pub_).
   rclcpp::Publisher<visual_calibration_msgs::msg::PlanningFailure>::SharedPtr
     planning_failure_pub_;
+  /// See closeGripperOnStartup — plain reliable QoS, one-shot at startup.
+  /// Published on the absolute topic "/gripper/cmd" (not "~/gripper/cmd"),
+  /// matching real's robotiq_85_driver subscription exactly (see CLAUDE.md/
+  /// todo.txt B5, and the manual `ros2 topic pub /gripper/cmd
+  /// robotiq_85_msgs/msg/GripperCmd ...` command confirmed live 2026-07-20
+  /// to physically close the real gripper). On sim, nothing subscribes to
+  /// this topic, so the publish is a harmless no-op — see
+  /// closeGripperOnStartup's doc comment.
+  rclcpp::Publisher<robotiq_85_msgs::msg::GripperCmd>::SharedPtr gripper_cmd_pub_;
 
   /// Guards arm_state_/goal_pose_/stay_timer_/lift_wait_timer_ below.
   /// Required since main.cpp switched to a MultiThreadedExecutor (see its

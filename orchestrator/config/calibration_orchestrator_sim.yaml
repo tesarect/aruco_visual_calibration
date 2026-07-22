@@ -1,0 +1,39 @@
+# Sim: cal_ready is always computed live from camera TF (trajectory_planner's
+# ~/get_standoff_pose never needs its preset fallback in sim — see
+# preset_poses_sim.yaml's header comment), and the wrist-mounted camera keeps
+# the marker in view across a wide range of arm poses, so auto-centering is
+# not needed here by default.
+calibration_orchestrator_node:
+  ros__parameters:
+    # Extra pause after reaching cal_ready, on top of trajectory_planner's
+    # own per-waypoint waypoint_settle_seconds (already applied inside the
+    # ~/trace_path call this node makes) — this one is specifically "about
+    # to start a multi-minute calibration run, give everything a moment to
+    # settle" rather than a per-waypoint camera-catch-up delay.
+    post_cal_ready_settle_seconds: 2.0
+
+    # Master switch for the auto-centering safety step (see
+    # calibration_orchestrator_node.hpp's runAutoCenterProbe doc comment).
+    # Overridable at runtime via set_parameters — same pattern the web app
+    # already uses for calibration_broadcaster_node's planning_mode — so
+    # the web app can flip this without a restart. Default false: sim's
+    # camera keeps the marker in view without needing this.
+    auto_center_enabled: false
+    # Distance (m) moved per probe step, in cal_ready's own local X/Y
+    # plane, when searching for each of the four +X/-X/+Y/-Y visibility
+    # boundaries.
+    auto_center_probe_step_m: 0.05
+    # Maximum probe distance (m) from cal_ready along any single direction
+    # before giving up on that direction.
+    auto_center_max_probe_m: 0.15
+    # How long to wait for a marker_pose message after each probe move
+    # before concluding the marker is not visible there.
+    auto_center_visibility_timeout_sec: 2.0
+
+    # Planning strategy for every ~/trace_path call this node makes
+    # (cal_ready move + auto-center probe moves) — "cartesian" or
+    # "joint_space", see TracePath.srv. joint_space is used here since
+    # these are single, independent moves (not a spread that needs a
+    # predictable straight-line shape between them, unlike the calibration
+    # polygon sweep itself).
+    planning_mode: "joint_space"

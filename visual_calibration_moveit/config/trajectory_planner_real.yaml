@@ -1,17 +1,22 @@
-# PLACEHOLDER — not measured/tuned on the real robot yet.
-# camera_frame will need to change once the real camera's TF is published
-# (there is no wrist_rgbd_camera_depth_optical_frame on the real robot —
-# the real camera isn't arm-mounted, and its frame comes from the
-# calibration pipeline itself, not a static URDF TF). standoff_m,
-# max_reach_m, and facing_rpy_rad must be re-tuned/re-verified against the
-# real cell before use — the real camera's mounting orientation may not
-# match sim's, so facing_rpy_rad (the rule for how end_effector_frame
-# should face camera_frame) may need a different rotation. Re-derive and
-# verify visually (e.g. via tf_debug_markers.py) rather than assuming the
-# sim value carries over.
+# camera_frame confirmed 2026-07-21 via `ros2 topic echo /D415/color/
+# camera_info --once --field header.frame_id` -> "D415_color_optical_frame"
+# (matches aruco_detector_real.yaml's image_topic/camera_info_topic, both
+# under /D415/color/) — the real camera isn't arm-mounted, and its frame
+# comes from the calibration pipeline itself, not a static URDF TF.
+# standoff_m, max_reach_m, and facing_rpy_rad are still PLACEHOLDERs — not
+# re-tuned/re-verified against the real cell yet — the real camera's
+# mounting orientation may not match sim's, so facing_rpy_rad (the rule for
+# how end_effector_frame should face camera_frame) may need a different
+# rotation. Re-derive and verify visually (e.g. via tf_debug_markers.py)
+# rather than assuming the sim value carries over.
+# planning_mode (cartesian vs joint_space) is set per call-site, not here —
+# see calibration_broadcaster_real.yaml, calibration_orchestrator_real.yaml,
+# and polygon_default_planning_mode below; planner_id/planning_time_s/
+# num_planning_attempts (which OMPL planner, and how hard it tries) is the
+# only planning config that lives centrally, right here.
 trajectory_planner:
   ros__parameters:
-    camera_frame: "camera_depth_optical_frame"
+    camera_frame: "D415_color_optical_frame"
     # robotiq_85_base_link, NOT rg2_gripper_aruco_link (real's gripper
     # swapped RG2 -> Robotiq 85, see project_universal_robot_ros2_instructor_update
     # memory) and NOT aruco_link either — investigated 2026-07-17: aruco_link
@@ -50,6 +55,36 @@ trajectory_planner:
     # no straight-line guarantee).
     polygon_default_planning_mode: "cartesian"
 
+    # OMPL planning request tuning applied to every plan call (joint-space
+    # planAndExecute; planAndExecuteCartesian uses computeCartesianPath
+    # instead and ignores these).
+    # planning_pipeline_id: DO NOT change from "ompl" — move_group.launch.py
+    # deliberately restricts move_group to only load the OMPL pipeline
+    # (.planning_pipelines(pipelines=["ompl"])). CHOMP and Pilz are NOT
+    # configured (no chomp_planning.yaml / pilz planning yaml exists) and
+    # are NOT loaded by move_group; MoveItConfigsBuilder auto-loads CHOMP
+    # with a built-in default otherwise, which cannot handle pose-target
+    # goals and silently broke planAndExecute() until this was pinned
+    # (2026-07-19). Changing this value here alone does nothing useful
+    # without also adding that pipeline's yaml and updating
+    # move_group.launch.py's pipeline list.
+    # planner_id must be one of ur_manipulator's planner_configs entries in
+    # real_ur3e_moveit_config/config/ompl_planning.yaml.
+    # RRTstarkConfigDefault is an optimizing planner (keeps searching until
+    # planning_time_s runs out, minimizing joint-space path length) —
+    # previously unconfigured entirely (no ompl_planning.yaml existed for
+    # the real robot), which meant MoveIt's compiled-in default
+    # (RRTConnect, ~5s, 1 attempt, no optimization) was used — this is the
+    # root cause of the real arm taking twisted, unnecessarily long paths
+    # and swinging joints close to each other despite no collision being
+    # reported (RRTConnect finds A valid path fast, not a good one).
+    # num_planning_attempts > 1: MoveGroupInterface automatically keeps the
+    # shortest-path plan among the attempts.
+    planning_pipeline_id: "ompl"
+    planner_id: "RRTstarkConfigDefault"
+    planning_time_s: 3.0
+    num_planning_attempts: 8
+
     # If true, TrajectoryPlanner moves to the "home" preset once on startup
     # (see runStartupSequence, called from the constructor) — requires a
     # "home" entry in preset_poses_real.yaml (measured, see that file). Set
@@ -84,3 +119,23 @@ trajectory_planner:
     stay_seconds_at_goal: 4.0
     lift_target_z_m: 0.0
     lift_wait_seconds: 8.0
+
+    # Global settle delay applied inside tracePath(), after EVERY
+    # successful waypoint move — single-waypoint calls (home, cal_ready,
+    # sequenced goals) and each corner of a multi-waypoint polygon sweep
+    # alike, since they all funnel through tracePath(). Gives the real
+    # camera (wall/ceiling-mounted, over the Zenoh bridge — see CLAUDE.md's
+    # Real Robot Camera Setup) time to produce a fresh, non-motion-blurred
+    # frame after the arm stops moving. 1.0s is a starting point — bump if
+    # the real camera pipeline needs longer to catch up; 0.0 disables it.
+    # See SequenceConfig::waypoint_settle_seconds.
+    waypoint_settle_seconds: 1.0
+
+    # How long to pause after publishing the startup gripper-close command
+    # (see TrajectoryPlanner::closeGripperOnStartup) before proceeding to
+    # the home move. No completion feedback exists to wait on instead —
+    # this is a fixed guess, not a measurement (real's robotiq_85_driver
+    # publishes no gripper position/status that could confirm "closed" —
+    # confirmed live 2026-07-20, /joint_states reports the same static
+    # value for the gripper joints regardless of actual open/closed state).
+    gripper_close_settle_seconds: 2.0

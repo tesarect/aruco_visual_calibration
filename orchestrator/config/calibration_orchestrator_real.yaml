@@ -1,0 +1,46 @@
+# Real: cal_ready now resolves via trajectory_planner's verified
+# cal_ready.joint_values preset (see preset_poses_real.yaml) rather than
+# the standoff/TF fallback. auto_center_enabled defaults to false here —
+# matching sim, and matching the web app's own UI default (its toggle is
+# local React state that starts false and is never read back from this
+# node's live parameter on page load, so a true node-side default here
+# would silently diverge from what the UI displays unless the user
+# explicitly re-toggles it every session — see useCalibrationAction.ts).
+# Still available as a runtime override via set_parameters/the web toggle
+# if the camera FOV near cal_ready ever needs this safety net again.
+calibration_orchestrator_node:
+  ros__parameters:
+    # Extra pause after reaching cal_ready, on top of trajectory_planner's
+    # own per-waypoint waypoint_settle_seconds (already applied inside the
+    # ~/trace_path call this node makes) — real's camera pipeline (Zenoh
+    # bridge, see CLAUDE.md's Real Robot Camera Setup) may need longer than
+    # sim to settle before starting a multi-minute calibration run.
+    post_cal_ready_settle_seconds: 3.0
+
+    # Master switch for the auto-centering safety step (see
+    # calibration_orchestrator_node.hpp's runAutoCenterProbe doc comment).
+    # Overridable at runtime via set_parameters — the web app can flip this
+    # without a restart. Defaults false (2026-07-21 — was true) now that
+    # cal_ready is well-tuned (verified joint-value preset, see header
+    # comment above) and to match the web UI's own default. Flip back to
+    # true here (or via the web toggle) if the polygon sweep is later found
+    # to clip outside the real camera's FOV.
+    auto_center_enabled: false
+    # Distance (m) moved per probe step, in cal_ready's own local X/Y
+    # plane, when searching for each of the four +X/-X/+Y/-Y visibility
+    # boundaries. PLACEHOLDER — not re-tuned for the real cell yet.
+    auto_center_probe_step_m: 0.05
+    # Maximum probe distance (m) from cal_ready along any single direction
+    # before giving up on that direction. PLACEHOLDER — not re-tuned for
+    # the real cell yet.
+    auto_center_max_probe_m: 0.15
+    # How long to wait for a marker_pose message after each probe move
+    # before concluding the marker is not visible there — real's detection
+    # pipeline may be slower than sim's, so this is longer than
+    # calibration_orchestrator_sim.yaml's value.
+    auto_center_visibility_timeout_sec: 3.0
+
+    # Planning strategy for every ~/trace_path call this node makes
+    # (cal_ready move + auto-center probe moves) — "cartesian" or
+    # "joint_space", see TracePath.srv.
+    planning_mode: "joint_space"

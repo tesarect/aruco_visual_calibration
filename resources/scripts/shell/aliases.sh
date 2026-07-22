@@ -13,6 +13,11 @@ alias pydir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/python/"
 alias viewcam="ros2 run rqt_image_view rqt_image_view /wrist_rgbd_depth_sensor/image_raw"
 alias viewoverlaycam="ros2 run rqt_image_view rqt_image_view /aruco_perception/overlay_image"
 
+# Curses TUI: green/yellow/red status of every titled tmux pane across all
+# sessions (base/trajcal/percep/webstack/...), cross-referenced against
+# `ros2 node list` for hung detection. See node_dashboard.py's docstring.
+alias nodedash="python3 ~/ros2_ws/src/visual_calibration/resources/scripts/python/node_dashboard.py"
+
 alias installbase="bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup.sh"
 alias installbasereal="bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup_real.sh"
 alias installweb="bash ~/webpage_ws/setup_rosject.sh"
@@ -43,6 +48,8 @@ customkill() {
         [trajcalrealtmux]='tmux kill-session -t trajcal_real_term'
         [perceptmux]='tmux kill-session -t percep_term'
         [webstacktmux]='tmux kill-session -t webstack_term'
+        [webstackrealtmux]='tmux kill-session -t webstack_real_term'
+        [debugtmux]='tmux kill-session -t debug_term'
         [gittmux]='tmux kill-session -t GIT'
         [termstmux]='tmux kill-session -t terminals'
     )
@@ -61,38 +68,61 @@ customkill() {
     fi
 }
 
+# Per-pane logging is opt-in — pass <pane_name>=on args straight through,
+# e.g. `tmuxbasesim move_group=on` or `tmuxbasesim move_group=on rviz=on`.
+# See logging.sh for pane names per script and what gets captured/where.
+# `tmuxbasesim move_group=on`
 tmuxbasesim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
-    bash ./sim_tmux_base.sh
+    bash ./sim_tmux_base.sh "$@"
 }
 
 # Real robot equivalent of tmuxbasesim — Zenoh bridge, move_group, rviz,
-# planning scene, marker-debugger. Does NOT start the robot driver itself;
-# run `realrobotstatuscheck` first and confirm /joint_states + /tf are
-# publishing before starting this session (see real_tmux_base.sh header).
+# planning scene. Does NOT start the robot driver itself. Driver status
+# check is opt-in: plain `tmuxbasereal` skips it and goes straight to
+# tmux; pass `stat_check=on` to run a fail-fast check (stops at the first
+# missing/silent thing, doesn't wait for a full report) before starting
+# — e.g. `tmuxbasereal stat_check=on`. For the full report any time
+# (mid-session too), use `realrobotstatuscheck` (see real_tmux_base.sh
+# header).
 tmuxbasereal() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
-    bash ./real_tmux_base.sh
+    bash ./real_tmux_base.sh "$@"
 }
 
+# tf_debug_markers.py + rqt overlay image + rqt_graph + a large scratch
+# shell at ~/ros2_ws, in its own session — pulled out of tmuxbasesim/
+# tmuxbasereal so this optional visual debugging isn't tied to the base
+# session's lifecycle. Requires the matching base session already up.
+# Usage: `tmuxdebug` (sim, default) or `tmuxdebug real`.
+tmuxdebug() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./debug_tmux.sh "$@"
+}
+
+# `tmuxtrajcalreal trajectory_planner=on calibration_broadcaster=on calibration_orchestrator=on`
 tmuxtrajcalsim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
-    bash ./sim_tmux_trajcal.sh
+    bash ./sim_tmux_trajcal.sh "$@"
 }
 
 # Real robot equivalent of tmuxtrajcalsim — trajectory_planner,
-# aruco_detector_node. Does NOT start calibration_broadcaster_node yet
-# (calibration_broadcaster_real.yaml doesn't exist, see todo.txt B4). Run
-# `tmuxbasereal` first — this session's panes poll for move_group +
-# planning scene readiness, which come from there.
+# aruco_detector_node, calibration_broadcaster_node, calibration_
+# orchestrator_node. Run `tmuxbasereal` first — this session's panes poll
+# for move_group + planning scene readiness, which come from there.
+# NONE of this has been tested live yet (calibration_broadcaster_real.yaml
+# was just added 2026-07-18) — expect to iterate.
+# `tmuxtrajcalreal trajectory_planner=on calibration_broadcaster=on calibration_orchestrator=on`
 tmuxtrajcalreal() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
-    bash ./real_tmux_trajcal.sh
+    bash ./real_tmux_trajcal.sh "$@"
 }
 
+# `tmuxwebstacksim` defaults to extracting sim's URDF; pass `real` to
+# extract real's instead, e.g. `tmuxwebstacksim real`.
 tmuxwebstacksim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
-    bash ./sim_tmux_webstack.sh
+    bash ./sim_tmux_webstack.sh "$@"
 }
 
 tmuxpercepsim() {
@@ -175,11 +205,68 @@ startarucodetector() {
         --params-file ~/ros2_ws/src/visual_calibration/aruco_perception/config/aruco_detector_"$env".yaml
 }
 
+# inference_server.py — the always-on YOLO model server (plain Flask
+# process inside ~/yolo_venv, NOT a ROS node — never call this from a shell
+# that also sources ROS's setup.bash and imports cv_bridge, see the
+# ABI-isolation rule in error-mitigation.md #15). Backgrounds itself and
+# returns immediately; pair with waitforinferenceserver to block until
+# ready. See aruco_perception_yolo_bridge/resources/scripts/shell/
+# start_inference_server.sh for what this actually does.
+startinferenceserver() {
+    local env="${1:-real}"
+    bash ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/resources/scripts/shell/start_inference_server.sh "$env"
+}
+
+waitforinferenceserver() {
+    local timeout="${1:-30}"
+    local expected_env="${2:-}"
+    bash ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/resources/scripts/shell/wait_for_inference_server.sh "$timeout" "$expected_env"
+}
+
+# yolo_marker_bridge_node — the YOLO-backed alternative to
+# startarucodetector, for the classical/hybrid switch (see
+# calibration_orchestrator_node's ~/set_detector_mode). This IS a normal
+# ROS node (rclpy, imports cv_bridge) despite calling out to
+# inference_server.py over HTTP — safe to run from a plain ROS shell, same
+# as startarucodetector. Requires inference_server.py already running
+# (startinferenceserver) — it does not start that itself.
+startyolomarkerbridge() {
+    local env="${1:-sim}"
+    source ~/ros2_ws/install/setup.bash
+    ros2 run aruco_perception_yolo_bridge yolo_marker_bridge_node.py --ros-args \
+        --params-file ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/config/yolo_marker_bridge_"$env".yaml
+}
+
+# Switches which detector actively publishes /aruco_perception/marker_pose
+# — "classical" (aruco_detector_node) or "hybrid" (yolo_marker_bridge_node).
+# See calibration_orchestrator_node's handleSetDetectorMode and
+# visual_calibration_msgs/srv/SetDetectorMode.srv. Both detector nodes must
+# already be running (aruco_detector_node always is by default;
+# yolo_marker_bridge_node needs startyolomarkerbridge — and
+# startinferenceserver before that — run first) or this call fails cleanly
+# (response.success=false), it does not start either node itself.
+setdetectormode() {
+    local mode="${1:?Usage: setdetectormode <classical|hybrid>}"
+    source ~/ros2_ws/install/setup.bash
+    ros2 service call /calibration_orchestrator_node/set_detector_mode \
+        visual_calibration_msgs/srv/SetDetectorMode "{mode: '$mode'}"
+}
+
 startcalibrationbroadcaster() {
     local env="${1:-sim}"
     source ~/ros2_ws/install/setup.bash
     ros2 run aruco_perception calibration_broadcaster_node --ros-args \
         --params-file ~/ros2_ws/src/visual_calibration/aruco_perception/config/calibration_broadcaster_"$env".yaml
+}
+
+# calibration_orchestrator_node: chains cal_ready -> optional auto-center ->
+# ~/calibrate into one node/action, see orchestrator package. Started by
+# both sim_tmux_trajcal.sh and real_tmux_trajcal.sh.
+startcalibrationorchestrator() {
+    local env="${1:-sim}"
+    source ~/ros2_ws/install/setup.bash
+    ros2 run orchestrator calibration_orchestrator_node --ros-args \
+        --params-file ~/ros2_ws/src/visual_calibration/orchestrator/config/calibration_orchestrator_"$env".yaml
 }
 
 # Moves through trajectory_planner's whole polygon in one call — useful
@@ -212,6 +299,23 @@ getpresetpose() {
         visual_calibration_msgs/srv/GetPresetPose "{name: '$name'}"
 }
 
+# Moves the arm to a NAMED preset (e.g. "home", "standby",
+# "baristastandby") — looks the pose up via ~/get_preset_pose then sends
+# it to ~/trace_path, so it always matches whatever's actually recorded in
+# preset_poses_sim.yaml/_real.yaml (see move_to_preset.py). Joint-space by
+# default; pass "cartesian" as the 2nd arg for a straight-line move
+# instead. Usage: movetopreset baristastandby
+#                 movetopreset baristastandby cartesian
+movetopreset() {
+    local name="${1:?Usage: movetopreset <preset_name> [joint_space|cartesian]}"
+    local mode="${2:-joint_space}"
+    local mode_flag="--joint-space"
+    [[ "$mode" == "cartesian" ]] && mode_flag="--cartesian"
+    source ~/ros2_ws/install/setup.bash
+    python3 ~/ros2_ws/src/visual_calibration/resources/scripts/python/move_to_preset.py \
+        "$name" "$mode_flag"
+}
+
 # Records the current tool0 position (base_link-relative) as one corner of
 # a planning-scene box object being measured — see measure_scene_box.py.
 # Jog the arm's end-effector to touch a corner via RViz first, THEN call
@@ -239,10 +343,27 @@ measurecompute() {
 # the final orientation spread (max/mean degrees) in the result.
 # calibration_broadcaster_node drives the whole sequence itself (fetch
 # waypoints, move one at a time, wait for the arm to settle, sample) — no
-# separate polygon-tracing loop needed alongside this anymore.
+# separate polygon-tracing loop needed alongside this anymore. Assumes the
+# arm is ALREADY at cal_ready/standoff (e.g. via getstandoffpose + a manual
+# trace_path, or startautocalibration below) — does not move there itself.
 startcalibration() {
     ros2 action send_goal /calibration_broadcaster_node/calibrate \
         visual_calibration_msgs/action/Calibrate {} --feedback
+}
+
+# Sends the ~/auto_calibrate action goal and blocks, printing live feedback
+# (stage name, then samples_collected/samples_total once the calibrate
+# stage starts) until the action completes. calibration_orchestrator_node
+# drives the WHOLE sequence: moves to cal_ready itself (no need to call
+# getstandoffpose/trace_path first), optionally auto-centers on the marker
+# (see calibration_orchestrator_sim/real.yaml's auto_center_enabled), then
+# calls calibration_broadcaster_node's ~/calibrate as a client. Prefer this
+# over startcalibration for a from-scratch run — startcalibration alone
+# still works for testing calibration in isolation once already at
+# cal_ready.
+startautocalibration() {
+    ros2 action send_goal /calibration_orchestrator_node/auto_calibrate \
+        visual_calibration_msgs/action/AutoCalibrate {} --feedback
 }
 
 # Sim-only accuracy check: compares calibration_broadcaster_node's
@@ -292,15 +413,15 @@ vcpkgbuildsymlink() {
 
 vcbuild() {
     cd ~/ros2_ws || return
-    # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
-    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
+    # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception orchestrator calibration_validation real_ur3e_description
+    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs
     source install/setup.bash
 }
 
 vcbuildsymlink() {
     cd ~/ros2_ws || return
-    # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
-    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
+    # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception orchestrator calibration_validation real_ur3e_description --symlink-install
+    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs --symlink-install
     source install/setup.bash
 }
 
@@ -312,17 +433,25 @@ vccleanbuild() {
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
         build/aruco_perception \
+        build/aruco_perception_yolo_bridge \
+        build/depth_perception \
+        build/orchestrator \
         build/calibration_validation \
-        build/real_ur3e_description
+        build/real_ur3e_description \
+        build/robotiq_85_msgs
     rm -rf install/sim_ur3e_moveit_config \
         install/real_ur3e_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
         install/aruco_perception \
+        install/aruco_perception_yolo_bridge \
+        install/depth_perception \
+        install/orchestrator \
         install/calibration_validation \
-        install/real_ur3e_description
+        install/real_ur3e_description \
+        install/robotiq_85_msgs
 
-    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description
+    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs
     source install/setup.bash
 }
 
@@ -334,17 +463,25 @@ vccleanbuildsymlink() {
         build/visual_calibration_msgs \
         build/visual_calibration_moveit \
         build/aruco_perception \
+        build/aruco_perception_yolo_bridge \
+        build/depth_perception \
+        build/orchestrator \
         build/calibration_validation \
-        build/real_ur3e_description
+        build/real_ur3e_description \
+        build/robotiq_85_msgs
     rm -rf install/sim_ur3e_moveit_config \
         install/real_ur3e_moveit_config \
         install/visual_calibration_msgs \
         install/visual_calibration_moveit \
         install/aruco_perception \
+        install/aruco_perception_yolo_bridge \
+        install/depth_perception \
+        install/orchestrator \
         install/calibration_validation \
-        install/real_ur3e_description
+        install/real_ur3e_description \
+        install/robotiq_85_msgs
 
-    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception calibration_validation real_ur3e_description --symlink-install
+    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs --symlink-install
     source install/setup.bash
 }
 
@@ -399,11 +536,11 @@ completerealsetup() {
     # installbasereal
     bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup_real.sh
     # installweb
-    # bash ~/webpage_ws/setup_rosject.sh
-    # # initweb
-    # source ~/webpage_ws/scripts/session_init.sh
-    # # statusweb
-    # bash ~/webpage_ws/scripts/session_status.sh
+    bash ~/webpage_ws/setup_rosject.sh
+    # initweb
+    source ~/webpage_ws/scripts/session_init.sh
+    # statusweb
+    bash ~/webpage_ws/scripts/session_status.sh
     # Install zehno - camera driver - done by setup_real.sh
     # install yolo [TODO: zenoh installation asks for installation confirmation. need to pass in `-y`]
     # sudo apt install -y python3.10-venv

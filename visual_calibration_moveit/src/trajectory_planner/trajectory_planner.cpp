@@ -1,7 +1,9 @@
 #include "visual_calibration_moveit/trajectory_planner.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
+#include <thread>
 #include <vector>
 
 #include <moveit_msgs/msg/robot_trajectory.hpp>
@@ -50,6 +52,7 @@ TrajectoryPlanner::TrajectoryPlanner(
   tf_listener_(tf_buffer_),
   standoff_config_(loadStandoffConfigFromParams()),
   polygon_config_(loadPolygonConfigFromParams()),
+  planner_config_(loadPlannerConfigFromParams()),
   sequence_config_(loadSequenceConfigFromParams()),
   preset_poses_(node_)
 {
@@ -88,6 +91,13 @@ TrajectoryPlanner::TrajectoryPlanner(
       &TrajectoryPlanner::handleGetPresetPose, this, std::placeholders::_1,
       std::placeholders::_2));
 
+  move_to_preset_service_ =
+    node_->create_service<visual_calibration_msgs::srv::MoveToPreset>(
+    "~/move_to_preset",
+    std::bind(
+      &TrajectoryPlanner::handleMoveToPreset, this, std::placeholders::_1,
+      std::placeholders::_2));
+
   // transient_local + depth 1: a late subscriber (e.g. the web bridge
   // reconnecting) immediately receives the last-published name instead of
   // waiting for the next state change. Published only on transitions, not
@@ -102,6 +112,12 @@ TrajectoryPlanner::TrajectoryPlanner(
     "~/planning_failure",
     rclcpp::QoS(10).reliable());
 
+  // Absolute topic name, matching real's robotiq_85_driver subscription —
+  // see gripper_cmd_pub_'s doc comment and closeGripperOnStartup.
+  gripper_cmd_pub_ = node_->create_publisher<robotiq_85_msgs::msg::GripperCmd>(
+    "/gripper/cmd",
+    rclcpp::QoS(1).reliable());
+
   RCLCPP_INFO(
     node_->get_logger(), "trajectory_planner ready (planning group: '%s')",
     planning_group.c_str());
@@ -109,8 +125,30 @@ TrajectoryPlanner::TrajectoryPlanner(
   runStartupSequence();
 }
 
+void TrajectoryPlanner::closeGripperOnStartup()
+{
+  robotiq_85_msgs::msg::GripperCmd cmd;
+  cmd.emergency_release = false;
+  cmd.emergency_release_dir = 0;
+  cmd.stop = false;
+  cmd.position = 0.0;  // 0.0 = fully closed, per robotiq_85_driver's convention
+  cmd.speed = 0.5;
+  cmd.force = 50.0;
+
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "Publishing gripper close command on /gripper/cmd (unconditional — see "
+    "closeGripperOnStartup's doc comment)...");
+  gripper_cmd_pub_->publish(cmd);
+
+  std::this_thread::sleep_for(
+    std::chrono::duration<double>(sequence_config_.gripper_close_settle_seconds));
+}
+
 void TrajectoryPlanner::runStartupSequence()
 {
+  closeGripperOnStartup();
+
   const bool move_to_home_on_startup =
     node_->get_parameter("move_to_home_on_startup").as_bool();
 
@@ -154,11 +192,85 @@ bool TrajectoryPlanner::planAndExecute(const geometry_msgs::msg::Pose & target_p
 {
   move_group_interface_.setPoseTarget(target_pose);
 
+  // Without these, MoveGroupInterface falls back to whatever the OMPL
+  // pipeline config's default_planner_config is with 1 attempt (see
+  // {sim,real}_ur3e_moveit_config/config/ompl_planning.yaml) — pinning
+  // them here from planner_config_ (see trajectory_planner_sim.yaml/_real.yaml)
+  // keeps planning behavior correct/auditable even if that yaml's default
+  // ever changes, and num_planning_attempts > 1 lets MoveGroupInterface
+  // automatically keep the shortest-path plan among several tries within
+  // the time budget, rather than settling for whichever is found first —
+  // this is what fixes the twisted/tangled real-robot paths that MoveIt's
+  // previous, entirely unconfigured defaults (RRTConnect, ~5s, 1 attempt,
+  // no optimization) produced.
+  // Pinned explicitly (not just left to move_group's default pipeline)
+  // since move_group.launch.py's .planning_pipelines(pipelines=["ompl"])
+  // is what actually keeps CHOMP out of the loaded pipeline list — this
+  // call is a second, defensive layer so a future regression there fails
+  // loudly (MoveGroupInterface errors on an unknown pipeline id) instead
+  // of silently routing pose-target goals to a pipeline that can't handle
+  // them (see move_group.launch.py's comment for the CHOMP incident this
+  // guards against). See PlannerConfig::planning_pipeline_id for why this
+  // must stay "ompl" — the only pipeline actually configured/loaded.
+  move_group_interface_.setPlanningPipelineId(planner_config_.planning_pipeline_id);
+  move_group_interface_.setPlannerId(planner_config_.planner_id);
+  move_group_interface_.setPlanningTime(planner_config_.planning_time_s);
+  move_group_interface_.setNumPlanningAttempts(planner_config_.num_planning_attempts);
+
   moveit::planning_interface::MoveGroupInterface::Plan plan;
   const bool planned = static_cast<bool>(move_group_interface_.plan(plan));
 
   if (!planned) {
     RCLCPP_ERROR(node_->get_logger(), "Planning failed for the given target pose");
+    return false;
+  }
+
+  const bool executed =
+    static_cast<bool>(move_group_interface_.execute(plan));
+
+  if (!executed) {
+    RCLCPP_ERROR(node_->get_logger(), "Execution failed for the planned trajectory");
+    return false;
+  }
+
+  RCLCPP_INFO(node_->get_logger(), "Trajectory planned and executed successfully");
+  return true;
+}
+
+bool TrajectoryPlanner::planAndExecute(const std::vector<double> & joint_values)
+{
+  const std::vector<std::string> & joint_names =
+    move_group_interface_.getJointNames();
+
+  if (joint_values.size() != joint_names.size()) {
+    RCLCPP_ERROR(
+      node_->get_logger(),
+      "planAndExecute(joint_values) got %zu values but planning group '%s' has %zu "
+      "joints — refusing to plan.",
+      joint_values.size(), move_group_interface_.getName().c_str(), joint_names.size());
+    return false;
+  }
+
+  move_group_interface_.setJointValueTarget(joint_values);
+
+  // Same OMPL tuning as planAndExecute(Pose) — see that overload's
+  // comment for why each of these is set explicitly. Applies here too:
+  // setJointValueTarget() still goes through the same OMPL pipeline/
+  // planner, just with a joint-space goal instead of a pose goal that
+  // needs IK resolved first (so no IK-branch ambiguity for THIS move —
+  // see this overload's header comment — though the plan from wherever
+  // the arm currently is TO these joint values still goes through normal
+  // RRTstar planning, same as any other joint-space move).
+  move_group_interface_.setPlanningPipelineId(planner_config_.planning_pipeline_id);
+  move_group_interface_.setPlannerId(planner_config_.planner_id);
+  move_group_interface_.setPlanningTime(planner_config_.planning_time_s);
+  move_group_interface_.setNumPlanningAttempts(planner_config_.num_planning_attempts);
+
+  moveit::planning_interface::MoveGroupInterface::Plan plan;
+  const bool planned = static_cast<bool>(move_group_interface_.plan(plan));
+
+  if (!planned) {
+    RCLCPP_ERROR(node_->get_logger(), "Planning failed for the given joint target");
     return false;
   }
 
@@ -298,17 +410,54 @@ std::optional<geometry_msgs::msg::Pose> TrajectoryPlanner::getPresetPose(
   return preset_poses_.get(name);
 }
 
+std::optional<std::vector<double>> TrajectoryPlanner::getPresetJointValues(
+  const std::string & name) const
+{
+  return preset_poses_.getJointValues(name);
+}
+
+bool TrajectoryPlanner::planAndExecuteToPreset(const std::string & name)
+{
+  const std::optional<std::vector<double>> joint_values = preset_poses_.getJointValues(name);
+  if (joint_values.has_value()) {
+    RCLCPP_INFO(
+      node_->get_logger(), "Moving to preset '%s' via its joint-value preset.", name.c_str());
+    return planAndExecute(*joint_values);
+  }
+
+  const std::optional<geometry_msgs::msg::Pose> pose = preset_poses_.get(name);
+  if (pose.has_value()) {
+    // See runStartupSequence's matching comment — preset poses are
+    // captured against end_effector_frame, must match it before planning.
+    move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
+    RCLCPP_INFO(
+      node_->get_logger(), "Moving to preset '%s' via its Cartesian pose preset.", name.c_str());
+    return planAndExecute(*pose);
+  }
+
+  RCLCPP_ERROR(
+    node_->get_logger(),
+    "No preset named '%s' is configured (neither joint-value nor Cartesian) — cannot move.",
+    name.c_str());
+  return false;
+}
+
 bool TrajectoryPlanner::tracePath(
   const std::vector<geometry_msgs::msg::Pose> & waypoints,
   uint8_t planning_mode)
 {
   move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
 
+  const bool use_cartesian =
+    planning_mode == visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN;
+  RCLCPP_INFO(
+    node_->get_logger(), "tracePath: using %s planning mode",
+    use_cartesian ? "CARTESIAN" : "JOINT_SPACE");
+
   for (size_t i = 0; i < waypoints.size(); ++i) {
     RCLCPP_INFO(node_->get_logger(), "Tracing waypoint %zu/%zu", i + 1, waypoints.size());
 
-    const bool succeeded =
-      planning_mode == visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN ?
+    const bool succeeded = use_cartesian ?
       planAndExecuteCartesian(waypoints[i]) :
       planAndExecute(waypoints[i]);
 
@@ -316,6 +465,16 @@ bool TrajectoryPlanner::tracePath(
       RCLCPP_ERROR(
         node_->get_logger(), "tracePath stopped at waypoint %zu/%zu", i + 1, waypoints.size());
       return false;
+    }
+
+    // Global goal-settle delay — see SequenceConfig::waypoint_settle_seconds.
+    // Safe to sleep this service callback thread: the response has nothing
+    // left to compute until every waypoint (including this one) is done,
+    // and MultiThreadedExecutor keeps other callbacks (timers, other
+    // services) unblocked in the meantime.
+    if (sequence_config_.waypoint_settle_seconds > 0.0) {
+      std::this_thread::sleep_for(
+        std::chrono::duration<double>(sequence_config_.waypoint_settle_seconds));
     }
   }
   return true;
@@ -330,31 +489,53 @@ std::vector<geometry_msgs::msg::Pose> TrajectoryPlanner::polygonWaypointsAroundS
     return {};
   }
 
+  // Centered on the arm's own current pose, NOT the camera's TF — the
+  // camera's position relative to the robot is this project's whole
+  // unknown (see CLAUDE.md's Real Robot Camera Setup / the task
+  // instructions' Task 2): on the real robot there is no TF connecting the
+  // camera to base_link until calibration has already run, so a polygon
+  // computed relative to the camera can never bootstrap. Sampling around
+  // wherever the arm already is (e.g. cal_ready) needs nothing from the
+  // camera at all — it only needs the marker to stay in view, which
+  // calibration_broadcaster_node already checks per-sample.
+  //
+  // Looked up via tf_buffer_ (same pattern as getStandoffPose()'s
+  // camera_frame lookup just below in this file), NOT
+  // move_group_interface_.getCurrentState()/getCurrentPose() — those
+  // route through MoveGroupInterface's internal CurrentStateMonitor, whose
+  // /joint_states subscription shares this node's single default
+  // MutuallyExclusive callback group with every service handler,
+  // including this one. Calling a blocking current-state wait FROM a
+  // service callback in that setup deadlocks: the subscription callback
+  // that would satisfy the wait can never run while this callback is the
+  // one blocking, so it hangs forever regardless of any timeout argument
+  // (confirmed via diagnostic logging, 2026-07-22 — see plan file
+  // transient-humming-donut.md's "Known open issue"/"Root cause confirmed"
+  // sections; this is the same class of deadlock main.cpp's own comment
+  // documents for a different, since-refactored-away call site).
+  // tf_buffer_'s /tf subscription has no such dependency, and this exact
+  // lookup pattern is already proven working elsewhere in this file.
   const std::string & planning_frame = move_group_interface_.getPlanningFrame();
 
-  geometry_msgs::msg::TransformStamped camera_tf;
+  geometry_msgs::msg::TransformStamped current_tf;
   try {
-    camera_tf = tf_buffer_.lookupTransform(
-      planning_frame, standoff_config_.camera_frame, tf2::TimePointZero,
+    current_tf = tf_buffer_.lookupTransform(
+      planning_frame, standoff_config_.end_effector_frame, tf2::TimePointZero,
       tf2::durationFromSec(tf_timeout.seconds()));
   } catch (const tf2::TransformException & ex) {
     RCLCPP_ERROR(
       node_->get_logger(), "Could not look up '%s' in planning frame '%s': %s",
-      standoff_config_.camera_frame.c_str(), planning_frame.c_str(), ex.what());
+      standoff_config_.end_effector_frame.c_str(), planning_frame.c_str(), ex.what());
     return {};
   }
 
-  const geometry_msgs::msg::Pose standoff_pose = offsetInFrontOf(
-    camera_tf, standoff_config_.standoff_m, standoff_config_.facing_rpy_rad);
-
   tf2::Transform standoff;
-  tf2::fromMsg(standoff_pose, standoff);
+  tf2::fromMsg(current_tf.transform, standoff);
 
-  // Corner offsets applied in the standoff pose's own local X/Y plane (not
-  // the camera's), so every corner keeps the same facing_rpy_rad-derived
-  // orientation as the center — only position varies, so the target link
-  // keeps facing the camera at each corner. Visited in angular order, so
-  // consecutive waypoints are always adjacent (shorter individual moves).
+  // Corner offsets applied in the center pose's own local X/Y plane, so
+  // every corner keeps the same orientation as the center — only position
+  // varies. Visited in angular order, so consecutive waypoints are always
+  // adjacent (shorter individual moves).
   std::vector<geometry_msgs::msg::Pose> waypoints;
   waypoints.reserve(static_cast<size_t>(polygon_config_.num_corners));
   for (int i = 0; i < polygon_config_.num_corners; ++i) {
@@ -484,6 +665,37 @@ void TrajectoryPlanner::handleGetPresetPose(
   }
 }
 
+void TrajectoryPlanner::handleMoveToPreset(
+  const std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Request> request,
+  std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Response> response)
+{
+  // Checked BEFORE calling planAndExecuteToPreset() (which only returns
+  // bool, with no way for this handler to tell "no preset configured"
+  // apart from "a preset exists but planning/execution genuinely failed"
+  // after the fact) so the response->message can distinguish the two —
+  // callers (e.g. calibration_orchestrator_node's moveToCalReady(), and
+  // the web app's Cal Ready button) key off the exact substring "No
+  // preset named" to decide whether to fall back to their own
+  // ~/get_standoff_pose + ~/trace_path path, vs. treat this as a real
+  // failure worth surfacing without a silent fallback.
+  const bool preset_exists =
+    preset_poses_.getJointValues(request->name).has_value() ||
+    preset_poses_.get(request->name).has_value();
+
+  if (!preset_exists) {
+    response->success = false;
+    response->message =
+      "No preset named '" + request->name + "' is configured (neither joint-value nor "
+      "Cartesian) — cannot move.";
+    return;
+  }
+
+  response->success = planAndExecuteToPreset(request->name);
+  response->message = response->success ?
+    "Moved to preset '" + request->name + "'" :
+    "Failed to move to preset '" + request->name + "' (see log for the error)";
+}
+
 StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const
 {
   StandoffConfig config;
@@ -521,6 +733,17 @@ PolygonConfig TrajectoryPlanner::loadPolygonConfigFromParams() const
   return config;
 }
 
+PlannerConfig TrajectoryPlanner::loadPlannerConfigFromParams() const
+{
+  PlannerConfig config;
+  config.planning_pipeline_id = node_->get_parameter("planning_pipeline_id").as_string();
+  config.planner_id = node_->get_parameter("planner_id").as_string();
+  config.planning_time_s = node_->get_parameter("planning_time_s").as_double();
+  config.num_planning_attempts =
+    static_cast<int>(node_->get_parameter("num_planning_attempts").as_int());
+  return config;
+}
+
 SequenceConfig TrajectoryPlanner::loadSequenceConfigFromParams() const
 {
   SequenceConfig config;
@@ -530,6 +753,10 @@ SequenceConfig TrajectoryPlanner::loadSequenceConfigFromParams() const
     node_->get_parameter("lift_target_z_m").as_double();
   config.lift_wait_seconds =
     node_->get_parameter("lift_wait_seconds").as_double();
+  config.waypoint_settle_seconds =
+    node_->get_parameter("waypoint_settle_seconds").as_double();
+  config.gripper_close_settle_seconds =
+    node_->get_parameter("gripper_close_settle_seconds").as_double();
   return config;
 }
 

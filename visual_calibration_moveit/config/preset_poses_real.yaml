@@ -44,7 +44,7 @@
 # directly off the trajectory_planner node.
 trajectory_planner:
   ros__parameters:
-    preset_names: ["standoff", "home", "cal_ready", "standby"]
+    preset_names: ["standoff", "home", "cal_ready", "cal_ready_alt", "cal_ready_alt2", "standby", "baristastandby" ]
 
     standoff.position: [-0.4213, -0.0698, -0.0740]
     standoff.orientation: [0.1434, 0.1269, -0.6786, 0.7091]  # x, y, z, w — same as cal_ready
@@ -52,8 +52,50 @@ trajectory_planner:
     home.position: [-0.1332, 0.0822, 0.6844]
     home.orientation: [0.5600, 0.5849, -0.4108, -0.4189]  # x, y, z, w
 
-    cal_ready.position: [-0.4213, -0.0698, -0.0740]
-    cal_ready.orientation: [0.1434, 0.1269, -0.6786, 0.7091]  # x, y, z, w
+    # cal_ready.position: [-0.4213, -0.0698, -0.0740]
+    # cal_ready.orientation: [0.1434, 0.1269, -0.6786, 0.7091]  # x, y, z, w
+
+    # cal_ready_alt / cal_ready_alt2: JOINT-VALUE presets (not Cartesian) —
+    # alternate ways to reach essentially the same Cartesian pose as
+    # cal_ready above (both re-measured 2026-07-20: alt xyz=(-0.4213,
+    # -0.0698, -0.0739) quat=(0.1436, 0.1273, -0.6788, 0.7088); alt2
+    # xyz=(-0.3963, -0.0689, -0.0732) quat=(0.1436, 0.1264, -0.6788,
+    # 0.7090) — both match cal_ready to within measurement noise / a small
+    # XY offset from the pose actually reached each time), but via
+    # different UR3e IK branches/joint configurations. See
+    # PresetPoses.hpp's doc comment and preset_poses_sim.yaml's cal_ready
+    # entry for why this matters: sim confirmed two different joint-space
+    # paths to the same Cartesian cal_ready target can land in configs
+    # that differ by 90-250° on several joints, only one of which left
+    # enough margin for the downstream Cartesian calibration-polygon moves
+    # to succeed. NEITHER of these has yet been verified against a live
+    # calibration run on the real robot (unlike sim's cal_ready.joint_values,
+    # which was confirmed via a successful startcalibration run before
+    # being added) — kept under separate names, not wired as
+    # ~/move_to_preset("cal_ready")'s default, until one is verified. Test
+    # via `ros2 service call /trajectory_planner/move_to_preset
+    # visual_calibration_msgs/srv/MoveToPreset "{name: 'cal_ready_alt'}"`
+    # (or 'cal_ready_alt2'), then try startcalibration from there.
+    # cal_ready_alt: shoulder_pan_joint (-200.01°) and wrist_3_joint
+    # (223.59°) are both outside +-180° but within the URDF's own +-360°
+    # joint range — joint_limits.yaml has no has_position_limits/
+    # min_position/max_position override for either of these two joints
+    # specifically (unlike elbow/shoulder_lift/wrist_1/wrist_2, which ARE
+    # clamped to +-180° there), so this should still be
+    # planner-reachable via setJointValueTarget(). Order for both: shoulder_pan,
+    # shoulder_lift, elbow, wrist_1, wrist_2, wrist_3 (radians).
+    cal_ready_alt.joint_values: [-3.490772549306051, -0.21902592599902349, 1.2699645201312464, -1.856286188165182, -0.546541992818014, 3.9023215770721436]
+    # cal_ready_alt2: wrist_2_joint (327.72°) is also outside +-180° but
+    # within the URDF's own +-360° range — confirmed wrist_2_joint has no
+    # has_position_limits/min_position/max_position override in
+    # joint_limits.yaml either (same as cal_ready_alt's shoulder_pan_joint/
+    # wrist_3_joint), so this should also be planner-reachable via
+    # setJointValueTarget().
+    cal_ready_alt2.joint_values: [2.767543315887451, -0.27426524580035405, 1.4360316435443323, -1.9357205830016078, 5.719724655151367, -2.415746275578634]
+    cal_ready.joint_values: [2.767543315887451, -0.27426524580035405, 1.4360316435443323, -1.9357205830016078, 5.719724655151367, -2.415746275578634]
 
     standby.position: [-0.0889, 0.1103, 0.4600]
     standby.orientation: [-0.5928, -0.5156, 0.1737, 0.5938]  # x, y, z, w
+
+    baristastandby.position: [-0.4346, -0.0744, 0.3522]
+    baristastandby.orientation: [0.5098, 0.5147, -0.4693, 0.5048]  # x, y, z, w

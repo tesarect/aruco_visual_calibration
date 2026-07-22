@@ -1,0 +1,26 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>orchestrator</name>
+  <version>0.0.0</version>
+  <description>Ties trajectory_planner's motion services and calibration_broadcaster_node's ~/calibrate action into one auto-calibrate sequence (move to cal_ready, optional auto-center on the marker, then calibrate). Both of those nodes stay unaware this orchestration exists — trajectory_planner remains a dumb mover, calibration_broadcaster_node remains focused only on sampling/averaging/broadcasting.</description>
+  <maintainer email="karthikn.balasubramanian@gmail.com">rosman</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>std_srvs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visual_calibration_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
