@@ -458,7 +458,7 @@ bool TrajectoryPlanner::tracePath(
     RCLCPP_INFO(node_->get_logger(), "Tracing waypoint %zu/%zu", i + 1, waypoints.size());
 
     const bool succeeded = use_cartesian ?
-      planAndExecuteCartesian(waypoints[i]) :
+      planAndExecuteCartesian(waypoints[i], planner_config_.cartesian_min_fraction) :
       planAndExecute(waypoints[i]);
 
     if (!succeeded) {
@@ -480,13 +480,13 @@ bool TrajectoryPlanner::tracePath(
   return true;
 }
 
-std::vector<geometry_msgs::msg::Pose> TrajectoryPlanner::polygonWaypointsAroundStandoff(
-  rclcpp::Duration tf_timeout) const
+std::pair<std::vector<geometry_msgs::msg::Pose>, geometry_msgs::msg::Pose>
+TrajectoryPlanner::polygonWaypointsAroundStandoff(rclcpp::Duration tf_timeout) const
 {
   if (polygon_config_.num_corners < 3) {
     RCLCPP_ERROR(
       node_->get_logger(), "polygon_num_corners (%d) must be >= 3", polygon_config_.num_corners);
-    return {};
+    return {{}, geometry_msgs::msg::Pose()};
   }
 
   // Centered on the arm's own current pose, NOT the camera's TF — the
@@ -526,11 +526,17 @@ std::vector<geometry_msgs::msg::Pose> TrajectoryPlanner::polygonWaypointsAroundS
     RCLCPP_ERROR(
       node_->get_logger(), "Could not look up '%s' in planning frame '%s': %s",
       standoff_config_.end_effector_frame.c_str(), planning_frame.c_str(), ex.what());
-    return {};
+    return {{}, geometry_msgs::msg::Pose()};
   }
 
   tf2::Transform standoff;
   tf2::fromMsg(current_tf.transform, standoff);
+
+  geometry_msgs::msg::Pose center_pose;
+  center_pose.position.x = standoff.getOrigin().x();
+  center_pose.position.y = standoff.getOrigin().y();
+  center_pose.position.z = standoff.getOrigin().z();
+  center_pose.orientation = tf2::toMsg(standoff.getRotation());
 
   // Corner offsets applied in the center pose's own local X/Y plane, so
   // every corner keeps the same orientation as the center — only position
@@ -555,11 +561,11 @@ std::vector<geometry_msgs::msg::Pose> TrajectoryPlanner::polygonWaypointsAroundS
     goal_pose.orientation = tf2::toMsg(goal.getRotation());
     waypoints.push_back(goal_pose);
   }
-  return waypoints;
+  return {waypoints, center_pose};
 }
 
-std::vector<geometry_msgs::msg::Pose> TrajectoryPlanner::getPolygonWaypoints(
-  rclcpp::Duration tf_timeout) const
+std::pair<std::vector<geometry_msgs::msg::Pose>, geometry_msgs::msg::Pose>
+TrajectoryPlanner::getPolygonWaypoints(rclcpp::Duration tf_timeout) const
 {
   return polygonWaypointsAroundStandoff(tf_timeout);
 }
@@ -602,7 +608,7 @@ void TrajectoryPlanner::handleTracePolygon(
   std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
   const std::vector<geometry_msgs::msg::Pose> waypoints =
-    polygonWaypointsAroundStandoff(rclcpp::Duration::from_seconds(3.0));
+    polygonWaypointsAroundStandoff(rclcpp::Duration::from_seconds(3.0)).first;
 
   if (waypoints.empty()) {
     response->success = false;
@@ -619,13 +625,13 @@ void TrajectoryPlanner::handleGetPolygonWaypoints(
   const std::shared_ptr<visual_calibration_msgs::srv::GetPolygonWaypoints::Request>/*request*/,
   std::shared_ptr<visual_calibration_msgs::srv::GetPolygonWaypoints::Response> response)
 {
-  const std::vector<geometry_msgs::msg::Pose> waypoints =
-    getPolygonWaypoints(rclcpp::Duration::from_seconds(3.0));
+  const auto [waypoints, center_pose] = getPolygonWaypoints(rclcpp::Duration::from_seconds(3.0));
 
   response->success = !waypoints.empty();
   response->message = response->success ?
     "Computed polygon waypoints successfully" :
     "Could not compute polygon waypoints (see log for the error)";
+  response->center_pose = center_pose;
   response->waypoints = std::vector<geometry_msgs::msg::Pose>(
     waypoints.begin(), waypoints.end());
 }
@@ -741,6 +747,7 @@ PlannerConfig TrajectoryPlanner::loadPlannerConfigFromParams() const
   config.planning_time_s = node_->get_parameter("planning_time_s").as_double();
   config.num_planning_attempts =
     static_cast<int>(node_->get_parameter("num_planning_attempts").as_int());
+  config.cartesian_min_fraction = node_->get_parameter("cartesian_min_fraction").as_double();
   return config;
 }
 

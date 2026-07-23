@@ -31,3 +31,30 @@ calibration_broadcaster_node:
     # its priority at 0 until orientation_averaging.hpp adds it.
     orientation_sum_normalize_priority: 1
     orientation_markley_priority: 0
+
+    # --- Random phase (2026-07-22 redesign) ---
+    # After the polygon phase (num_samples above, 2 full passes around the
+    # 4-corner polygon) completes, this many MORE samples are collected at
+    # randomized X/Y/Z offsets from the same center pose — see
+    # calibration_broadcaster_node.hpp's class doc comment and
+    # CalibrationBroadcasterNode::runRandomPhase.
+    random_phase_samples: 8
+    # Maximum straight-line distance (m) a random candidate may be from
+    # the center pose — checked before moving there.
+    random_phase_max_offset_m: 0.10
+    # Safety bound: how many consecutive invisible-marker random
+    # candidates are tolerated before giving up on the whole calibration
+    # run. Not expected to be hit in normal operation.
+    random_phase_max_consecutive_failures: 20
+
+    # --- Early-stop (2026-07-22 redesign) ---
+    # A sample counts as "in agreement" with the running average if its
+    # position is within this many cm AND its orientation is within
+    # orientation_spread_tolerance_deg of the running average (see
+    # CalibrationBroadcasterNode::stableAgreementReached).
+    position_spread_tolerance_cm: 2.0
+    orientation_spread_tolerance_deg: 5.0
+    # Number of samples (not necessarily consecutive) that must agree
+    # within tolerance before calibration stops collecting early instead
+    # of running the full polygon+random count.
+    stable_agreement_count: 2

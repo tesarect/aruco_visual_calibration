@@ -1,0 +1,90 @@
+# Real: unlike sim (wrist-mounted camera, marker is fixed relative to the
+# camera), the D415 is wall/ceiling-mounted — fixed relative to base_link,
+# NOT to the arm. The arm instead carries the marker (mounted at/near
+# robotiq_85_base_link, see real_ur3e_moveit_config/config/name.srdf and
+# trajectory_planner_real.yaml's end_effector_frame — same frame, chosen
+# 2026-07-17 over aruco_link, which was found to be sourced from an
+# unreliable ad-hoc process, not a real fixed joint). So here
+# base_link -> robotiq_85_base_link is the "known chain" (from joint
+# states), and we're solving for base_link -> camera — the mounting is
+# inverted from sim, but CalibrationBroadcasterNode's own logic doesn't
+# care which physical thing moves; only these two frame names change.
+calibration_broadcaster_node:
+  ros__parameters:
+    marker_pose_topic: "/aruco_perception/marker_pose"
+    known_chain_frame: "base_link"
+    marker_frame: "robotiq_85_base_link"
+    # Appended to the detector's camera frame_id to form the broadcast TF's
+    # child_frame_id, e.g. "camera_depth_optical_frame" becomes
+    # "camera_depth_optical_frame_calibrated" — required so our computed
+    # result never collides with any frame name the real camera driver
+    # might independently publish under the same base name.
+    broadcast_frame_suffix: "_calibrated"
+    # PLACEHOLDER — not re-tuned for the real cell yet. Same default as
+    # sim; lower this first if a real calibration run is timing out or
+    # spending too long per attempt before the other real-specific knobs
+    # below are suspected.
+    num_samples: 10
+    # This node orchestrates trajectory_planner directly (fetches waypoints
+    # via ~/get_polygon_waypoints, moves one at a time via ~/trace_path,
+    # waits for a fresh marker_pose after each settled move) rather than
+    # passively collecting on a timer — see calibration_broadcaster_node.hpp.
+    # How long to wait for a fresh marker_pose after each move before
+    # aborting that sample (and the whole run) — e.g. marker out of view.
+    # Longer than sim's 5.0s: real's detection pipeline (Zenoh bridge, see
+    # CLAUDE.md's Real Robot Camera Setup) may take longer to produce a
+    # fresh frame after the arm settles, on top of trajectory_planner's own
+    # waypoint_settle_seconds already giving it a head start.
+    sample_wait_timeout_sec: 8.0
+    # Planning strategy requested on every ~/trace_path call this node
+    # makes — "cartesian" (straight-line, can fail partway near
+    # limits/obstacles) or "joint_space" (free-space, more robust, no
+    # straight-line guarantee). Was "joint_space" (real's reachable/
+    # collision envelope around cal_ready wasn't as well-characterized as
+    # sim's) — switched to "cartesian" 2026-07-20 to match sim's
+    # already-confirmed-working setting, now that the actual root cause of
+    # real-robot Cartesian-move failures near cal_ready was found and fixed
+    # (multiple valid IK solutions for the same cal_ready Cartesian target
+    # — see preset_poses_real.yaml's cal_ready_alt entry and
+    # PresetPoses.hpp's doc comment). If polygon-corner moves still fail
+    # partway (computeCartesianPath() stopping short) after switching cal_ready
+    # to a verified joint-value preset, revert this to "joint_space". See
+    # TracePath.srv.
+    planning_mode: "cartesian"
+    # Orientation-averaging method priority (0 = disabled, lower positive
+    # number = tried first). Markley's method isn't implemented yet — leave
+    # its priority at 0 until orientation_averaging.hpp adds it.
+    orientation_sum_normalize_priority: 1
+    orientation_markley_priority: 0
+
+    # --- Random phase (2026-07-22 redesign) ---
+    # After the polygon phase (num_samples above, 2 full passes around the
+    # 4-corner polygon) completes, this many MORE samples are collected at
+    # randomized X/Y/Z offsets from the same center pose — see
+    # calibration_broadcaster_node.hpp's class doc comment and
+    # CalibrationBroadcasterNode::runRandomPhase.
+    random_phase_samples: 8
+    # Maximum straight-line distance (m) a random candidate may be from
+    # the center pose — checked before moving there.
+    random_phase_max_offset_m: 0.10
+    # Safety bound: how many consecutive invisible-marker random
+    # candidates are tolerated before giving up on the whole calibration
+    # run. Not expected to be hit in normal operation.
+    random_phase_max_consecutive_failures: 20
+
+    # --- Early-stop (2026-07-22 redesign) ---
+    # A sample counts as "in agreement" with the running average if its
+    # position is within this many cm AND its orientation is within
+    # orientation_spread_tolerance_deg of the running average (see
+    # CalibrationBroadcasterNode::stableAgreementReached). PLACEHOLDER —
+    # not yet tuned against real calibration accuracy; increase both
+    # tolerances (or stable_agreement_count below) if early-stop triggers
+    # on noisy-but-not-actually-converged samples.
+    position_spread_tolerance_cm: 2.0
+    orientation_spread_tolerance_deg: 5.0
+    # Number of samples (not necessarily consecutive) that must agree
+    # within tolerance before calibration stops collecting early instead
+    # of running the full polygon+random count. Push this higher if a
+    # single lucky agreement is triggering early-stop too eagerly in a
+    # noisy real environment.
+    stable_agreement_count: 2

@@ -1,12 +1,21 @@
-# Simulation topics (see CLAUDE.md's Key Topics section) and detection
-# tuning. Sim lighting is controlled/consistent, so the adaptive-threshold
-# defaults below are OpenCV's own defaults — expect to retune these for the
-# real robot's inconsistent lighting (see aruco_detector_real.yaml, once
-# real-robot testing begins).
+# Real robot topics (D415 over Zenoh — see CLAUDE.md's Real Robot Camera
+# Setup section) and detection tuning.
+#
+# Tuning below comes from a grid sweep of cv::aruco::DetectorParameters
+# against 25 real captures (captures/*.png, the 4 bursts that actually show
+# the gripper+marker in frame — see
+# resources/docs/aruco_real_tuning_log.md for the full methodology,
+# including why 35 of the 60 captures were excluded as marker-less).
+#
+# Baseline (sim's params, unchanged) scored 21/25 (84%) on this same set.
+# adaptive_thresh_constant: 7.0 -> 3.0 was the one change that mattered —
+# it alone reached 25/25 (100%). Every other knob tested had no measurable
+# effect in this range, so they're left at sim's values to minimize
+# unnecessary drift from a known-working baseline.
 aruco_detector_node:
   ros__parameters:
-    image_topic: "/wrist_rgbd_depth_sensor/image_raw"
-    camera_info_topic: "/wrist_rgbd_depth_sensor/camera_info"
+    image_topic: "/D415/color/image_raw"
+    camera_info_topic: "/D415/color/camera_info"
     pose_topic: "/aruco_perception/marker_pose"
 
     # classical/hybrid switch: true = this node is the active marker-pose
@@ -41,7 +50,7 @@ aruco_detector_node:
     marker_id: 0
     adaptive_thresh_win_size_min: 3
     adaptive_thresh_win_size_max: 23
-    adaptive_thresh_win_size_step: 10
-    adaptive_thresh_constant: 7.0
+    adaptive_thresh_win_size_step: 4
+    adaptive_thresh_constant: 3.0
     min_marker_perimeter_rate: 0.03
     corner_refinement_method: 1

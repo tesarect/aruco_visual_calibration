@@ -11,9 +11,11 @@
 #include <std_srvs/srv/trigger.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <sensor_msgs/msg/camera_info.hpp>
 #include <visual_calibration_msgs/action/auto_calibrate.hpp>
 #include <visual_calibration_msgs/action/calibrate.hpp>
 #include <visual_calibration_msgs/msg/auto_calibrate_status.hpp>
+#include <visual_calibration_msgs/msg/detection2_d_array.hpp>
 #include <visual_calibration_msgs/srv/get_standoff_pose.hpp>
 #include <visual_calibration_msgs/srv/move_to_preset.hpp>
 #include <visual_calibration_msgs/srv/set_detector_mode.hpp>
@@ -69,6 +71,35 @@ struct OrchestratorConfig
   /// TracePath::Request::PLANNING_MODE_*.
   uint8_t planning_mode =
     visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_JOINT_SPACE;
+
+  // --- Image-based centering (2026-07-23) — replaces runAutoCenterProbe.
+  // auto_center_probe_step_m/auto_center_max_probe_m/
+  // auto_center_visibility_timeout_sec above are now unused by the active
+  // centering path (kept, along with runAutoCenterProbe/
+  // probeDirectionVisible themselves, unreferenced rather than deleted,
+  // in case this new approach needs a fallback later).
+  /// Same-size step (meters) used per iteration of the empirical
+  /// closed-loop pixel-distance search (see centerOnMarkerUsingImage) —
+  /// same default as the old auto_center_probe_step_m.
+  double centering_step_m = 0.05;
+  /// An axis is considered centered once the marker's pixel centroid is
+  /// within this many pixels of the image's own center along that axis.
+  double centering_pixel_tolerance = 15.0;
+  /// Safety bound: max step attempts per axis (X, then Y) before giving up
+  /// on the whole centering attempt as a failure.
+  int centering_max_iterations_per_axis = 8;
+  /// How long to wait for a fresh Detection2D (aruco_marker) after each
+  /// centering step before concluding the marker isn't visible there —
+  /// same role/timescale as auto_center_visibility_timeout_sec, reused
+  /// under its own name since this is a distinct feature now.
+  double centering_visibility_timeout_sec = 2.0;
+  /// CameraInfo topic this node reads ONCE (at first receipt) purely to
+  /// learn the image's own pixel width/height (for computing the image's
+  /// center point) — no camera intrinsics/depth/TF dependency here at all,
+  /// unlike the pinhole-projection design this empirical approach replaced
+  /// (see class doc comment). Must match aruco_detector_{sim,real}.yaml's
+  /// camera_info_topic for the environment this node is running in.
+  std::string camera_info_topic;
 };
 
 /// Orchestrates the full auto-calibrate sequence behind one action,
@@ -241,8 +272,11 @@ private:
   /// config_.auto_center_visibility_timeout_sec of `after`.
   bool isMarkerVisibleAfter(const rclcpp::Time & after);
 
-  /// Stage 3: axis-by-axis recentering from center_pose (cal_ready's
-  /// pose). First probes +X/-X in center_pose's own local X/Y plane in
+  /// SUPERSEDED (2026-07-23) by centerOnMarkerUsingImage — kept
+  /// unreferenced (not deleted) rather than removed, in case the new
+  /// image-based approach needs a fallback later. Stage 3 used to be:
+  /// axis-by-axis recentering from center_pose (cal_ready's pose). First
+  /// probes +X/-X in center_pose's own local X/Y plane in
   /// config_.auto_center_probe_step_m increments (each probe: move via
   /// ~/trace_path, then isMarkerVisibleAfter) until the marker disappears
   /// or config_.auto_center_max_probe_m is reached — that distance becomes
@@ -268,10 +302,81 @@ private:
   /// (+1/-1 on x_axis xor y_axis, not both) at `distance_m` from
   /// center_pose. Returns true if the marker was visible there. Does not
   /// move back to center_pose — callers issue the next probe or the final
-  /// centering move themselves.
+  /// centering move themselves. Logs (2026-07-22) WHICH of the two
+  /// possible `false` causes actually occurred — a failed
+  /// tracePathBlocking() (plan/execute error, e.g. a joint limit) vs. a
+  /// successful move followed by isMarkerVisibleAfter() finding no
+  /// marker — since both look identical to runAutoCenterProbe's caller
+  /// (same `false` return) but have different implications (a
+  /// reachability wall vs. a genuine camera-FOV edge); without this, an
+  /// asymmetric probe result across the 4 directions can't be diagnosed
+  /// from the log alone.
   bool probeDirectionVisible(
     const geometry_msgs::msg::Pose & center_pose,
     double x_axis, double y_axis, double distance_m);
+
+  /// Stage 3 (2026-07-23, replaces runAutoCenterProbe): empirical
+  /// closed-loop pixel-distance search — NO camera intrinsics, NO depth,
+  /// NO TF lookup to the camera frame at all (the pinhole-projection
+  /// design this replaced would have needed a TF lookup to the camera's
+  /// optical frame to rotate a computed offset into the arm's local
+  /// plane, but that TF doesn't exist on real — see class doc comment).
+  /// Instead: reads the marker's live pixel centroid (latestMarkerPixel())
+  /// and the image's own pixel center (image_width_/image_height_,
+  /// learned once from CameraInfo), and for X then Y in turn: steps
+  /// config_.centering_step_m in an arbitrary local-frame direction via
+  /// tracePathBlocking(), remeasures the axis's pixel offset, and either
+  /// continues the same direction (if the offset got smaller) or reverses
+  /// past the starting point (if it got worse, including the marker
+  /// becoming invisible) — repeating until within
+  /// config_.centering_pixel_tolerance or
+  /// config_.centering_max_iterations_per_axis is exceeded (a failure).
+  /// Same "move to X-center before starting Y" sequencing as
+  /// runAutoCenterProbe, for the same reason (Y's search should reflect
+  /// the already-X-corrected position). On success, stores the result in
+  /// session_centered_cal_ready_pose_ same as the old method did. Sets/
+  /// clears show_centering_crosshair on aruco_detector_node (via
+  /// SyncParametersClient, same mechanism as handleSetDetectorMode) for
+  /// the duration of the search.
+  std::optional<geometry_msgs::msg::Pose> centerOnMarkerUsingImage(
+    const geometry_msgs::msg::Pose & center_pose);
+
+  /// One step-and-remeasure iteration along a single axis (X xor Y, never
+  /// both) from current_pose: moves step_m in the given local-frame
+  /// direction (a VARIABLE distance, not always config_.centering_step_m —
+  /// see centerOnMarkerUsingImage's ratio-based step-size estimation),
+  /// waits for a fresh Detection2D, and returns the new pixel offset along
+  /// that axis (positive/negative per image pixel convention) if the
+  /// marker was visible afterward, or std::nullopt if the move failed
+  /// outright OR the marker wasn't visible (both treated as "this
+  /// direction made things worse" by the caller). Does not decide
+  /// direction itself — centerOnMarkerUsingImage compares this against the
+  /// previous offset to decide whether to continue or reverse.
+  std::optional<double> stepAndMeasureAxisOffset(
+    const geometry_msgs::msg::Pose & current_pose,
+    double x_axis, double y_axis, bool is_x_axis, double step_m);
+
+  /// Returns the most recent aruco_marker Detection2D's (cx, cy) if one
+  /// was received after `after`, else std::nullopt — polls rather than
+  /// blocking (same reasoning as isMarkerVisibleAfter: a step to a
+  /// position where the marker is genuinely invisible must time out
+  /// gracefully), bounded by config_.centering_visibility_timeout_sec.
+  std::optional<std::pair<double, double>> latestMarkerPixelAfter(const rclcpp::Time & after);
+
+  /// Callback for detections_2d_sub_ — caches the most recent aruco_marker
+  /// entry's (cx, cy) and receipt time (mirrors markerPoseCallback's
+  /// pattern). Ignores frames with no aruco_marker entry (empty
+  /// detections[] or only cup_holder/hole present) — leaves the cached
+  /// value in place rather than clearing it, so a single momentary gap
+  /// doesn't look like "never seen."
+  void detections2dCallback(
+    const visual_calibration_msgs::msg::Detection2DArray::ConstSharedPtr & msg);
+
+  /// Callback for camera_info_sub_ — captures image_width_/image_height_
+  /// ONCE (first receipt only, same one-shot pattern as
+  /// ArucoDetectorNode::cameraInfoCallback) purely to compute the image's
+  /// own pixel center; nothing else from CameraInfo is used here.
+  void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg);
 
   /// Sends a single-waypoint ~/trace_path request and blocks for the
   /// response — shared by moveToCalReady/runAutoCenterProbe. pose_name/
@@ -294,6 +399,15 @@ private:
   OrchestratorConfig config_;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr marker_pose_sub_;
+  /// See detections2dCallback — feeds centerOnMarkerUsingImage's pixel
+  /// measurements. Classical detector only for now (2026-07-23) — see
+  /// class doc comment; extend to yolo_marker_bridge_node.py's own
+  /// detections_2d publish when that pipeline gains aruco_marker support.
+  rclcpp::Subscription<visual_calibration_msgs::msg::Detection2DArray>::SharedPtr
+    detections_2d_sub_;
+  /// See cameraInfoCallback — read once, purely for image_width_/
+  /// image_height_.
+  rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
   rclcpp_action::Server<AutoCalibrate>::SharedPtr auto_calibrate_action_server_;
   rclcpp_action::Client<Calibrate>::SharedPtr calibrate_action_client_;
   /// This node's own client of its own ~/auto_calibrate action server —
@@ -357,6 +471,22 @@ private:
   /// needs "was anything received recently", not the pose value itself.
   std::mutex marker_mutex_;
   rclcpp::Time latest_marker_pose_stamp_;
+
+  /// Guards latest_marker_cx_/latest_marker_cy_/latest_marker_pixel_stamp_
+  /// — separate mutex from marker_mutex_ (different data, different
+  /// producer callback) even though both ultimately serve
+  /// centerOnMarkerUsingImage, to avoid any confusion about which lock
+  /// protects which field.
+  std::mutex marker_pixel_mutex_;
+  double latest_marker_cx_ = 0.0;
+  double latest_marker_cy_ = 0.0;
+  rclcpp::Time latest_marker_pixel_stamp_;
+
+  /// Image dimensions, captured once from camera_info_sub_'s first
+  /// message — see cameraInfoCallback.
+  int image_width_ = 0;
+  int image_height_ = 0;
+  bool camera_info_received_ = false;
 };
 
 }  // namespace orchestrator

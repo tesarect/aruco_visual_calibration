@@ -44,6 +44,7 @@ ament_target_dependencies(aruco_detector_node
   rclcpp
   sensor_msgs
   geometry_msgs
+  visual_calibration_msgs
   cv_bridge
   image_transport
   tf2

@@ -31,9 +31,12 @@ calibration_orchestrator_node:
     # boundaries. PLACEHOLDER — not re-tuned for the real cell yet.
     auto_center_probe_step_m: 0.05
     # Maximum probe distance (m) from cal_ready along any single direction
-    # before giving up on that direction. PLACEHOLDER — not re-tuned for
-    # the real cell yet.
-    auto_center_max_probe_m: 0.15
+    # before giving up on that direction. Bumped 0.15 -> 0.30 (2026-07-22)
+    # after a live real-robot test showed the +X direction still visible
+    # at the old 0.15m cap — that cap was cutting the search short before
+    # the true camera-FOV/reachability boundary in at least one direction.
+    # Still a PLACEHOLDER — not fully re-tuned for the real cell.
+    auto_center_max_probe_m: 0.30
     # How long to wait for a marker_pose message after each probe move
     # before concluding the marker is not visible there — real's detection
     # pipeline may be slower than sim's, so this is longer than
@@ -41,6 +44,44 @@ calibration_orchestrator_node:
     auto_center_visibility_timeout_sec: 3.0
 
     # Planning strategy for every ~/trace_path call this node makes
-    # (cal_ready move + auto-center probe moves) — "cartesian" or
-    # "joint_space", see TracePath.srv.
-    planning_mode: "joint_space"
+    # (cal_ready's TF-based fallback move + every auto-center probe/
+    # recenter move) — "cartesian" or "joint_space", see TracePath.srv.
+    # Changed joint_space -> cartesian (2026-07-22, live-tested working on
+    # real) per explicit requirement: every move from cal_ready onward
+    # during calibration (auto-centering, the polygon sweep, and any
+    # future random-pose sampling) should be cartesian, matching
+    # calibration_broadcaster_real.yaml's polygon-sweep planning_mode.
+    # Does NOT affect the joint-value-preset path to cal_ready itself
+    # (a separate ~/move_to_preset call that never goes through this
+    # node's tracePathBlocking() helper, so it stays joint-space
+    # regardless of this setting) — only this node's OWN moves
+    # (auto-center probes/recenter, and the TF-based cal_ready fallback
+    # used only when no joint-value preset is configured).
+    planning_mode: "cartesian"
+
+    # --- Image-based centering (2026-07-23) ---
+    # Replaces the auto_center_probe_step_m/auto_center_max_probe_m/
+    # auto_center_visibility_timeout_sec params above for the ACTIVE
+    # centering path (kept above, unused, in case of a fallback need) — see
+    # calibration_orchestrator_node.hpp's centerOnMarkerUsingImage doc
+    # comment. No camera intrinsics/depth/TF dependency at all — a pure
+    # empirical closed-loop pixel-distance search, so (unlike the
+    # pinhole-projection design this replaced) it should behave the same
+    # on real as in sim, without needing D415-specific intrinsics/depth
+    # accuracy considerations.
+    centering_step_m: 0.05
+    # An axis is considered centered once the marker's pixel centroid is
+    # within this many pixels of the image's own center along that axis.
+    # PLACEHOLDER — not yet tuned against the D415's actual resolution.
+    centering_pixel_tolerance: 15.0
+    # Safety bound: max step attempts per axis before giving up.
+    centering_max_iterations_per_axis: 8
+    # How long to wait for a fresh Detection2D (aruco_marker) after each
+    # centering step before concluding the marker isn't visible there —
+    # real's detection pipeline may be slower than sim's, matching
+    # auto_center_visibility_timeout_sec's own real-vs-sim reasoning above.
+    centering_visibility_timeout_sec: 3.0
+    # Read ONCE at startup purely to learn the image's own pixel
+    # width/height (for the image's center point) — must match
+    # aruco_detector_real.yaml's camera_info_topic.
+    camera_info_topic: "/D415/color/camera_info"

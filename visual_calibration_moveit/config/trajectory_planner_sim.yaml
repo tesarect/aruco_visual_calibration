@@ -12,6 +12,11 @@
 # (0.7071, 0.7071, 0, 0): it swaps the goal's X/Y axes with the camera's
 # and flips Z, so end_effector_frame's Z ends up facing back toward the
 # camera's Z — verified numerically (see error-mitigation.md #13).
+# planning_mode (cartesian vs joint_space) is set per call-site, not here —
+# see calibration_broadcaster_sim.yaml, calibration_orchestrator_sim.yaml,
+# and polygon_default_planning_mode below; planner_id/planning_time_s/
+# num_planning_attempts (which OMPL planner, and how hard it tries) is the
+# only planning config that lives centrally, right here.
 trajectory_planner:
   ros__parameters:
     camera_frame: "wrist_rgbd_camera_depth_optical_frame"
@@ -33,6 +38,42 @@ trajectory_planner:
     # limits/obstacles); "joint_space" = free-space planning (more robust,
     # no straight-line guarantee).
     polygon_default_planning_mode: "cartesian"
+
+    # OMPL planning request tuning applied to every plan call (joint-space
+    # planAndExecute; planAndExecuteCartesian uses computeCartesianPath
+    # instead and ignores these).
+    # planning_pipeline_id: DO NOT change from "ompl" — move_group.launch.py
+    # deliberately restricts move_group to only load the OMPL pipeline
+    # (.planning_pipelines(pipelines=["ompl"])). CHOMP and Pilz are NOT
+    # configured (no chomp_planning.yaml / pilz planning yaml exists) and
+    # are NOT loaded by move_group; MoveItConfigsBuilder auto-loads CHOMP
+    # with a built-in default otherwise, which cannot handle pose-target
+    # goals and silently broke planAndExecute() until this was pinned
+    # (2026-07-19). Changing this value here alone does nothing useful
+    # without also adding that pipeline's yaml and updating
+    # move_group.launch.py's pipeline list.
+    # planner_id must be one of ur_manipulator's planner_configs entries in
+    # sim_ur3e_moveit_config/config/ompl_planning.yaml.
+    # RRTstarkConfigDefault is an optimizing planner (keeps searching until
+    # planning_time_s runs out, minimizing joint-space path length) — was
+    # previously unconfigured entirely (no ompl_planning.yaml existed),
+    # which meant MoveIt's compiled-in default (RRTConnect, ~5s, 1 attempt,
+    # no optimization) was used — the first valid-but-twisted path found
+    # was accepted with nothing pushing toward a shorter/cleaner one.
+    # num_planning_attempts > 1: MoveGroupInterface automatically keeps the
+    # shortest-path plan among the attempts.
+    planning_pipeline_id: "ompl"
+    planner_id: "RRTstarkConfigDefault"
+    planning_time_s: 3.0
+    num_planning_attempts: 3
+
+    # Minimum achieved fraction of a straight-line Cartesian path required
+    # to execute it at all (planAndExecuteCartesian's min_fraction) — see
+    # trajectory_planner_real.yaml's comment for the full explanation and
+    # the safety tradeoff of lowering it. Kept at the original 0.95
+    # default here; real's testing is what surfaced the need to make this
+    # configurable, sim hasn't needed a lower value so far.
+    cartesian_min_fraction: 0.95
 
     # If true, TrajectoryPlanner moves to the "home" preset once on startup
     # (see runStartupSequence, called from the constructor) — requires a
@@ -57,3 +98,22 @@ trajectory_planner:
     stay_seconds_at_goal: 4.0
     lift_target_z_m: 0.0
     lift_wait_seconds: 8.0
+
+    # Global settle delay applied inside tracePath(), after EVERY
+    # successful waypoint move — single-waypoint calls (home, cal_ready,
+    # sequenced goals) and each corner of a multi-waypoint polygon sweep
+    # alike, since they all funnel through tracePath(). Gives a camera time
+    # to produce a fresh, non-motion-blurred frame after the arm stops
+    # moving (sim moves/settles fast — RViz/Gazebo can visually keep up
+    # instantly — but a slower real camera pipeline may not). 0.0 disables
+    # it. See SequenceConfig::waypoint_settle_seconds.
+    waypoint_settle_seconds: 1.0
+
+    # How long to pause after publishing the startup gripper-close command
+    # (see TrajectoryPlanner::closeGripperOnStartup) before proceeding to
+    # the home move. No completion feedback exists to wait on instead —
+    # this is a fixed guess, not a measurement. Runs on sim too, though sim
+    # has no robotiq_85_driver subscribed to /gripper/cmd, so the publish
+    # itself is a no-op — this pause still happens either way (harmless,
+    # just an extra couple seconds before the home move on sim).
+    gripper_close_settle_seconds: 2.0

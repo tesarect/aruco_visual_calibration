@@ -128,6 +128,23 @@ struct PlannerConfig
   /// Number of planning attempts; MoveGroupInterface keeps the
   /// shortest-path plan among them (MoveGroupInterface::setNumPlanningAttempts).
   int num_planning_attempts = 1;
+  /// Minimum achieved fraction of a straight-line Cartesian path (see
+  /// planAndExecuteCartesian's min_fraction parameter) required to execute
+  /// it at all — below this, the path is refused rather than executed
+  /// partially. Was a hardcoded 0.95 default until 2026-07-22; made
+  /// configurable after real-world testing showed some short (few-cm)
+  /// Cartesian moves near cal_ready achieve well under 95% (e.g. 50-83%)
+  /// even though the target itself is individually reachable via
+  /// joint-space planning — a real geometric limitation of the
+  /// straight-line path from that specific start pose, not a bug.
+  /// LOWERING THIS IS A SAFETY TRADEOFF, not a pure tuning knob: a lower
+  /// value means MORE incomplete paths get executed rather than refused,
+  /// i.e. the arm can stop short of the intended waypoint at an
+  /// unplanned intermediate pose (exactly what the refusal exists to
+  /// prevent — see planAndExecuteCartesian's doc comment). Only lower
+  /// this if you've deliberately decided that tradeoff is acceptable for
+  /// your use case/environment.
+  double cartesian_min_fraction = 0.95;
 };
 
 /// Tuning for the sequenced-goal stay/lift/standby behavior (see
@@ -285,14 +302,18 @@ public:
     uint8_t planning_mode =
     visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN);
 
-  /// Computes and returns polygonWaypointsAroundStandoff's waypoints
-  /// WITHOUT moving the arm — lets a caller (e.g.
-  /// calibration_broadcaster_node) drive them one at a time itself via
-  /// ~/trace_path, without duplicating this node's standoff/polygon
-  /// geometry math or config. Returns an empty vector (and logs the
-  /// error) if the camera TF lookup fails — same failure mode as
+  /// Computes and returns polygonWaypointsAroundStandoff's waypoints AND
+  /// the center pose they were generated around, WITHOUT moving the arm —
+  /// lets a caller (e.g. calibration_broadcaster_node) drive the polygon
+  /// waypoints one at a time itself via ~/trace_path, AND generate its
+  /// own additional offset poses from the same center (e.g. a random-pose
+  /// sampling phase) without duplicating this node's standoff/polygon
+  /// geometry math or config, or making a second "get current pose"
+  /// round-trip. Returns an empty waypoints vector (with a
+  /// default-constructed center_pose, and logs the error) if the current-
+  /// pose TF lookup fails — same failure mode as
   /// polygonWaypointsAroundStandoff, which this wraps.
-  std::vector<geometry_msgs::msg::Pose> getPolygonWaypoints(
+  std::pair<std::vector<geometry_msgs::msg::Pose>, geometry_msgs::msg::Pose> getPolygonWaypoints(
     rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0)) const;
 
   /// Computes the standoff pose (see offsetInFrontOf) from the configured
@@ -333,9 +354,11 @@ private:
   /// camera's TF — see this function's body comment for why). Every corner
   /// keeps the same orientation as the center — only position varies.
   /// Corners are visited in angular order (not skipping around), so
-  /// consecutive waypoints are always adjacent.
-  std::vector<geometry_msgs::msg::Pose> polygonWaypointsAroundStandoff(
-    rclcpp::Duration tf_timeout) const;
+  /// consecutive waypoints are always adjacent. Returns {waypoints,
+  /// center_pose} — an empty waypoints vector (default-constructed
+  /// center_pose) if the current-pose TF lookup fails.
+  std::pair<std::vector<geometry_msgs::msg::Pose>, geometry_msgs::msg::Pose>
+  polygonWaypointsAroundStandoff(rclcpp::Duration tf_timeout) const;
 
   /// Handles a TracePath service request by calling tracePath() with the
   /// request's waypoints and planning_mode.

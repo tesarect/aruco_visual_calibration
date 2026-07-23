@@ -36,4 +36,25 @@ calibration_orchestrator_node:
     # these are single, independent moves (not a spread that needs a
     # predictable straight-line shape between them, unlike the calibration
     # polygon sweep itself).
-    planning_mode: "joint_space"
+    planning_mode: "cartesian"
+
+    # --- Image-based centering (2026-07-23) ---
+    # Replaces the auto_center_probe_step_m/auto_center_max_probe_m/
+    # auto_center_visibility_timeout_sec params above for the ACTIVE
+    # centering path (kept above, unused, in case of a fallback need) — see
+    # calibration_orchestrator_node.hpp's centerOnMarkerUsingImage doc
+    # comment. No camera intrinsics/depth/TF dependency at all: this is a
+    # pure empirical closed-loop pixel-distance search.
+    centering_step_m: 0.05
+    # An axis is considered centered once the marker's pixel centroid is
+    # within this many pixels of the image's own center along that axis.
+    centering_pixel_tolerance: 15.0
+    # Safety bound: max step attempts per axis before giving up.
+    centering_max_iterations_per_axis: 8
+    # How long to wait for a fresh Detection2D (aruco_marker) after each
+    # centering step before concluding the marker isn't visible there.
+    centering_visibility_timeout_sec: 2.0
+    # Read ONCE at startup purely to learn the image's own pixel
+    # width/height (for the image's center point) — must match
+    # aruco_detector_sim.yaml's camera_info_topic.
+    camera_info_topic: "/wrist_rgbd_depth_sensor/camera_info"

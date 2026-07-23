@@ -5,11 +5,13 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <geometry_msgs/msg/vector3.hpp>
 #include <tf2/LinearMath/Quaternion.h>
@@ -55,10 +57,13 @@ struct CalibrationBroadcasterConfig
   /// (where it just avoids colliding with whatever frame name the real
   /// camera driver publishes, if any).
   std::string broadcast_frame_suffix = "_calibrated";
-  /// Number of samples to average before broadcasting — one sample is
-  /// taken per waypoint visited, so this many waypoints get requested
-  /// from trajectory_planner (wrapping around its polygon if num_samples
-  /// exceeds the polygon's corner count).
+  /// Number of samples taken during the polygon phase — one sample per
+  /// waypoint visited, cycling through the returned polygon waypoints if
+  /// this exceeds their count. Named distinctly from the random phase's
+  /// own count (random_phase_samples) since the two phases now run
+  /// sequentially, not as one undifferentiated loop — see
+  /// CalibrationBroadcasterNode's class doc comment for the two-phase
+  /// design (2026-07-22 redesign).
   int num_samples = 10;
   /// How long to wait for a fresh marker_pose message (published after
   /// the arm is confirmed settled at a waypoint — see
@@ -77,23 +82,77 @@ struct CalibrationBroadcasterConfig
   /// orientation_averaging.hpp), otherwise finishCalibration() throws if
   /// this method is actually selected.
   int orientation_markley_priority = 0;
+
+  // --- Random phase (2026-07-22 redesign) ---
+  /// Number of samples to collect during the random phase, after the
+  /// polygon phase completes — see runRandomPhase.
+  int random_phase_samples = 8;
+  /// Maximum straight-line distance (meters) a random candidate pose may
+  /// be from the center pose (the same center the polygon phase used —
+  /// see GetPolygonWaypoints.srv's center_pose field), checked BEFORE
+  /// moving there. A simple stateless per-candidate check, not a
+  /// cumulative/path-history one.
+  double random_phase_max_offset_m = 0.10;
+  /// If a random candidate's move succeeds but the marker isn't visible
+  /// there, the attempt is discarded (not counted) and a new candidate is
+  /// generated from the center pose — this caps how many consecutive
+  /// discards are allowed before runRandomPhase gives up and aborts the
+  /// whole calibration run (a safety bound against an unlucky/impossible
+  /// random-offset run, not expected to be hit in normal operation).
+  int random_phase_max_consecutive_failures = 20;
+
+  // --- Early-stop (2026-07-22 redesign) ---
+  /// Position-spread threshold (cm): a sample's position is considered
+  /// "in agreement" with the running average if it's within this distance
+  /// of the mean of all samples collected so far. Both this AND
+  /// orientation_spread_tolerance_deg must hold for a sample to count
+  /// toward stable_agreement_count.
+  double position_spread_tolerance_cm = 2.0;
+  /// Orientation-spread threshold (degrees) — see
+  /// position_spread_tolerance_cm; this is the angular equivalent,
+  /// checked against the running orientation average (via
+  /// averageQuaternions, not the final one-shot call in finishCalibration).
+  double orientation_spread_tolerance_deg = 5.0;
+  /// Number of samples (not necessarily consecutive) that must fall
+  /// within both spread tolerances of the running average, counted from
+  /// the moment the polygon phase completes onward, before calibration
+  /// stops collecting early and proceeds straight to finishCalibration().
+  /// Tunable up if real-world noise causes false-early stops.
+  int stable_agreement_count = 2;
 };
 
-/// Orchestrates calibration: fetches waypoints from trajectory_planner
-/// (~/get_polygon_waypoints, read-only), then for each one — calls
-/// trajectory_planner's ~/trace_path with just that single waypoint
-/// (blocking until the arm is confirmed settled there), waits for a fresh
-/// marker_pose message published after that point, and takes exactly one
-/// sample from it. This replaces an earlier passive-timer design (accept
-/// whatever arrived every min_sample_interval_sec, regardless of whether
-/// the arm was mid-motion) that produced motion-blur-corrupted samples —
-/// see error-mitigation.md #19 and progress.md's Feature Additions entry
-/// on signal-based sync.
+/// Orchestrates calibration: fetches waypoints AND their center pose from
+/// trajectory_planner (~/get_polygon_waypoints, read-only — see
+/// GetPolygonWaypoints.srv's center_pose field), then runs TWO sequential
+/// sample-collection phases (2026-07-22 redesign):
+///   1. Polygon phase (runPolygonPhase) — visits the polygon corners
+///      (2 full passes, config_.num_samples total).
+///   2. Random phase (runRandomPhase) — config_.random_phase_samples more
+///      samples at randomized X/Y/Z offsets from the SAME center pose
+///      (randomPoseNear), each capped at random_phase_max_offset_m and
+///      visibility-checked before counting.
+/// Both phases share the same per-sample sequence the original single-
+/// phase design used: calls trajectory_planner's ~/trace_path with a
+/// single waypoint (blocking until the arm is confirmed settled there),
+/// waits for a fresh marker_pose message published after that point, and
+/// takes exactly one sample from it. This settle-then-sample sync
+/// replaces an earlier passive-timer design (accept whatever arrived
+/// every min_sample_interval_sec, regardless of whether the arm was
+/// mid-motion) that produced motion-blur-corrupted samples — see
+/// error-mitigation.md #19 and progress.md's Feature Additions entry on
+/// signal-based sync.
+///
+/// After every recorded sample (either phase), checks
+/// stableAgreementReached() — if the running position/orientation spread
+/// has stayed within tolerance for enough samples, collection stops
+/// immediately (early-stop) rather than always running the full
+/// polygon+random count.
 ///
 /// trajectory_planner is never told calibration exists — it only ever
 /// sees ordinary ~/trace_path/~/get_polygon_waypoints calls, so it stays a
 /// dumb mover with no calibration awareness. All orchestration logic
-/// (waypoint iteration, sample timing, averaging, broadcast) lives here.
+/// (phase sequencing, waypoint/random-pose generation, sample timing,
+/// early-stop, averaging, broadcast) lives here.
 ///
 /// Runs the whole per-goal sequence on a dedicated thread (spawned from
 /// handleAccepted), not inline in an action-server callback or the
@@ -137,18 +196,86 @@ private:
   /// rclcpp_action requires handleAccepted to return quickly, not block.
   void handleAccepted(const std::shared_ptr<GoalHandleCalibrate> goal_handle);
 
-  /// The actual orchestration sequence, run on its own thread:
-  /// 1. Call ~/get_polygon_waypoints once.
-  /// 2. For each of config_.num_samples waypoints needed (cycling through
-  ///    the returned list if num_samples exceeds its length): call
-  ///    ~/trace_path with that single waypoint, wait for a fresh
-  ///    marker_pose (see requestSampleAfterSettling), record one sample,
-  ///    publish feedback. Aborts (goal_handle->abort) on any failure
-  ///    (waypoint fetch, trace_path, or sample-wait timeout) or on
-  ///    cancellation.
-  /// 3. On success, calls finishCalibration() to average + broadcast +
-  ///    complete the goal.
+  /// The actual orchestration sequence, run on its own thread (2026-07-22
+  /// redesign — two phases, not one undifferentiated loop):
+  /// 1. Call ~/get_polygon_waypoints once — gets both the polygon corner
+  ///    waypoints AND the center pose they were generated around (see
+  ///    GetPolygonWaypoints.srv's center_pose field).
+  /// 2. Polygon phase (runPolygonPhase): visits the polygon corners for 2
+  ///    full passes (config_.num_samples total, cycling through the
+  ///    corner list same as before), one sample per waypoint.
+  /// 3. Random phase (runRandomPhase): config_.random_phase_samples
+  ///    additional samples at randomized offsets from the SAME center
+  ///    pose, varying X/Y/Z (see randomPoseNear), each visibility-checked
+  ///    before counting.
+  /// Both phases check the early-stop condition (see
+  /// stableAgreementReached) after every recorded sample and stop
+  /// collecting immediately if it's reached, regardless of which phase is
+  /// active. Aborts (goal_handle->abort) on any failure (waypoint fetch,
+  /// trace_path, or sample-wait timeout) or on cancellation. On success
+  /// (either the full sample count was collected, or early-stop
+  /// triggered), calls finishCalibration() to average + broadcast +
+  /// complete the goal.
   void executeCalibration(const std::shared_ptr<GoalHandleCalibrate> goal_handle);
+
+  /// Polygon phase: visits `waypoints` (the polygon corners from
+  /// ~/get_polygon_waypoints) for 2 full passes, cycling via modulo same
+  /// as the original single-phase design, up to config_.num_samples
+  /// samples — fewer if the early-stop condition triggers first (see
+  /// stableAgreementReached, checked after every recorded sample). Shares
+  /// the same trace_path + waitForFreshMarkerPose + recordSample sequence
+  /// the original design used per-waypoint. Returns false (and sets
+  /// *out_result with a failure Calibrate::Result, goal_handle NOT yet
+  /// aborted — the caller does that) on the first hard failure
+  /// (trace_path, sample-wait timeout, TF lookup) or cancellation; true
+  /// otherwise (including "stopped early via early-stop" — check
+  /// stopped_early to distinguish from "collected the full count").
+  bool runPolygonPhase(
+    const std::shared_ptr<GoalHandleCalibrate> & goal_handle,
+    const std::vector<geometry_msgs::msg::Pose> & waypoints,
+    std::shared_ptr<Calibrate::Result> & out_result,
+    bool & stopped_early);
+
+  /// Random phase: generates config_.random_phase_samples valid samples
+  /// (fewer if early-stop triggers first) at randomized offsets from
+  /// center_pose (see randomPoseNear), each capped at
+  /// config_.random_phase_max_offset_m straight-line distance from
+  /// center_pose. For each candidate: moves there via trace_path, checks
+  /// marker visibility (isMarkerVisibleNow) — if visible, records the
+  /// sample and continues; if the move itself fails, that's a hard
+  /// failure (same as the polygon phase); if the move succeeds but the
+  /// marker isn't visible, the attempt is discarded (not counted), the
+  /// arm moves back to center_pose immediately (no point probing further
+  /// out when not visible at all), and a new candidate is generated —
+  /// bounded by config_.random_phase_max_consecutive_failures consecutive
+  /// discards before giving up as a hard failure. Same out_result/
+  /// stopped_early/return-value contract as runPolygonPhase.
+  bool runRandomPhase(
+    const std::shared_ptr<GoalHandleCalibrate> & goal_handle,
+    const geometry_msgs::msg::Pose & center_pose,
+    int samples_already_collected,
+    std::shared_ptr<Calibrate::Result> & out_result,
+    bool & stopped_early);
+
+  /// Generates a uniformly-random offset pose from center_pose, varying
+  /// X/Y/Z independently within +-config_.random_phase_max_offset_m
+  /// (checked as a straight-line distance cap from center_pose before
+  /// returning — a candidate exceeding the cap is rejected and re-rolled
+  /// internally, not returned for the caller to check), keeping
+  /// center_pose's orientation unchanged. Same tf2::Transform
+  /// center * offset pattern already used by
+  /// TrajectoryPlanner::polygonWaypointsAroundStandoff and
+  /// CalibrationOrchestratorNode::probeDirectionVisible.
+  geometry_msgs::msg::Pose randomPoseNear(
+    const geometry_msgs::msg::Pose & center_pose, double max_offset_m) const;
+
+  /// Sends a single-waypoint ~/trace_path request (config_.planning_mode)
+  /// and blocks for the response. Shared by both phases (the original
+  /// design inlined this in executeCalibration's loop; split out here so
+  /// runPolygonPhase/runRandomPhase/runRandomPhase's return-to-center step
+  /// don't duplicate it). Returns false if the service isn't available or
+  /// the call fails.
+  bool tracePathBlocking(const geometry_msgs::msg::Pose & target);
 
   /// Blocks (up to config_.sample_wait_timeout_sec) until a marker_pose
   /// message is received whose receipt time is after `after`, then
@@ -159,6 +286,15 @@ private:
   std::optional<geometry_msgs::msg::PoseStamped> waitForFreshMarkerPose(
     const rclcpp::Time & after);
 
+  /// Like waitForFreshMarkerPose, but only checks for visibility (doesn't
+  /// need/return the pose itself) — used by the random phase's
+  /// per-candidate visibility check, mirroring
+  /// CalibrationOrchestratorNode::isMarkerVisibleAfter's polling pattern
+  /// (a probe move to a genuinely-invisible position must time out
+  /// gracefully, not hang, so this polls rather than blocking on the
+  /// condition variable the way waitForFreshMarkerPose does).
+  bool isMarkerVisibleNow(const rclcpp::Time & after);
+
   /// Chains one fresh marker_pose (camera_frame -> marker, from the
   /// detector) with the live known_chain_frame -> marker_frame TF into
   /// one sample of known_chain_frame -> camera, and appends it to
@@ -166,12 +302,30 @@ private:
   /// the error) if the TF lookup fails.
   bool recordSample(const geometry_msgs::msg::PoseStamped & marker_pose);
 
+  /// Early-stop check (2026-07-22 redesign): called after every
+  /// recordSample() success, in both phases. Computes the running
+  /// position spread (max distance, in cm, of any collected sample's
+  /// position from the arithmetic mean of all collected positions so
+  /// far) and running orientation spread (max_spread_deg from
+  /// averageQuaternions(collected_orientations_, averaging_method_) —
+  /// safe to call mid-run, it's a pure function over whatever's collected
+  /// so far, not just at finishCalibration() time). If BOTH are within
+  /// their respective tolerances (config_.position_spread_tolerance_cm/
+  /// orientation_spread_tolerance_deg), increments
+  /// stable_agreement_count_ (a running, non-consecutive count — NOT
+  /// reset when a sample falls outside tolerance) and returns true once
+  /// that counter reaches config_.stable_agreement_count. Does nothing
+  /// (returns false) if fewer than 2 samples are collected yet (spread is
+  /// meaningless with only 1 sample).
+  bool stableAgreementReached();
+
   /// Averages collected_positions_ (arithmetic mean) and
   /// collected_orientations_ (via averaging_method_), broadcasts
   /// known_chain_frame -> the camera frame (from the most recent sample's
   /// header.frame_id) as a static TF, and completes goal_handle with the
   /// result (see Calibrate.action). Logs the orientation spread metrics.
-  /// Clears both collected_ vectors.
+  /// Clears both collected_ vectors AND resets stable_agreement_count_ for
+  /// the next run.
   void finishCalibration(const std::shared_ptr<GoalHandleCalibrate> & goal_handle);
 
   CalibrationBroadcasterConfig config_;
@@ -200,6 +354,17 @@ private:
   /// The most recent sample's camera frame_id — carried through to the
   /// final broadcast's child_frame_id.
   geometry_msgs::msg::PoseStamped last_sample_;
+  /// Running, non-consecutive count of samples found "in agreement" with
+  /// the running average — see stableAgreementReached. Reset to 0 only in
+  /// finishCalibration() (i.e. once per calibration run), NOT when a
+  /// sample falls outside tolerance.
+  int stable_agreement_count_ = 0;
+  /// Random-offset generation (randomPoseNear) needs a seeded engine —
+  /// member rather than a function-local static so it's not shared/reset
+  /// oddly across concurrent goals (executeCalibration runs one goal at a
+  /// time per handleGoal's doc comment, but keeping this as ordinary
+  /// instance state is simpler than reasoning about static init order).
+  mutable std::mt19937 random_engine_{std::random_device{}()};
 };
 
 }  // namespace aruco_perception

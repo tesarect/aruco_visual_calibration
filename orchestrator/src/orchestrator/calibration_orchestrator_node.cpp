@@ -1,7 +1,9 @@
 #include "orchestrator/calibration_orchestrator_node.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -22,6 +24,14 @@ CalibrationOrchestratorNode::CalibrationOrchestratorNode()
   marker_pose_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
     "/aruco_perception/marker_pose", 10,
     std::bind(&CalibrationOrchestratorNode::markerPoseCallback, this, std::placeholders::_1));
+
+  detections_2d_sub_ = create_subscription<visual_calibration_msgs::msg::Detection2DArray>(
+    "/aruco_perception/detections_2d", 10,
+    std::bind(&CalibrationOrchestratorNode::detections2dCallback, this, std::placeholders::_1));
+
+  camera_info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
+    config_.camera_info_topic, rclcpp::SensorDataQoS(),
+    std::bind(&CalibrationOrchestratorNode::cameraInfoCallback, this, std::placeholders::_1));
 
   auto_calibrate_action_server_ = rclcpp_action::create_server<AutoCalibrate>(
     this,
@@ -81,6 +91,36 @@ void CalibrationOrchestratorNode::markerPoseCallback(
 {
   std::lock_guard<std::mutex> lock(marker_mutex_);
   latest_marker_pose_stamp_ = get_clock()->now();
+}
+
+void CalibrationOrchestratorNode::detections2dCallback(
+  const visual_calibration_msgs::msg::Detection2DArray::ConstSharedPtr & msg)
+{
+  for (const visual_calibration_msgs::msg::Detection2D & detection : msg->detections) {
+    if (detection.class_name == "aruco_marker") {
+      std::lock_guard<std::mutex> lock(marker_pixel_mutex_);
+      latest_marker_cx_ = detection.cx;
+      latest_marker_cy_ = detection.cy;
+      latest_marker_pixel_stamp_ = get_clock()->now();
+      return;
+    }
+  }
+  // No aruco_marker entry this frame — leave the cached value in place
+  // (see this callback's doc comment); nothing to do.
+}
+
+void CalibrationOrchestratorNode::cameraInfoCallback(
+  const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg)
+{
+  if (camera_info_received_) {
+    return;
+  }
+  image_width_ = static_cast<int>(msg->width);
+  image_height_ = static_cast<int>(msg->height);
+  camera_info_received_ = true;
+  RCLCPP_INFO(
+    get_logger(), "Image dimensions captured from '%s': %dx%d",
+    config_.camera_info_topic.c_str(), image_width_, image_height_);
 }
 
 void CalibrationOrchestratorNode::publishStatusFeedback(const AutoCalibrate::Feedback & feedback)
@@ -365,9 +405,9 @@ void CalibrationOrchestratorNode::executeAutoCalibrate(
   if (get_parameter("auto_center_enabled").as_bool()) {
     publish_stage("Auto-centering on marker");
     const std::optional<geometry_msgs::msg::Pose> centered_pose =
-      runAutoCenterProbe(*cal_ready_pose);
+      centerOnMarkerUsingImage(*cal_ready_pose);
     if (!centered_pose.has_value()) {
-      abort_with("auto_center", "Auto-center probe failed (see log)");
+      abort_with("auto_center", "Image-based centering failed (see log)");
       return;
     }
   }
@@ -506,6 +546,28 @@ bool CalibrationOrchestratorNode::isMarkerVisibleAfter(const rclcpp::Time & afte
   return false;
 }
 
+std::optional<std::pair<double, double>> CalibrationOrchestratorNode::latestMarkerPixelAfter(
+  const rclcpp::Time & after)
+{
+  // Poll rather than block-and-wait — same reasoning as isMarkerVisibleAfter:
+  // a step to a position where the marker is genuinely invisible must time
+  // out gracefully, not hang.
+  const rclcpp::Time deadline =
+    get_clock()->now() +
+    rclcpp::Duration::from_seconds(config_.centering_visibility_timeout_sec);
+
+  while (get_clock()->now() < deadline) {
+    {
+      std::lock_guard<std::mutex> lock(marker_pixel_mutex_);
+      if (latest_marker_pixel_stamp_.nanoseconds() > 0 && latest_marker_pixel_stamp_ > after) {
+        return std::make_pair(latest_marker_cx_, latest_marker_cy_);
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  return std::nullopt;
+}
+
 bool CalibrationOrchestratorNode::probeDirectionVisible(
   const geometry_msgs::msg::Pose & center_pose,
   double x_axis, double y_axis, double distance_m)
@@ -531,11 +593,28 @@ bool CalibrationOrchestratorNode::probeDirectionVisible(
   if (!tracePathBlocking(probe_pose)) {
     // A failed plan/execute (e.g. near a joint limit) is treated the same
     // as "marker not visible" — either way this direction can't go
-    // further, so the caller should stop extending it here.
+    // further, so the caller should stop extending it here. Logged
+    // distinctly from the isMarkerVisibleAfter() case below (2026-07-22)
+    // so an asymmetric probe result (e.g. +X reaching much further than
+    // -X/Y) can be diagnosed from the log alone — a reachability wall and
+    // a camera-FOV edge have different implications, but runAutoCenterProbe's
+    // own "boundary at %.3fm" line can't tell them apart on its own.
+    RCLCPP_INFO(
+      get_logger(),
+      "probeDirectionVisible: move to (x=%.0f,y=%.0f) at %.3fm FAILED "
+      "(plan/execute error, e.g. joint limit — not a visibility check)",
+      x_axis, y_axis, distance_m);
     return false;
   }
 
-  return isMarkerVisibleAfter(before_move);
+  const bool visible = isMarkerVisibleAfter(before_move);
+  if (!visible) {
+    RCLCPP_INFO(
+      get_logger(),
+      "probeDirectionVisible: reached (x=%.0f,y=%.0f) at %.3fm but marker NOT visible there",
+      x_axis, y_axis, distance_m);
+  }
+  return visible;
 }
 
 namespace
@@ -643,6 +722,200 @@ std::optional<geometry_msgs::msg::Pose> CalibrationOrchestratorNode::runAutoCent
   return corrected_pose;
 }
 
+std::optional<double> CalibrationOrchestratorNode::stepAndMeasureAxisOffset(
+  const geometry_msgs::msg::Pose & current_pose,
+  double x_axis, double y_axis, bool is_x_axis, double step_m)
+{
+  const geometry_msgs::msg::Pose next_pose = offsetInLocalPlane(
+    current_pose, x_axis * step_m, y_axis * step_m);
+
+  const rclcpp::Time before_move = get_clock()->now();
+  if (!tracePathBlocking(next_pose)) {
+    RCLCPP_INFO(
+      get_logger(),
+      "centerOnMarkerUsingImage: step (x=%.0f,y=%.0f) FAILED (plan/execute error)",
+      x_axis, y_axis);
+    return std::nullopt;
+  }
+
+  const std::optional<std::pair<double, double>> pixel = latestMarkerPixelAfter(before_move);
+  if (!pixel.has_value()) {
+    RCLCPP_INFO(
+      get_logger(),
+      "centerOnMarkerUsingImage: step (x=%.0f,y=%.0f) succeeded but marker NOT visible there",
+      x_axis, y_axis);
+    return std::nullopt;
+  }
+
+  const double image_center_u = static_cast<double>(image_width_) / 2.0;
+  const double image_center_v = static_cast<double>(image_height_) / 2.0;
+  return is_x_axis ? (pixel->first - image_center_u) : (pixel->second - image_center_v);
+}
+
+std::optional<geometry_msgs::msg::Pose> CalibrationOrchestratorNode::centerOnMarkerUsingImage(
+  const geometry_msgs::msg::Pose & center_pose)
+{
+  if (!camera_info_received_) {
+    RCLCPP_ERROR(
+      get_logger(),
+      "centerOnMarkerUsingImage: no CameraInfo received yet on '%s' — cannot determine "
+      "the image's center", config_.camera_info_topic.c_str());
+    return std::nullopt;
+  }
+
+  // Live-toggle the detector's crosshair overlay for the duration of this
+  // search — best-effort: a failure to set/clear this parameter is logged
+  // but does not abort centering, since the crosshair is a visual aid, not
+  // load-bearing for the actual centering logic.
+  auto setCrosshair = [this](bool enabled) {
+      auto client = getClassicalDetectorParamClient();
+      if (!client->wait_for_service(std::chrono::seconds(2))) {
+        RCLCPP_WARN(
+          get_logger(),
+          "centerOnMarkerUsingImage: aruco_detector_node's parameter service unreachable — "
+          "cannot %s the centering crosshair", enabled ? "show" : "hide");
+        return;
+      }
+      client->set_parameters(
+        {rclcpp::Parameter("show_centering_crosshair", enabled)});
+    };
+  setCrosshair(true);
+
+  geometry_msgs::msg::Pose axis_pose = center_pose;
+  const std::array<bool, 2> axes = {true, false};  // X first, then Y
+
+  for (const bool is_x_axis : axes) {
+    const char * axis_name = is_x_axis ? "X" : "Y";
+
+    // Measure the current offset at axis_pose itself (no move yet) to
+    // decide whether this axis even needs correcting, and to have a
+    // baseline to compare the first step's result against.
+    const rclcpp::Time now = get_clock()->now();
+    const std::optional<std::pair<double, double>> initial_pixel =
+      latestMarkerPixelAfter(now - rclcpp::Duration::from_seconds(
+        config_.centering_visibility_timeout_sec));
+    if (!initial_pixel.has_value()) {
+      RCLCPP_ERROR(
+        get_logger(), "centerOnMarkerUsingImage: marker not visible at the starting pose "
+        "for the %s axis", axis_name);
+      setCrosshair(false);
+      return std::nullopt;
+    }
+
+    const double image_center_u = static_cast<double>(image_width_) / 2.0;
+    const double image_center_v = static_cast<double>(image_height_) / 2.0;
+    double current_offset = is_x_axis ?
+      (initial_pixel->first - image_center_u) : (initial_pixel->second - image_center_v);
+
+    // Diagnostic only (2026-07-23) — which image half the marker is
+    // currently in. Does NOT set the search direction: knowing the marker
+    // is left/right (or above/below) of center tells us which way the
+    // MARKER needs to move on screen, not which way arm-local +X/+Y moves
+    // it there — that mapping depends on the camera's mounting
+    // orientation, which is exactly what the empirical direction search
+    // below discovers by testing a step and observing the result. This
+    // line exists purely to make the logs easier to interpret.
+    RCLCPP_INFO(
+      get_logger(), "centerOnMarkerUsingImage: marker is currently %s of center on the %s axis "
+      "(offset %.1fpx)", current_offset < 0.0 ? "before/left-or-above" : "after/right-or-below",
+      axis_name, current_offset);
+
+    // Direction is discovered empirically (see class doc comment) — start
+    // with an arbitrary sign and reverse if the first step makes things
+    // worse. +1.0 on the axis being searched, 0.0 on the other.
+    double direction = 1.0;
+    double step_m = config_.centering_step_m;
+    int iterations = 0;
+
+    while (std::abs(current_offset) > config_.centering_pixel_tolerance) {
+      if (iterations >= config_.centering_max_iterations_per_axis) {
+        RCLCPP_ERROR(
+          get_logger(), "centerOnMarkerUsingImage: %s axis did not converge within %d "
+          "iterations (last offset %.1fpx)", axis_name,
+          config_.centering_max_iterations_per_axis, current_offset);
+        setCrosshair(false);
+        return std::nullopt;
+      }
+      ++iterations;
+
+      const double x_axis = is_x_axis ? direction : 0.0;
+      const double y_axis = is_x_axis ? 0.0 : direction;
+      const double this_step_m = step_m;
+      const std::optional<double> new_offset =
+        stepAndMeasureAxisOffset(axis_pose, x_axis, y_axis, is_x_axis, this_step_m);
+
+      if (!new_offset.has_value()) {
+        // Move failed or marker became invisible — treated as "worse than
+        // before" (see stepAndMeasureAxisOffset's doc comment): reverse
+        // direction, halve the step (no pixel measurement to estimate a
+        // ratio from this time), and retry from axis_pose (not from
+        // wherever this failed attempt would have landed —
+        // tracePathBlocking's own failure semantics mean the arm didn't
+        // actually move on a plan/execute failure, so axis_pose is still
+        // accurate either way).
+        direction = -direction;
+        step_m = std::max(step_m * 0.5, 0.005);
+        RCLCPP_INFO(
+          get_logger(), "centerOnMarkerUsingImage: %s axis step made things worse — "
+          "reversing direction, step now %.3fm", axis_name, step_m);
+        continue;
+      }
+
+      const double improvement = std::abs(current_offset) - std::abs(*new_offset);
+      const bool improved = improvement > 0.0;
+
+      if (!improved) {
+        // Got worse (or no better) — reverse direction. Halve the step
+        // too (same convergence-safety net as the failed-move case above)
+        // since a ratio estimated from a worsening step isn't trustworthy
+        // as a "how far to go" estimate.
+        direction = -direction;
+        step_m = std::max(step_m * 0.5, 0.005);
+        RCLCPP_INFO(
+          get_logger(), "centerOnMarkerUsingImage: %s axis offset %.1f -> %.1fpx (worse) — "
+          "reversing direction, step now %.3fm", axis_name, current_offset, *new_offset, step_m);
+      } else {
+        // Improved — estimate pixels-per-meter from this step's actual
+        // measured effect, then estimate the step needed to close the
+        // REMAINING offset directly (a local linear approximation, akin
+        // to one secant-method iteration) instead of blindly repeating
+        // the same step size. Clamped to [0.1x, 2x] the step just taken,
+        // and never below a 0.5cm floor, so a noisy/unstable ratio can't
+        // produce a wild or vanishingly small move.
+        const double pixels_per_meter = improvement / this_step_m;
+        double next_step_m = this_step_m;
+        if (pixels_per_meter > 1e-6) {
+          const double estimated_step_m = std::abs(*new_offset) / pixels_per_meter;
+          next_step_m = std::clamp(estimated_step_m, this_step_m * 0.1, this_step_m * 2.0);
+        }
+        step_m = std::max(next_step_m, 0.005);
+        RCLCPP_INFO(
+          get_logger(), "centerOnMarkerUsingImage: %s axis offset %.1f -> %.1fpx (better) — "
+          "next step %.3fm", axis_name, current_offset, *new_offset, step_m);
+      }
+
+      // The arm actually moved (stepAndMeasureAxisOffset only returns a
+      // value once tracePathBlocking succeeded) — advance axis_pose to
+      // match, regardless of better/worse, so the NEXT step (whichever
+      // direction/size) is relative to where the arm really is now.
+      axis_pose = offsetInLocalPlane(
+        axis_pose, x_axis * this_step_m, y_axis * this_step_m);
+      current_offset = *new_offset;
+    }
+
+    RCLCPP_INFO(
+      get_logger(), "centerOnMarkerUsingImage: %s axis converged (offset %.1fpx, tolerance %.1fpx)",
+      axis_name, current_offset, config_.centering_pixel_tolerance);
+  }
+
+  setCrosshair(false);
+
+  // Persist for this session — same convention runAutoCenterProbe used.
+  session_centered_cal_ready_pose_ = axis_pose;
+
+  return axis_pose;
+}
+
 bool CalibrationOrchestratorNode::tracePathBlocking(
   const geometry_msgs::msg::Pose & target,
   const std::string & pose_name)
@@ -727,6 +1000,14 @@ OrchestratorConfig CalibrationOrchestratorNode::loadConfigFromParams() const
     throw std::invalid_argument(
             "Unknown planning_mode: '" + mode_name + "' (expected 'cartesian' or 'joint_space')");
   }
+
+  config.centering_step_m = get_parameter("centering_step_m").as_double();
+  config.centering_pixel_tolerance = get_parameter("centering_pixel_tolerance").as_double();
+  config.centering_max_iterations_per_axis =
+    static_cast<int>(get_parameter("centering_max_iterations_per_axis").as_int());
+  config.centering_visibility_timeout_sec =
+    get_parameter("centering_visibility_timeout_sec").as_double();
+  config.camera_info_topic = get_parameter("camera_info_topic").as_string();
 
   return config;
 }

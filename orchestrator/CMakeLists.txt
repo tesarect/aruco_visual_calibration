@@ -10,6 +10,7 @@ find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(visual_calibration_msgs REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -26,6 +27,7 @@ ament_target_dependencies(calibration_orchestrator_node
   rclcpp_action
   std_srvs
   geometry_msgs
+  sensor_msgs
   visual_calibration_msgs
   tf2
   tf2_geometry_msgs

@@ -38,6 +38,7 @@ const std::vector<SceneObjectId> PlanningSceneSetup::kKnownObjectIds = {
   SceneObjectId::Cupholder,
   SceneObjectId::Countertop,
   SceneObjectId::Wall,
+  SceneObjectId::Camera,
 };
 
 PlanningSceneSetup::PlanningSceneSetup()
@@ -122,6 +123,30 @@ void PlanningSceneSetup::declareParameters()
   declare_parameter("wall.box_names", std::vector<std::string>{"body"});
   declare_parameter("wall.boxes.body.size", std::vector<double>{2.0, 0.03, 2.0});
   declare_parameter("wall.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
+
+  // Wall-mounted camera housing. On real, this is a genuine collision
+  // guard — added 2026-07-20 to stop the arm from hitting the camera
+  // where it protrudes off the wall, above table height; scene_objects_
+  // real.yaml's camera.* entries are what actually apply and are expected
+  // to be moved once the camera's real mount point is measured (same
+  // measurecorner/measurecompute workflow as the other objects) — see
+  // that file's comment. Default pose here is a guess (roughly centered
+  // on wall.pose.x/z, just in front of wall's own front face).
+  // On sim, there is no physical wall-mounted camera (sim's camera is
+  // wrist-mounted, rides the arm via URDF) — this box is kept enabled
+  // there anyway as a placeholder/visual-reference object, explicitly
+  // configured in scene_objects_sim.yaml (2026-07-22) rather than
+  // silently inheriting these C++ defaults, matching real's explicit
+  // camera.* style.
+  declare_parameter("camera.enabled", true);
+  declare_parameter("camera.shape_type", "box");
+  declare_parameter("camera.pose.x", 0.3);
+  declare_parameter("camera.pose.y", -0.4);
+  declare_parameter("camera.pose.z", 0.3);
+  declare_parameter("camera.pose.yaw", 0.0);
+  declare_parameter("camera.box_names", std::vector<std::string>{"body"});
+  declare_parameter("camera.boxes.body.size", std::vector<double>{0.2, 0.2, 0.2});
+  declare_parameter("camera.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 }
 
 std::vector<SceneObjectConfig> PlanningSceneSetup::loadSceneObjects()

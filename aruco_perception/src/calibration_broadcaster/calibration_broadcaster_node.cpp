@@ -1,6 +1,8 @@
 #include "aruco_perception/calibration_broadcaster_node.hpp"
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <stdexcept>
 #include <thread>
 
@@ -86,6 +88,7 @@ void CalibrationBroadcasterNode::executeCalibration(
 {
   collected_positions_.clear();
   collected_orientations_.clear();
+  stable_agreement_count_ = 0;
 
   if (!get_polygon_waypoints_client_->wait_for_service(std::chrono::seconds(5))) {
     auto result = std::make_shared<Calibrate::Result>();
@@ -110,7 +113,9 @@ void CalibrationBroadcasterNode::executeCalibration(
     return;
   }
 
-  const auto & waypoints = waypoints_response->waypoints;
+  const std::vector<geometry_msgs::msg::Pose> waypoints(
+    waypoints_response->waypoints.begin(), waypoints_response->waypoints.end());
+  const geometry_msgs::msg::Pose center_pose = waypoints_response->center_pose;
   RCLCPP_INFO(get_logger(), "Fetched %zu polygon waypoints", waypoints.size());
 
   if (!trace_path_client_->wait_for_service(std::chrono::seconds(5))) {
@@ -122,6 +127,83 @@ void CalibrationBroadcasterNode::executeCalibration(
     return;
   }
 
+  // Sample once at the center pose itself, right after it's known — the
+  // arm is already there (center_pose IS trajectory_planner's own current
+  // pose, per polygonWaypointsAroundStandoff's 2026-07-22 redesign), so
+  // this needs no additional move, just an immediate marker_pose wait +
+  // record before the polygon phase's first corner move begins. Counted
+  // toward the same running total as every other sample.
+  {
+    const rclcpp::Time now = get_clock()->now();
+    const std::optional<geometry_msgs::msg::PoseStamped> center_marker_pose =
+      waitForFreshMarkerPose(now);
+
+    if (!center_marker_pose.has_value()) {
+      auto result = std::make_shared<Calibrate::Result>();
+      result->success = false;
+      result->message = "Timed out waiting for a fresh marker_pose at the center pose "
+        "(is the marker still in view?)";
+      goal_handle->abort(result);
+      RCLCPP_ERROR(get_logger(), "%s", result->message.c_str());
+      return;
+    }
+
+    if (!recordSample(*center_marker_pose)) {
+      auto result = std::make_shared<Calibrate::Result>();
+      result->success = false;
+      result->message = "Could not record the center-pose sample (TF lookup failed, see log)";
+      goal_handle->abort(result);
+      RCLCPP_ERROR(get_logger(), "%s", result->message.c_str());
+      return;
+    }
+
+    const int total_samples = 1 + config_.num_samples + config_.random_phase_samples;
+    RCLCPP_INFO(get_logger(), "Collected sample 1/%d (center pose)", total_samples);
+
+    auto feedback = std::make_shared<Calibrate::Feedback>();
+    feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
+    feedback->samples_total = static_cast<uint32_t>(total_samples);
+    goal_handle->publish_feedback(feedback);
+  }
+
+  std::shared_ptr<Calibrate::Result> phase_result;
+  bool stopped_early = stableAgreementReached();
+
+  if (!stopped_early && !runPolygonPhase(goal_handle, waypoints, phase_result, stopped_early)) {
+    if (phase_result) {
+      goal_handle->abort(phase_result);
+      RCLCPP_ERROR(get_logger(), "%s", phase_result->message.c_str());
+    }
+    // else: cancellation already handled (goal_handle->canceled) inside
+    // runPolygonPhase itself.
+    return;
+  }
+
+  if (!stopped_early) {
+    if (!runRandomPhase(
+        goal_handle, center_pose, static_cast<int>(collected_positions_.size()), phase_result,
+        stopped_early))
+    {
+      if (phase_result) {
+        goal_handle->abort(phase_result);
+        RCLCPP_ERROR(get_logger(), "%s", phase_result->message.c_str());
+      }
+      return;
+    }
+  }
+
+  finishCalibration(goal_handle);
+}
+
+bool CalibrationBroadcasterNode::runPolygonPhase(
+  const std::shared_ptr<GoalHandleCalibrate> & goal_handle,
+  const std::vector<geometry_msgs::msg::Pose> & waypoints,
+  std::shared_ptr<Calibrate::Result> & out_result,
+  bool & stopped_early)
+{
+  stopped_early = false;
+  const int total_samples = 1 + config_.num_samples + config_.random_phase_samples;
+
   for (int i = 0; i < config_.num_samples; ++i) {
     if (goal_handle->is_canceling()) {
       auto result = std::make_shared<Calibrate::Result>();
@@ -129,7 +211,8 @@ void CalibrationBroadcasterNode::executeCalibration(
       result->message = "Calibration cancelled";
       goal_handle->canceled(result);
       RCLCPP_INFO(get_logger(), "Calibration cancelled");
-      return;
+      out_result = nullptr;
+      return false;
     }
 
     // Cycle through the polygon's corners if num_samples exceeds their
@@ -137,61 +220,210 @@ void CalibrationBroadcasterNode::executeCalibration(
     // rather than failing or stopping early.
     const geometry_msgs::msg::Pose & target = waypoints[i % waypoints.size()];
 
-    auto trace_request = std::make_shared<visual_calibration_msgs::srv::TracePath::Request>();
-    trace_request->waypoints = {target};
-    trace_request->planning_mode = config_.planning_mode;
-
+    // Captured BEFORE the move, not after tracePathBlocking() returns —
+    // waitForFreshMarkerPose's whole purpose is rejecting any marker_pose
+    // that could have arrived during the move, so the timestamp boundary
+    // must predate the move starting, not just predate it settling (a
+    // regression risk introduced by extracting tracePathBlocking() as a
+    // shared helper during the 2026-07-22 two-phase redesign — fixed
+    // here; see error-mitigation.md #19 for why this matters).
     const rclcpp::Time before_move = get_clock()->now();
-    auto trace_future = trace_path_client_->async_send_request(trace_request);
-    const auto trace_response = trace_future.get();
-
-    if (!trace_response->success) {
-      auto result = std::make_shared<Calibrate::Result>();
-      result->success = false;
-      result->message = "~/trace_path failed for sample " + std::to_string(i + 1) + ": " +
-        trace_response->message;
-      goal_handle->abort(result);
-      RCLCPP_ERROR(get_logger(), "%s", result->message.c_str());
-      return;
+    if (!tracePathBlocking(target)) {
+      out_result = std::make_shared<Calibrate::Result>();
+      out_result->success = false;
+      out_result->message = "~/trace_path failed for sample " + std::to_string(i + 1);
+      return false;
     }
 
-    // The response only arrives once the arm has settled at target (see
-    // TrajectoryPlanner::tracePath/planAndExecute[Cartesian]) — that's
-    // the settle signal. Still wait for a marker_pose published after
-    // this point, rather than trusting whatever was last cached, so the
-    // sample can't reflect a frame captured before the arm stopped.
+    // The trace_path response only arrives once the arm has settled at
+    // target (see TrajectoryPlanner::tracePath/planAndExecute[Cartesian])
+    // — that's the settle signal. Still wait for a marker_pose published
+    // after before_move, rather than trusting whatever was last cached,
+    // so the sample can't reflect a frame captured before the move began.
     const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
       waitForFreshMarkerPose(before_move);
 
     if (!marker_pose.has_value()) {
-      auto result = std::make_shared<Calibrate::Result>();
-      result->success = false;
-      result->message = "Timed out waiting for a fresh marker_pose for sample " +
+      out_result = std::make_shared<Calibrate::Result>();
+      out_result->success = false;
+      out_result->message = "Timed out waiting for a fresh marker_pose for sample " +
         std::to_string(i + 1) + " (is the marker still in view?)";
-      goal_handle->abort(result);
-      RCLCPP_ERROR(get_logger(), "%s", result->message.c_str());
-      return;
+      return false;
     }
 
     if (!recordSample(*marker_pose)) {
-      auto result = std::make_shared<Calibrate::Result>();
-      result->success = false;
-      result->message = "Could not record sample " + std::to_string(i + 1) +
+      out_result = std::make_shared<Calibrate::Result>();
+      out_result->success = false;
+      out_result->message = "Could not record sample " + std::to_string(i + 1) +
         " (TF lookup failed, see log)";
-      goal_handle->abort(result);
-      RCLCPP_ERROR(get_logger(), "%s", result->message.c_str());
-      return;
+      return false;
     }
 
-    RCLCPP_INFO(get_logger(), "Collected sample %d/%d", i + 1, config_.num_samples);
+    RCLCPP_INFO(
+      get_logger(), "Collected sample %zu/%d (polygon phase)", collected_positions_.size(),
+      total_samples);
 
     auto feedback = std::make_shared<Calibrate::Feedback>();
     feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
-    feedback->samples_total = static_cast<uint32_t>(config_.num_samples);
+    feedback->samples_total = static_cast<uint32_t>(total_samples);
     goal_handle->publish_feedback(feedback);
+
+    if (stableAgreementReached()) {
+      RCLCPP_INFO(
+        get_logger(), "Early-stop: agreement reached after %zu samples (polygon phase)",
+        collected_positions_.size());
+      stopped_early = true;
+      return true;
+    }
   }
 
-  finishCalibration(goal_handle);
+  return true;
+}
+
+bool CalibrationBroadcasterNode::runRandomPhase(
+  const std::shared_ptr<GoalHandleCalibrate> & goal_handle,
+  const geometry_msgs::msg::Pose & center_pose,
+  int samples_already_collected,
+  std::shared_ptr<Calibrate::Result> & out_result,
+  bool & stopped_early)
+{
+  stopped_early = false;
+  const int total_samples = 1 + config_.num_samples + config_.random_phase_samples;
+  int consecutive_failures = 0;
+
+  for (int i = 0; i < config_.random_phase_samples; ) {
+    if (goal_handle->is_canceling()) {
+      auto result = std::make_shared<Calibrate::Result>();
+      result->success = false;
+      result->message = "Calibration cancelled";
+      goal_handle->canceled(result);
+      RCLCPP_INFO(get_logger(), "Calibration cancelled");
+      out_result = nullptr;
+      return false;
+    }
+
+    const geometry_msgs::msg::Pose candidate =
+      randomPoseNear(center_pose, config_.random_phase_max_offset_m);
+
+    // Captured BEFORE the move — see runPolygonPhase's identical comment
+    // on why this must predate the move starting, not just its settling.
+    const rclcpp::Time before_move = get_clock()->now();
+    if (!tracePathBlocking(candidate)) {
+      out_result = std::make_shared<Calibrate::Result>();
+      out_result->success = false;
+      out_result->message = "~/trace_path failed for random-phase sample " +
+        std::to_string(samples_already_collected + i + 1);
+      return false;
+    }
+
+    if (!isMarkerVisibleNow(before_move)) {
+      // Discarded, not counted — return to center immediately (no point
+      // probing further out when not visible at all here) and try a new
+      // candidate.
+      ++consecutive_failures;
+      RCLCPP_INFO(
+        get_logger(), "Random-phase candidate not visible (attempt %d/%d consecutive) — "
+        "returning to center", consecutive_failures, config_.random_phase_max_consecutive_failures);
+
+      if (consecutive_failures >= config_.random_phase_max_consecutive_failures) {
+        out_result = std::make_shared<Calibrate::Result>();
+        out_result->success = false;
+        out_result->message = "Random phase gave up after " +
+          std::to_string(consecutive_failures) + " consecutive invisible candidates";
+        return false;
+      }
+
+      if (!tracePathBlocking(center_pose)) {
+        out_result = std::make_shared<Calibrate::Result>();
+        out_result->success = false;
+        out_result->message = "Could not return to center pose after an invisible random candidate";
+        return false;
+      }
+      continue;
+    }
+
+    consecutive_failures = 0;
+
+    const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
+      waitForFreshMarkerPose(before_move);
+    if (!marker_pose.has_value()) {
+      out_result = std::make_shared<Calibrate::Result>();
+      out_result->success = false;
+      out_result->message = "Timed out waiting for a fresh marker_pose for random-phase sample " +
+        std::to_string(samples_already_collected + i + 1);
+      return false;
+    }
+
+    if (!recordSample(*marker_pose)) {
+      out_result = std::make_shared<Calibrate::Result>();
+      out_result->success = false;
+      out_result->message = "Could not record random-phase sample " +
+        std::to_string(samples_already_collected + i + 1) + " (TF lookup failed, see log)";
+      return false;
+    }
+
+    ++i;
+    RCLCPP_INFO(
+      get_logger(), "Collected sample %zu/%d (random phase)", collected_positions_.size(),
+      total_samples);
+
+    auto feedback = std::make_shared<Calibrate::Feedback>();
+    feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
+    feedback->samples_total = static_cast<uint32_t>(total_samples);
+    goal_handle->publish_feedback(feedback);
+
+    if (stableAgreementReached()) {
+      RCLCPP_INFO(
+        get_logger(), "Early-stop: agreement reached after %zu samples (random phase)",
+        collected_positions_.size());
+      stopped_early = true;
+      return true;
+    }
+  }
+
+  return true;
+}
+
+geometry_msgs::msg::Pose CalibrationBroadcasterNode::randomPoseNear(
+  const geometry_msgs::msg::Pose & center_pose, double max_offset_m) const
+{
+  // Uniform offset within a cube of side 2*max_offset_m, re-rolled until
+  // its straight-line distance from center is within max_offset_m (a
+  // simple rejection sampler — cheap at this scale, no closed-form
+  // uniform-sphere sampling needed).
+  std::uniform_real_distribution<double> axis_dist(-max_offset_m, max_offset_m);
+
+  double dx = 0.0;
+  double dy = 0.0;
+  double dz = 0.0;
+  do {
+    dx = axis_dist(random_engine_);
+    dy = axis_dist(random_engine_);
+    dz = axis_dist(random_engine_);
+  } while (std::sqrt(dx * dx + dy * dy + dz * dz) > max_offset_m);
+
+  tf2::Transform center;
+  tf2::fromMsg(center_pose, center);
+  const tf2::Transform offset(tf2::Quaternion::getIdentity(), tf2::Vector3(dx, dy, dz));
+  const tf2::Transform result = center * offset;
+
+  geometry_msgs::msg::Pose result_pose;
+  result_pose.position.x = result.getOrigin().x();
+  result_pose.position.y = result.getOrigin().y();
+  result_pose.position.z = result.getOrigin().z();
+  result_pose.orientation = tf2::toMsg(result.getRotation());
+  return result_pose;
+}
+
+bool CalibrationBroadcasterNode::tracePathBlocking(const geometry_msgs::msg::Pose & target)
+{
+  auto trace_request = std::make_shared<visual_calibration_msgs::srv::TracePath::Request>();
+  trace_request->waypoints = {target};
+  trace_request->planning_mode = config_.planning_mode;
+
+  auto trace_future = trace_path_client_->async_send_request(trace_request);
+  const auto trace_response = trace_future.get();
+  return trace_response->success;
 }
 
 std::optional<geometry_msgs::msg::PoseStamped> CalibrationBroadcasterNode::waitForFreshMarkerPose(
@@ -208,6 +440,28 @@ std::optional<geometry_msgs::msg::PoseStamped> CalibrationBroadcasterNode::waitF
     return std::nullopt;
   }
   return latest_marker_pose_;
+}
+
+bool CalibrationBroadcasterNode::isMarkerVisibleNow(const rclcpp::Time & after)
+{
+  // Polls rather than blocking on the condition variable (unlike
+  // waitForFreshMarkerPose) — a random-phase candidate at a position
+  // where the marker is genuinely out of view will never produce a fresh
+  // message at all, so this has to time out gracefully, not hang. Same
+  // pattern as CalibrationOrchestratorNode::isMarkerVisibleAfter.
+  const rclcpp::Time deadline =
+    get_clock()->now() + rclcpp::Duration::from_seconds(config_.sample_wait_timeout_sec);
+
+  while (get_clock()->now() < deadline) {
+    {
+      std::lock_guard<std::mutex> lock(sample_mutex_);
+      if (latest_marker_pose_stamp_.nanoseconds() > 0 && latest_marker_pose_stamp_ > after) {
+        return true;
+      }
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+  }
+  return false;
 }
 
 bool CalibrationBroadcasterNode::recordSample(
@@ -251,6 +505,54 @@ bool CalibrationBroadcasterNode::recordSample(
   last_sample_.pose.orientation = tf2::toMsg(known_to_camera.getRotation());
 
   return true;
+}
+
+bool CalibrationBroadcasterNode::stableAgreementReached()
+{
+  const size_t count = collected_positions_.size();
+  if (count < 2) {
+    // Spread is meaningless with only 0/1 samples collected.
+    return false;
+  }
+
+  geometry_msgs::msg::Vector3 mean_position;
+  for (const geometry_msgs::msg::Vector3 & position : collected_positions_) {
+    mean_position.x += position.x;
+    mean_position.y += position.y;
+    mean_position.z += position.z;
+  }
+  mean_position.x /= static_cast<double>(count);
+  mean_position.y /= static_cast<double>(count);
+  mean_position.z /= static_cast<double>(count);
+
+  double max_position_spread_m = 0.0;
+  for (const geometry_msgs::msg::Vector3 & position : collected_positions_) {
+    const double dx = position.x - mean_position.x;
+    const double dy = position.y - mean_position.y;
+    const double dz = position.z - mean_position.z;
+    max_position_spread_m = std::max(max_position_spread_m, std::sqrt(dx * dx + dy * dy + dz * dz));
+  }
+  const double max_position_spread_cm = max_position_spread_m * 100.0;
+
+  const OrientationAveragingResult orientation_result =
+    averageQuaternions(collected_orientations_, averaging_method_);
+
+  const bool within_tolerance =
+    max_position_spread_cm <= config_.position_spread_tolerance_cm &&
+    orientation_result.max_spread_deg <= config_.orientation_spread_tolerance_deg;
+
+  if (within_tolerance) {
+    ++stable_agreement_count_;
+    RCLCPP_INFO(
+      get_logger(), "Early-stop check: sample within tolerance (position spread %.2fcm, "
+      "orientation spread %.2fdeg) — agreement count %d/%d",
+      max_position_spread_cm, orientation_result.max_spread_deg, stable_agreement_count_,
+      config_.stable_agreement_count);
+  }
+  // Deliberately NOT reset on a single out-of-tolerance sample — see this
+  // method's doc comment (a running, non-consecutive count).
+
+  return stable_agreement_count_ >= config_.stable_agreement_count;
 }
 
 void CalibrationBroadcasterNode::finishCalibration(
@@ -302,6 +604,7 @@ void CalibrationBroadcasterNode::finishCalibration(
 
   collected_positions_.clear();
   collected_orientations_.clear();
+  stable_agreement_count_ = 0;
 }
 
 CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() const
@@ -329,6 +632,20 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
     static_cast<int>(get_parameter("orientation_sum_normalize_priority").as_int());
   config.orientation_markley_priority =
     static_cast<int>(get_parameter("orientation_markley_priority").as_int());
+
+  config.random_phase_samples =
+    static_cast<int>(get_parameter("random_phase_samples").as_int());
+  config.random_phase_max_offset_m = get_parameter("random_phase_max_offset_m").as_double();
+  config.random_phase_max_consecutive_failures =
+    static_cast<int>(get_parameter("random_phase_max_consecutive_failures").as_int());
+
+  config.position_spread_tolerance_cm =
+    get_parameter("position_spread_tolerance_cm").as_double();
+  config.orientation_spread_tolerance_deg =
+    get_parameter("orientation_spread_tolerance_deg").as_double();
+  config.stable_agreement_count =
+    static_cast<int>(get_parameter("stable_agreement_count").as_int());
+
   return config;
 }
 

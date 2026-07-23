@@ -9,3 +9,12 @@
 bool success
 string message
 geometry_msgs/Pose[] waypoints
+# The center pose the waypoints were generated around (the arm's own
+# current pose at call time — see polygonWaypointsAroundStandoff's doc
+# comment, 2026-07-22 redesign: no longer the camera's TF-derived
+# standoff pose). Added so a caller (calibration_broadcaster_node's
+# random-pose sampling phase) can generate its own additional offset
+# poses from the SAME center the polygon corners used, without a second
+# "get current pose" round-trip or duplicating this node's own
+# MoveGroupInterface/TF access.
+geometry_msgs/Pose center_pose

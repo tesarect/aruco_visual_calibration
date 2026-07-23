@@ -2,6 +2,7 @@
 #define ARUCO_PERCEPTION__ARUCO_DETECTOR_NODE_HPP_
 
 #include <array>
+#include <optional>
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
@@ -10,6 +11,7 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <image_transport/image_transport.hpp>
 #include <opencv2/aruco.hpp>
+#include <visual_calibration_msgs/msg/detection2_d_array.hpp>
 
 namespace aruco_perception
 {
@@ -40,6 +42,15 @@ struct ArucoDetectorConfig
   /// Output topic for the axis-overlay image (only used if
   /// publish_overlay_image is true).
   std::string overlay_image_topic;
+  /// Same topic yolo_marker_bridge_node.py already publishes
+  /// visual_calibration_msgs/Detection2DArray on for cup_holder/hole
+  /// detections (default "/aruco_perception/detections_2d") — this node
+  /// publishes the ArUco marker's own pixel-space centroid/bbox onto the
+  /// SAME topic (class_name "aruco_marker"), added alongside rather than a
+  /// separate stream, matching the existing multi-class-on-one-topic
+  /// convention (2026-07-23, for image-based marker centering — see
+  /// calibration_orchestrator_node's centerOnMarkerUsingImage).
+  std::string detections_2d_topic;
   /// BGR color (OpenCV's channel order) for the marker's border, drawn by
   /// drawDetectedMarkers. Default is yellow.
   std::array<int, 3> overlay_border_color_bgr = {0, 255, 255};
@@ -70,6 +81,14 @@ struct ArucoDetectorConfig
   /// 1=subpixel, 2=contour, 3=AprilTag. Subpixel refinement improves pose
   /// accuracy at a small speed cost.
   int corner_refinement_method = 1;
+  /// Startup default for the "active" parameter (see class doc comment) —
+  /// true = classical detection is the default detector on startup. This
+  /// initial value is read once at construction; the LIVE value is always
+  /// re-read via get_parameter("active") in imageCallback, never cached
+  /// here, so a runtime set_parameters call (e.g. from
+  /// calibration_orchestrator_node's classical/hybrid switch) takes effect
+  /// on the very next frame with no restart.
+  bool active = true;
 };
 
 /// Vision-only node: detects the single expected ArUco marker in the
@@ -81,6 +100,46 @@ struct ArucoDetectorConfig
 /// Humble's apt packages) rather than the newer ArucoDetector class
 /// (OpenCV 4.7+), to avoid a second OpenCV build conflicting with
 /// cv_bridge/image_transport's ABI.
+///
+/// classical/hybrid switch: this node and aruco_perception_yolo_bridge's
+/// YoloMarkerBridgeNode both publish geometry_msgs/PoseStamped on the SAME
+/// pose_topic (/aruco_perception/marker_pose by convention) — exactly one
+/// of them should ever be "active" (actually running detection + calling
+/// publish) at a time, gated by the "active" bool parameter (see
+/// ArucoDetectorConfig::active). calibration_orchestrator_node flips
+/// exactly one of the two nodes' "active" params true (and the other
+/// false) via the standard ROS set_parameters service — no lifecycle
+/// nodes, no process start/stop; both nodes stay running and subscribed
+/// the whole time, "active" just gates whether imageCallback does any real
+/// work this frame. When inactive, imageCallback returns immediately
+/// (before running detection at all, not just before publishing) — the
+/// classical side has no reason to spend CPU on frames nobody will use.
+///
+/// Overlay stream (2026-07-23): overlay_image_topic is now published on
+/// EVERY frame this node processes, not only frames where the marker was
+/// found — the plain camera frame goes out with no drawing when the
+/// marker is absent, so a web client watching this topic sees a
+/// continuously live stream rather than a frozen last-good frame (the
+/// previous behavior: publish only happened inside the marker-found
+/// branch, so any gap in detection meant no new message at all, and a
+/// subscriber's <img> just kept showing its last frame). Also draws a
+/// crosshair at the image's own pixel center whenever
+/// get_parameter("show_centering_crosshair") is true — set by
+/// calibration_orchestrator_node for the duration of its image-based
+/// centering routine (centerOnMarkerUsingImage), same
+/// live-re-read-every-frame pattern as "active", so no restart is needed
+/// to turn it on/off.
+///
+/// Marker pixel data (2026-07-23): when the marker IS found, this node
+/// also publishes its pixel-space centroid/bbox as a
+/// visual_calibration_msgs/Detection2D (class_name "aruco_marker") on
+/// detections_2d_topic — the SAME topic yolo_marker_bridge_node.py already
+/// publishes cup_holder/hole detections on, added as a second producer of
+/// that shared stream rather than a new one, letting
+/// calibration_orchestrator_node convert the marker's pixel offset from
+/// image-center into a real-world correction (see class doc comment on
+/// that node) without duplicating any corner-detection math already done
+/// here by cv::aruco::detectMarkers.
 class ArucoDetectorNode : public rclcpp::Node
 {
 public:
@@ -103,12 +162,34 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr camera_info_sub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr pose_pub_;
   image_transport::Publisher overlay_image_pub_;
+  /// See ArucoDetectorConfig::detections_2d_topic — published
+  /// unconditionally alongside overlay_image_pub_'s config gate (not
+  /// itself gated by publish_overlay_image; this is a separate feature).
+  rclcpp::Publisher<visual_calibration_msgs::msg::Detection2DArray>::SharedPtr detections_2d_pub_;
 
   /// Camera intrinsics, captured from camera_info on first receipt —
   /// required by estimatePoseSingleMarkers and assumed constant thereafter.
   cv::Mat camera_matrix_;
   cv::Mat distortion_coeffs_;
   bool camera_info_received_ = false;
+  /// Image dimensions, captured alongside camera_matrix_/distortion_coeffs_
+  /// in cameraInfoCallback — needed to compute the image's own pixel
+  /// center for both the centering crosshair and (by
+  /// calibration_orchestrator_node, which reads CameraInfo itself) the
+  /// pixel-to-metric offset conversion.
+  int image_width_ = 0;
+  int image_height_ = 0;
+
+  /// Tracks the marker's visibility as of the PREVIOUS imageCallback, so
+  /// found/not-found is logged only on a state transition (once when it
+  /// disappears, once when it reappears) instead of every frame — camera
+  /// topics run at full framerate, so per-frame WARN_THROTTLE(5000) still
+  /// re-logs every 5s for as long as the marker stays out of view, and
+  /// there was previously no log at all for a successful detection.
+  /// std::nullopt at startup: neither log fires until the first frame
+  /// establishes a real state, avoiding a misleading "reappeared" message
+  /// on the very first detection.
+  std::optional<bool> marker_was_visible_;
 };
 
 }  // namespace aruco_perception

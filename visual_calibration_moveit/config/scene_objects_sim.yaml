@@ -9,6 +9,25 @@ planning_scene_setup:
     cupholder.enabled: true
     countertop.enabled: true
     wall.enabled: true
+    # Sim's camera is wrist-mounted (rides the arm, part of the URDF) — no
+    # PHYSICAL wall-mounted camera housing to guard against, unlike real.
+    # This box is kept enabled anyway as a placeholder/visual-reference
+    # object (matching real's camera.* entries in shape, per 2026-07-22
+    # decision) — not a real collision concern in sim, just parity with
+    # real's scene-setup style and a visible reference box. Values below
+    # were previously only the planning_scene_setup.cpp hardcoded
+    # defaults (silently in effect since this file never overrode them);
+    # made explicit here so they're visible/tunable from yaml like every
+    # other object, same convention as scene_objects_real.yaml's camera.*.
+    camera.enabled: true
+    camera.shape_type: "box"
+    camera.pose.x: 0.3
+    camera.pose.y: -0.4
+    camera.pose.z: 0.3
+    camera.pose.yaw: 0.0
+    camera.box_names: ["body"]
+    camera.boxes.body.size: [0.2, 0.2, 0.2]
+    camera.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
 
     coffee_machine.shape_type: "mesh"
     coffee_machine.pose.x: 0.1
@@ -28,10 +47,10 @@ planning_scene_setup:
     cupholder.shape_type: "box"
     cupholder.pose.x: -0.26
     cupholder.pose.y: 0.04
-    cupholder.pose.z: -0.632
+    cupholder.pose.z: -0.900
     cupholder.pose.yaw: 1.57
     cupholder.box_names: ["body"]
-    cupholder.boxes.body.size: [0.5, 0.5, 0.9]
+    cupholder.boxes.body.size: [0.5, 0.5, 0.5]
     cupholder.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
 
     # Countertop = starbots_bartender_dispenser, modeled in Gazebo as two
