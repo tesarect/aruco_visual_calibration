@@ -1,0 +1,27 @@
+<?xml version='1.0' ?>
+<!--
+Top-level staged bringup, real-robot variant, XML form. NEW, additive file
+— does not replace or modify anything; real_tmux_base.sh/real_tmux_trajcal.sh
+and all per-package launch files remain fully independent and untouched.
+See bringup_full_real_README.md (same directory) for the full design.
+
+Same sequence as bringup_full_real.launch.py — see that file's header for
+the dependency-chain diagram and the out-of-scope note on Zenoh bridge/
+controller-activation/move_group. See bringup_full_sim.xml's header for the
+XML-vs-Python cross-include readiness-waiting caveat (identical here, env
+just fixed to "real").
+
+Start the real base session (or at minimum: Zenoh bridge,
+ensure_controller_active.sh, move_group) first, THEN this file.
+-->
+<launch>
+
+  <include file="$(find-pkg-share orchestrator)/launch/bringup_orchestrator_pipeline.launch.py">
+    <arg name="env" value="real"/>
+  </include>
+
+  <include file="$(find-pkg-share aruco_perception_yolo_bridge)/launch/bringup_yolo_pipeline.launch.py">
+    <arg name="env" value="real"/>
+  </include>
+
+</launch>

@@ -1,0 +1,40 @@
+<?xml version='1.0' ?>
+<!--
+Top-level staged bringup, sim variant, XML form. NEW, additive file — does
+not replace or modify anything; sim_tmux_base.sh/sim_tmux_trajcal.sh and all
+per-package launch files remain fully independent and untouched. See
+bringup_full_sim_README.md (same directory) for the full design.
+
+Same sequence as bringup_full_sim.launch.py (see that file's header for the
+full dependency-chain diagram) — this XML form exists purely to compare
+against the Python form side by side.
+
+IMPORTANT CAVEAT: XML <include> has NO mechanism to wait for an included
+launch file to be functionally READY before starting the next <include> —
+it only sequences file inclusion (all includes below start near-
+simultaneously, not one-after-another). This works here ONLY because every
+cross-file/cross-node readiness gate already lives INSIDE the included
+bringup_*.launch.py files themselves (each blocks internally via
+OpaqueFunction before emitting its own downstream nodes) — the XML file
+below does not add, and cannot add, any ordering of its own. Verify this
+assumption holds by testing this file directly against
+bringup_full_sim.launch.py — if either variant behaves differently, that
+difference IS the answer to whether XML's lack of cross-include waiting
+matters in practice for this pipeline.
+
+Does NOT start Gazebo or move_group — see bringup_full_sim.launch.py's
+header for why (out of scope, not a visual_calibration/ package).
+-->
+<launch>
+
+  <arg name="env" default="sim"/>
+
+  <include file="$(find-pkg-share orchestrator)/launch/bringup_orchestrator_pipeline.launch.py">
+    <arg name="env" value="$(var env)"/>
+  </include>
+
+  <include file="$(find-pkg-share aruco_perception_yolo_bridge)/launch/bringup_yolo_pipeline.launch.py">
+    <arg name="env" value="$(var env)"/>
+  </include>
+
+</launch>

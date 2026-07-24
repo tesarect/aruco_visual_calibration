@@ -12,6 +12,11 @@
   <depend>rclcpp</depend>
   <depend>moveit_ros_planning_interface</depend>
   <depend>moveit_msgs</depend>
+  <!-- controller_manager_msgs: used by launch/bringup_moveit_pipeline.launch.py's
+       _wait_for_controller_active() (real-only controller-activation gate,
+       2026-07-23) — same "Python launch code needs this msg package at
+       runtime" reasoning as moveit_msgs above. -->
+  <depend>controller_manager_msgs</depend>
   <depend>geometric_shapes</depend>
   <depend>shape_msgs</depend>
   <depend>tf2</depend>
@@ -20,9 +25,21 @@
   <depend>geometry_msgs</depend>
   <depend>std_srvs</depend>
   <depend>visual_calibration_msgs</depend>
+  <depend>robotiq_85_msgs</depend>
 
   <!-- mtc_trajectory: deactivated due to unresolved upstream packaging bug -->
   <!-- <depend>moveit_task_constructor_core</depend> -->
+
+  <!-- New launch/bringup_*.launch.py files (staged/ordered bringup, see
+       launch/bringup_full_sim_README.md) IncludeLaunchDescription these
+       packages' own bringup_*.launch.py, and use rclpy directly (via
+       OpaqueFunction) to poll /get_planning_scene and ros2-graph node
+       presence as readiness gates — none of these were previously
+       needed by this package's plain C++ nodes. -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>aruco_perception</exec_depend>
+  <exec_depend>orchestrator</exec_depend>
+  <exec_depend>aruco_perception_yolo_bridge</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

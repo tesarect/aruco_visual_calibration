@@ -1,9 +1,18 @@
 
-# Add this to you bashrc
+# # Add this to you bashrc
 # [ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh"
-#               or this
-# grep -qxF '[ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh"' ~/.bashrc ||
-# echo '[ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh"' >> ~/.bashrc
+
+# TMUX_CONF_SRC="$HOME/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf"
+# TMUX_CONF_DST="$HOME/.tmux.conf"
+
+# #- copies only if not present at ~/
+# if [ -f "$TMUX_CONF_SRC" ] && [ ! -f "$TMUX_CONF_DST" ]; then
+#     cp "$TMUX_CONF_SRC" "$TMUX_CONF_DST"
+# fi
+# export NVM_DIR="$HOME/.nvm"
+# [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm
+# [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
+# =====================================================================================================
 
 alias srcrc="source ~/.bashrc"
 alias vcdir="cd ~/ros2_ws/src/visual_calibration/"
@@ -24,6 +33,31 @@ alias installweb="bash ~/webpage_ws/setup_rosject.sh"
 alias initweb="source ~/webpage_ws/scripts/session_init.sh"
 alias statusweb="bash ~/webpage_ws/scripts/session_status.sh"
 
+# Standalone Jenkins lifecycle — deliberately NOT part of installweb/
+# tmuxwebstacksim. Jenkins is meant to be the thing that TRIGGERS sim/
+# trajectory/Zenoh/etc. nodes itself via pipeline stages, so it must be
+# startable on its own, independent of whether the web dashboard is ever
+# touched this session (and vice versa — the dashboard must not require
+# Jenkins to be up either). Idempotent — safe to call every session.
+alias startjenkins="bash ~/ros2_ws/src/visual_calibration/resources/jenkins/install_jenkins.sh"
+
+# Jenkins is launched via setsid (see install_jenkins.sh) specifically so
+# it survives tmux/session teardown — it will NOT stop on its own, or when
+# tmuxwebstacksim/any tmux session is killed. This is the only way to stop
+# it. Same pkill pattern used everywhere else this session (install_
+# jenkins.sh's own already-running check, stop_stale.sh) — not reinvented.
+alias killjenkins="pkill -f 'java .*jenkins\.war' && echo 'Jenkins stopped.' || echo 'No Jenkins process found.'"
+
+# Convenience only — brings up Jenkins AND the web dashboard together in
+# one command, correct order (webpage_ws/start_all.sh). startjenkins and
+# `cd webpage_ws/app && npm run start` still work independently on their
+# own any time — this doesn't replace that, it's just the "I want both,
+# right now" shortcut. Usage: startall sim   (or: startall real)
+startall() {
+    local env="${1:-sim}"
+    bash ~/webpage_ws/start_all.sh --env "$env"
+}
+
 alias startrosbridge="ros2 launch rosbridge_server rosbridge_websocket_launch.xml"
 
 # git
@@ -39,6 +73,7 @@ killsim() {
 
 customkill() {
     local key="$1"
+    shift
 
     declare -A commands=(
         [gzclient]='pkill -f "^gzclient"'
@@ -46,6 +81,8 @@ customkill() {
         [baserealtmux]='tmux kill-session -t base_real_term'
         [trajcaltmux]='tmux kill-session -t trajcal_term'
         [trajcalrealtmux]='tmux kill-session -t trajcal_real_term'
+        [yolotmux]='tmux kill-session -t yolo_term'
+        [yolorealtmux]='tmux kill-session -t yolo_real_term'
         [perceptmux]='tmux kill-session -t percep_term'
         [webstacktmux]='tmux kill-session -t webstack_term'
         [webstackrealtmux]='tmux kill-session -t webstack_real_term'
@@ -54,8 +91,22 @@ customkill() {
         [termstmux]='tmux kill-session -t terminals'
     )
 
+    # Remaining args (only meaningful with key="all") are exclude=<name>
+    # tokens, e.g. `customkill all exclude=webstacktmux exclude=debugtmux`
+    # — kills everything except the listed keys.
+    declare -A excluded=()
+    for arg in "$@"; do
+        if [[ "$arg" =~ ^exclude=([a-zA-Z0-9_]+)$ ]]; then
+            excluded["${BASH_REMATCH[1]}"]=1
+        fi
+    done
+
     if [[ "$key" == "all" ]]; then
         for target_key in "${!commands[@]}"; do
+            if [[ -n "${excluded[$target_key]:-}" ]]; then
+                echo "Skipping (excluded): $target_key"
+                continue
+            fi
             echo "Killing: $target_key"
             eval "${commands[$target_key]}"
         done
@@ -106,6 +157,19 @@ tmuxtrajcalsim() {
     bash ./sim_tmux_trajcal.sh "$@"
 }
 
+# YOLO/hybrid-detector session, sim — inference_server.py +
+# yolo_marker_bridge_node. Split out of tmuxtrajcalsim (2026-07-24,
+# matching tmuxyoloreal's earlier split) to keep that session down to 4
+# panes. Run `tmuxbasesim` first (needs move_group). Independent of
+# tmuxtrajcalsim's own panes, but calibration_orchestrator_node (started
+# by tmuxtrajcalsim) is what actually calls ~/set_detector_mode to switch
+# into hybrid — start both sessions if you intend to test that switch.
+# `tmuxyolosim inference_server=on yolo_marker_bridge=on`
+tmuxyolosim() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./sim_tmux_yolo.sh "$@"
+}
+
 # Real robot equivalent of tmuxtrajcalsim — trajectory_planner,
 # aruco_detector_node, calibration_broadcaster_node, calibration_
 # orchestrator_node. Run `tmuxbasereal` first — this session's panes poll
@@ -116,6 +180,19 @@ tmuxtrajcalsim() {
 tmuxtrajcalreal() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
     bash ./real_tmux_trajcal.sh "$@"
+}
+
+# YOLO/hybrid-detector session, real robot — inference_server.py +
+# yolo_marker_bridge_node. Split out of tmuxtrajcalreal (2026-07-23) to
+# keep that session down to 4 panes. Run `tmuxbasereal` first (needs
+# move_group). Independent of tmuxtrajcalreal's own panes, but
+# calibration_orchestrator_node (started by tmuxtrajcalreal) is what
+# actually calls ~/set_detector_mode to switch into hybrid — start both
+# sessions if you intend to test that switch.
+# `tmuxyoloreal inference_server=on yolo_marker_bridge=on`
+tmuxyoloreal() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./real_tmux_yolo.sh "$@"
 }
 
 # `tmuxwebstacksim` defaults to extracting sim's URDF; pass `real` to
@@ -520,8 +597,8 @@ completesimsetup() {
     fixscriptperms
     # installbase
     bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup.sh
-    # installweb
-    bash ~/webpage_ws/setup_rosject.sh
+    # installweb (--env required by setup_rosject.sh)
+    bash ~/webpage_ws/setup_rosject.sh --env sim
     # initweb
     source ~/webpage_ws/scripts/session_init.sh
     # statusweb
@@ -535,16 +612,16 @@ completerealsetup() {
     fixscriptperms
     # installbasereal
     bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/setup_real.sh
-    # installweb
-    bash ~/webpage_ws/setup_rosject.sh
+    # installweb (--env required by setup_rosject.sh)
+    bash ~/webpage_ws/setup_rosject.sh --env real
     # initweb
     source ~/webpage_ws/scripts/session_init.sh
     # statusweb
     bash ~/webpage_ws/scripts/session_status.sh
     # Install zehno - camera driver - done by setup_real.sh
-    # install yolo [TODO: zenoh installation asks for installation confirmation. need to pass in `-y`]
-    # sudo apt install -y python3.10-venv
-    # bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
+    # install yolo
+    sudo apt install -y python3.10-venv
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
 }
 
 webstatuscheck() {
@@ -579,5 +656,5 @@ shadcnadd() {
     cd ~/webpage_ws/app
     npx shadcn@latest add input
     npm install
-    npm run build && PORT=7000 npm run preview
+    npm run start
 }
