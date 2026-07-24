@@ -43,17 +43,51 @@ calibration_orchestrator_node:
     # auto_center_visibility_timeout_sec params above for the ACTIVE
     # centering path (kept above, unused, in case of a fallback need) — see
     # calibration_orchestrator_node.hpp's centerOnMarkerUsingImage doc
-    # comment. No camera intrinsics/depth/TF dependency at all: this is a
-    # pure empirical closed-loop pixel-distance search.
+    # comment. No camera intrinsics/depth/TF dependency at all: uncalibrated
+    # Image-Based Visual Servoing (IBVS) via an estimated 2x2 image Jacobian
+    # (2026-07-23 — replaces two earlier per-axis designs, both of which
+    # assumed arm-local X only moves the marker along image-X and arm-local
+    # Y only along image-Y; live testing showed X producing almost no
+    # image-X motion no matter the step size, the signature of a camera
+    # mounted at an angle where X's motion mostly projects onto image-Y
+    # instead — a case the old per-axis search couldn't see or use).
+    # Lowered 0.10 -> 0.05 (2026-07-23, live test) alongside
+    # trajectory_planner_sim.yaml's cartesian_min_fraction 0.95 -> 0.75 —
+    # a smaller bootstrap probe is both less likely to trip
+    # computeCartesianPath()'s completion-fraction check (shorter
+    # straight lines near cal_ready tend to complete more fully — see
+    # transient-humming-donut.md's Y-direction Cartesian fragility
+    # finding) and less likely to push a marker that's ALREADY close to
+    # centered (e.g. the live test's -0.6px Y offset) out of frame
+    # entirely with an unnecessarily large probe.
     centering_step_m: 0.05
     # An axis is considered centered once the marker's pixel centroid is
-    # within this many pixels of the image's own center along that axis.
+    # within this many pixels of the image's own center along that axis
+    # (checked on both image axes simultaneously).
     centering_pixel_tolerance: 15.0
-    # Safety bound: max step attempts per axis before giving up.
-    centering_max_iterations_per_axis: 8
+    # Minimum |pixel response| (Euclidean norm) each of the 2 bootstrap
+    # probes must produce before its Jacobian column is trusted — below
+    # this, the bootstrap fails outright rather than being retried (unlike
+    # the old design, centering_step_m is already chosen to be as large as
+    # is safe, so a weak response here means a genuinely weak signal, not
+    # a too-small step). 2026-07-23 live test: 0.05m steps only produced
+    # ~4-12px/m — see centering_step_m's comment above.
+    centering_min_jacobian_column_px_per_m: 20.0
+    # Safety bound: max total moves (2 bootstrap probes + correction
+    # jumps) before giving up. No longer "per axis" — both image axes are
+    # corrected together in each jump, so this converges in far fewer
+    # moves than the old per-axis search typically needed.
+    centering_max_iterations: 6
     # How long to wait for a fresh Detection2D (aruco_marker) after each
     # centering step before concluding the marker isn't visible there.
     centering_visibility_timeout_sec: 2.0
+    # Safety cap (meters) on any single Jacobian-computed jump — protects
+    # against a near-singular J producing a wild estimated distance.
+    # Matches auto_center_max_probe_m above in spirit/value but is a
+    # SEPARATE parameter (that one belongs to the superseded
+    # runAutoCenterProbe path) — see this field's own doc comment in
+    # calibration_orchestrator_node.hpp.
+    centering_max_jump_m: 0.15
     # Read ONCE at startup purely to learn the image's own pixel
     # width/height (for the image's center point) — must match
     # aruco_detector_sim.yaml's camera_info_topic.

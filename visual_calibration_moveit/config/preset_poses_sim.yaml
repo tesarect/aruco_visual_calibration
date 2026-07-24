@@ -1,20 +1,25 @@
 # Named fallback poses for trajectory_planner, used when a deterministic
 # pose can't be computed via TF (see ~/get_standoff_pose and todo.txt item
 # 1). Sim always has a live camera_frame TF (the wrist-mounted camera is
-# in the URDF), so `standoff`/`cal_ready` should never actually need a
-# preset here — sim resolves those live via TF, real falls back to the
-# matching preset entries in preset_poses_real.yaml (same pose, see that
-# file's comment on standoff == cal_ready).
+# in the URDF) — ~/get_standoff_pose itself still resolves standoff live
+# via TF, unchanged. `cal_ready` below is a JOINT-VALUE preset, not a
+# fallback for a missing TF — see its own comment for why sim needs one
+# despite having live TF.
 #
-# `home` and `standby` ARE real presets here (not TF-derived — nothing
-# computes them from a live TF the way standoff is), used by
+# `home` and `standby` ARE real Cartesian presets here (not TF-derived —
+# nothing computes them from a live TF the way standoff is), used by
 # move_to_home_on_startup (trajectory_planner_sim.yaml) and the
 # state-sequence idle-to-standby behavior (todo.txt) respectively.
 #
-# Each preset is a Cartesian pose (position + quaternion) for
+# Each preset is EITHER a Cartesian pose (position + quaternion) for
 # end_effector_frame (rg2_gripper_aruco_link), expressed in the planning
-# frame (base_link) — the same convention ~/trace_path already uses.
-# Recorded via pose_capture.py record (see resources/scripts/python/).
+# frame (base_link) — the same convention ~/trace_path already uses — OR a
+# joint_values 6-element array (radians, in ur_manipulator's own joint
+# order: shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3 —
+# see PresetPoses.hpp/TrajectoryPlanner::planAndExecute(joint_values)).
+# Cartesian presets recorded via pose_capture.py record; joint_values
+# recorded via `ros2 topic echo /joint_states --once` at the desired pose
+# (see resources/scripts/python/).
 #
 # `home` below is sim's arm spawn pose (base_link -> rg2_gripper_aruco_link,
 # the as-launched pose before any motion) — recorded here as a preset
@@ -24,14 +29,35 @@
 # Loaded into trajectory_planner's own parameter namespace (not a
 # separate node) — this file is passed as a second `parameters` entry
 # alongside trajectory_planner_sim.yaml in trajectory_planner.launch.py,
-# and PresetPoses reads preset_names/<name>.position/<name>.orientation
-# directly off the trajectory_planner node.
+# and PresetPoses reads preset_names/<name>.position+<name>.orientation OR
+# <name>.joint_values directly off the trajectory_planner node.
 trajectory_planner:
   ros__parameters:
-    preset_names: ["home", "standby"]
+    preset_names: ["home", "standby", "baristastandby", "cal_ready"]
 
     home.position: [-0.0245, 0.2882, 0.6940]
     home.orientation: [-0.4998, -0.4994, 0.5002, 0.5006]  # x, y, z, w
 
     standby.position: [-0.0628, 0.1691, 0.4499]
     standby.orientation: [-0.5478, -0.4234, 0.2069, 0.6913]  # x, y, z, w
+
+    baristastandby.position: [-0.3173, 0.1160, 0.0788]
+    baristastandby.orientation: [0.4722, 0.4724, -0.5260, 0.5265]  # x, y, z, w
+
+    # cal_ready: JOINT-VALUE preset, not a Cartesian pose — see
+    # PresetPoses.hpp's doc comment for the general reasoning (multiple
+    # valid IK solutions for one Cartesian target). Captured 2026-07-20
+    # after reaching cal_ready via HOME -> STANDBY -> CAL_READY (not a
+    # direct/web move), confirmed to let the full calibration polygon
+    # sweep succeed (startcalibration: success=true, max_spread_deg=5.48,
+    # mean_spread_deg=3.06) — contrast with the joint config a direct
+    # move landed on, which consistently failed the first polygon corner's
+    # Cartesian interpolation at ~80-83% (wrist_1 ~21° from its -180°
+    # limit, vs ~29° margin here; shoulder_pan/elbow/wrist_2/wrist_3 also
+    # differ by 75-250° between the two — a different IK branch entirely,
+    # not just a wrist_1 difference). Cartesian pose is nearly identical
+    # either way: xyz=(-0.2385, -0.1750, -0.0165), quat=(0.183, 0.183,
+    # -0.683, 0.683) — same target, this is specifically about WHICH
+    # joint solution reaches it. Order: shoulder_pan, shoulder_lift,
+    # elbow, wrist_1, wrist_2, wrist_3 (radians).
+    cal_ready.joint_values: [0.6881009356967525, -2.4599516753234996, -1.9216917801289215, -2.6385664938113775, -2.303517848140819, -2.1173240033550247]

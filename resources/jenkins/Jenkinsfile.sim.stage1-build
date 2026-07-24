@@ -1,0 +1,58 @@
+// Sim pipeline — Stage 1 (Build) ONLY, for incremental verification.
+// Paste this into Jenkins: New Item -> Pipeline -> Pipeline section ->
+// Definition: "Pipeline script" (not "from SCM" yet — see project notes)
+// -> paste this whole file into the Script box -> Save.
+//
+// Parameterized: the FIRST build after saving runs with no parameter form
+// shown yet (Jenkins needs one successful load of the script to discover
+// the `parameters {}` block) — just click "Build Now" once, then every
+// build AFTER that shows a "Build with Parameters" dropdown instead.
+//
+// BUILD_MODE choice:
+//   dev    (default) — incremental --symlink-install build, fast re-runs,
+//          for iterating on the pipeline itself. Matches vcbuildsymlink.
+//   deploy — wipes build/install for the package list first, then builds
+//          clean. Matches vccleanbuildsymlink. Use for actual "fresh,
+//          verified, presentation-ready" runs, not everyday iteration.
+//
+// Once this stage is confirmed working live, the next stage (Base/sim)
+// gets appended here and re-pasted — deliberately NOT writing the whole
+// multi-stage pipeline at once (matches this project's "verify one step
+// before adding the next" convention).
+pipeline {
+    agent any
+
+    options {
+        // Keep the last N builds' archived logs instead of accumulating
+        // forever on a rosject with limited/non-persistent disk.
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    parameters {
+        choice(
+            name: 'BUILD_MODE',
+            choices: ['dev', 'deploy'],
+            description: 'dev = incremental --symlink-install (fast, iterate on pipeline). deploy = clean build (fresh, for a real staged run).'
+        )
+    }
+
+    stages {
+        stage('Build') {
+            steps {
+                // BUILD_MODE (a Jenkins pipeline parameter) is exposed as
+                // a plain env var automatically — stage_build.sh reads it
+                // directly, no extra wiring needed here.
+                sh 'bash $HOME/ros2_ws/src/visual_calibration/resources/jenkins/scripts/stage_build.sh'
+            }
+        }
+    }
+
+    post {
+        always {
+            // stage_build.sh writes to $WORKSPACE/logs/ (see
+            // pipeline_common.sh) — archive it so the log survives even
+            // after the workspace itself is wiped/reused by a later build.
+            archiveArtifacts artifacts: 'logs/**', allowEmptyArchive: true
+        }
+    }
+}

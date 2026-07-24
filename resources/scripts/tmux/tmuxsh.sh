@@ -13,6 +13,10 @@ fi
 
 tmux new-session -d -s "$SESSION" -n "$WINDOW"
 
+# Keep crashed panes visible (pane_dead=1, exit status shown) instead of
+# vanishing, so node_dashboard.py can distinguish "crashed" from "never existed".
+tmux set-option -t "$SESSION" remain-on-exit on
+
 # Pane 0 — visual_calibration repo
 PANE0=$(tmux list-panes -t "$SESSION:$WINDOW" -F "#{pane_id}")
 tmux send-keys -t "$PANE0" "cd ~/ros2_ws/src/visual_calibration" C-m

@@ -1,6 +1,8 @@
 #ifndef ORCHESTRATOR__CALIBRATION_ORCHESTRATOR_NODE_HPP_
 #define ORCHESTRATOR__CALIBRATION_ORCHESTRATOR_NODE_HPP_
 
+#include <chrono>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -8,6 +10,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <std_msgs/msg/string.hpp>
 #include <std_srvs/srv/trigger.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/pose_stamped.hpp>
@@ -16,6 +19,7 @@
 #include <visual_calibration_msgs/action/calibrate.hpp>
 #include <visual_calibration_msgs/msg/auto_calibrate_status.hpp>
 #include <visual_calibration_msgs/msg/detection2_d_array.hpp>
+#include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
 #include <visual_calibration_msgs/srv/get_standoff_pose.hpp>
 #include <visual_calibration_msgs/srv/move_to_preset.hpp>
 #include <visual_calibration_msgs/srv/set_detector_mode.hpp>
@@ -78,21 +82,75 @@ struct OrchestratorConfig
   // centering path (kept, along with runAutoCenterProbe/
   // probeDirectionVisible themselves, unreferenced rather than deleted,
   // in case this new approach needs a fallback later).
-  /// Same-size step (meters) used per iteration of the empirical
-  /// closed-loop pixel-distance search (see centerOnMarkerUsingImage) —
-  /// same default as the old auto_center_probe_step_m.
-  double centering_step_m = 0.05;
+  //
+  // Algorithm (2026-07-23, replaces two earlier attempts — a per-axis
+  // repeated-halving search, then a per-axis calibrate-then-jump search —
+  // both of which assumed arm-local X only moves the marker along
+  // image-X and arm-local Y only moves it along image-Y, i.e. a diagonal
+  // mapping. Live testing showed arm-local X producing only 1-6px/m of
+  // image-X motion no matter how large the probe step, which is the
+  // signature of a camera mounted at an angle relative to the arm's
+  // motion plane: X's motion was likely projecting mostly onto image-Y
+  // instead, which the old per-axis design had no way to see or use,
+  // since it only ever measured the one image axis it was currently
+  // searching): uncalibrated Image-Based Visual Servoing (IBVS) via an
+  // estimated 2x2 image Jacobian J (interaction matrix), the standard
+  // technique from the "uncalibrated"/"calibration-free" visual servoing
+  // literature (Jägersand 1996/97, Hosoda & Asada 1994) for regulating a
+  // visual feature to a target via 2D pixel feedback alone, with no
+  // camera intrinsics/depth/known camera-robot transform. Bootstrapped
+  // from 2 linearly-independent probes (pure local +X, then pure local
+  // +Y), each measuring the FULL 2D pixel response (not just one axis),
+  // giving J's two columns directly (Δs/step per probe — no matrix
+  // inversion needed to BUILD J, since the probes are already axis
+  // aligned in arm-space). Centering itself then solves
+  // Δq = J⁻¹·(target - current) for a direct one-shot jump, refining J
+  // via a Broyden update (the standard secant-method generalization used
+  // throughout this literature) from each subsequent move's actual
+  // measured effect if not yet converged. See centerOnMarkerUsingImage.
+  /// Size (meters) of each of the 2 fixed bootstrap probes used to
+  /// estimate the image Jacobian — must be big enough to move the marker
+  /// a clearly measurable number of pixels on-screen, or the estimated
+  /// Jacobian is indistinguishable from detector noise (2026-07-23 —
+  /// found live: 0.05m only produced ~4-12px/m at this cell's camera
+  /// geometry). Bumped 0.05 -> 0.10 for a stronger default signal;
+  /// centering_min_jacobian_column_px_per_m's conditioning check handles
+  /// the remaining risk of this still being too small for some other
+  /// camera geometry.
+  double centering_step_m = 0.10;
   /// An axis is considered centered once the marker's pixel centroid is
-  /// within this many pixels of the image's own center along that axis.
+  /// within this many pixels of the image's own center along that axis
+  /// (checked on BOTH image axes simultaneously, not sequentially).
   double centering_pixel_tolerance = 15.0;
-  /// Safety bound: max step attempts per axis (X, then Y) before giving up
-  /// on the whole centering attempt as a failure.
-  int centering_max_iterations_per_axis = 8;
+  /// Minimum |pixel response| (Euclidean norm of a probe's measured Δs)
+  /// each bootstrap probe must show before its Jacobian column is
+  /// trusted — below this, that probe's signal is noise-dominated and
+  /// the whole bootstrap is treated as a failure (unlike the old per-axis
+  /// design's escalate-and-retry, a degenerate bootstrap here is surfaced
+  /// directly rather than retried with a bigger step, since
+  /// centering_step_m is already chosen to be as large as is safe/sane —
+  /// see that field's own doc comment). Deliberately conservative — real
+  /// low-light/lower-resolution detection may be noisier than sim.
+  double centering_min_jacobian_column_px_per_m = 20.0;
+  /// Safety bound: max total moves (2 bootstrap probes + correction
+  /// jumps) before giving up on the whole centering attempt as a
+  /// failure. No longer "per axis" — both image axes are corrected
+  /// together in each jump.
+  int centering_max_iterations = 6;
   /// How long to wait for a fresh Detection2D (aruco_marker) after each
   /// centering step before concluding the marker isn't visible there —
   /// same role/timescale as auto_center_visibility_timeout_sec, reused
   /// under its own name since this is a distinct feature now.
   double centering_visibility_timeout_sec = 2.0;
+  /// Safety cap (meters) on any single Jacobian-computed jump — protects
+  /// against a near-singular J (e.g. from real-world nonlinearity after
+  /// a Broyden update) producing a wild estimated distance. Deliberately
+  /// a SEPARATE parameter from auto_center_max_probe_m (that one belongs
+  /// to the superseded runAutoCenterProbe path, kept only as an unused
+  /// fallback reference — see that field's own doc comment) rather than
+  /// reusing it, since the two features' safe-distance tuning is not
+  /// guaranteed to match.
+  double centering_max_jump_m = 0.15;
   /// CameraInfo topic this node reads ONCE (at first receipt) purely to
   /// learn the image's own pixel width/height (for computing the image's
   /// center point) — no camera intrinsics/depth/TF dependency here at all,
@@ -138,7 +196,7 @@ struct OrchestratorConfig
 /// aruco_perception's ArucoDetectorNode nor aruco_perception_yolo_bridge's
 /// YoloMarkerBridgeNode know this orchestration exists, same philosophy as
 /// the rest of this class: this node just flips one node's "active"
-/// parameter true and the other's false via two rclcpp::SyncParametersClient
+/// parameter true and the other's false via two rclcpp::AsyncParametersClient
 /// instances (one per detector node) and the standard ROS set_parameters
 /// service — no lifecycle nodes, no process start/stop, both detector
 /// nodes stay running/subscribed the whole time. See handleSetDetectorMode.
@@ -159,6 +217,16 @@ private:
   /// for calibration sampling (calibration_broadcaster_node subscribes to
   /// the same topic independently for that).
   void markerPoseCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr & msg);
+
+  /// Clears pending_manual_adjustment_ whenever trajectory_planner reports
+  /// (via /trajectory_planner/current_pose_name) that the arm moved to ANY
+  /// named preset pose (2026-07-24) — e.g. the user pressing "Home" or
+  /// "Standby" instead of fine-tuning further is treated as abandoning
+  /// that in-progress adjustment. Does NOT itself trigger on "cal_ready"
+  /// specifically vs. any other name — any transition on this topic means
+  /// the arm is now at a well-known preset, not a manually fine-tuned
+  /// pose, so the flag is cleared unconditionally on every message.
+  void currentPoseNameCallback(const std_msgs::msg::String::ConstSharedPtr & msg);
 
   /// Handles ~/start_auto_calibrate (std_srvs/Trigger) — a rosbridge-
   /// reachable facade in front of ~/auto_calibrate, for clients that can't
@@ -198,7 +266,7 @@ private:
   /// Handles ~/set_detector_mode. request.mode must be "classical" or
   /// "hybrid" (anything else is rejected with success=false, response.mode
   /// left unset — a validation failure, not a node-unreachable failure).
-  /// Sets active=true on the target node's SyncParametersClient FIRST,
+  /// Sets active=true on the target node's AsyncParametersClient FIRST,
   /// THEN active=false on the other — briefly both-active rather than
   /// briefly neither-active, since a duplicate marker_pose publish for one
   /// frame is harmless (calibration_broadcaster_node just sees an extra
@@ -268,6 +336,24 @@ private:
   /// path got the arm there), or std::nullopt on failure (logs the reason).
   std::optional<geometry_msgs::msg::Pose> moveToCalReady();
 
+  /// Read-only "what is the arm's current Cartesian pose right now" query
+  /// (2026-07-24) — used by executeAutoCalibrate when goal->skip_cal_ready
+  /// is true, to get a pose to hand to centerOnMarkerUsingImage/
+  /// runCalibrate without moving the arm anywhere first (e.g. after a user
+  /// manually fine-tuned position/orientation via the web app's control
+  /// drawer, then hit "Calibrate from current pose" instead of the normal
+  /// "Calibrate", which always returns to cal_ready first). Calls
+  /// trajectory_planner's ~/get_polygon_waypoints and uses ONLY its
+  /// response's center_pose field — the waypoints themselves are
+  /// discarded. Reuses this service specifically because its center_pose
+  /// is already a proven-safe current-pose read (TF lookup of
+  /// end_effector_frame, not MoveGroupInterface::getCurrentState() —  see
+  /// TrajectoryPlanner::polygonWaypointsAroundStandoff's 2026-07-22 fix
+  /// for a callback-group deadlock that approach used to hit), rather than
+  /// adding a new dedicated service/TF buffer to this node for the same
+  /// read. Returns std::nullopt on failure (logs the reason).
+  std::optional<geometry_msgs::msg::Pose> getCurrentArmPose();
+
   /// Returns true if a marker_pose message was received within
   /// config_.auto_center_visibility_timeout_sec of `after`.
   bool isMarkerVisibleAfter(const rclcpp::Time & after);
@@ -315,46 +401,72 @@ private:
     const geometry_msgs::msg::Pose & center_pose,
     double x_axis, double y_axis, double distance_m);
 
-  /// Stage 3 (2026-07-23, replaces runAutoCenterProbe): empirical
-  /// closed-loop pixel-distance search — NO camera intrinsics, NO depth,
-  /// NO TF lookup to the camera frame at all (the pinhole-projection
-  /// design this replaced would have needed a TF lookup to the camera's
-  /// optical frame to rotate a computed offset into the arm's local
-  /// plane, but that TF doesn't exist on real — see class doc comment).
-  /// Instead: reads the marker's live pixel centroid (latestMarkerPixel())
-  /// and the image's own pixel center (image_width_/image_height_,
-  /// learned once from CameraInfo), and for X then Y in turn: steps
-  /// config_.centering_step_m in an arbitrary local-frame direction via
-  /// tracePathBlocking(), remeasures the axis's pixel offset, and either
-  /// continues the same direction (if the offset got smaller) or reverses
-  /// past the starting point (if it got worse, including the marker
-  /// becoming invisible) — repeating until within
-  /// config_.centering_pixel_tolerance or
-  /// config_.centering_max_iterations_per_axis is exceeded (a failure).
-  /// Same "move to X-center before starting Y" sequencing as
-  /// runAutoCenterProbe, for the same reason (Y's search should reflect
-  /// the already-X-corrected position). On success, stores the result in
-  /// session_centered_cal_ready_pose_ same as the old method did. Sets/
-  /// clears show_centering_crosshair on aruco_detector_node (via
-  /// SyncParametersClient, same mechanism as handleSetDetectorMode) for
-  /// the duration of the search.
+  /// Stage 3 (2026-07-23, replaces runAutoCenterProbe, and replaces an
+  /// interim per-axis calibrate-then-jump design that assumed a diagonal
+  /// arm-to-image mapping — see OrchestratorConfig's "Image-based
+  /// centering" doc comment for the full algorithm background and why
+  /// that assumption broke live testing): uncalibrated IBVS via an
+  /// estimated 2x2 image Jacobian. NO camera intrinsics, NO depth, NO TF
+  /// lookup to the camera frame at all (the pinhole-projection design
+  /// this replaced would have needed a TF lookup to the camera's optical
+  /// frame to rotate a computed offset into the arm's local plane, but
+  /// that TF doesn't exist on real — see class doc comment).
+  ///
+  /// 1. Measure the starting pixel offset s0 = (u,v) - image_center via
+  ///    latestMarkerPixelAfter()/image_width_/image_height_.
+  /// 2. Bootstrap: probe +config_.centering_step_m in local X, then
+  ///    (from that new pose) +config_.centering_step_m in local Y, via
+  ///    stepAndMeasurePixelOffset() — each measures the FULL 2D pixel
+  ///    response, not just one axis. The two measured (Δu,Δv)/step pairs
+  ///    are directly the two columns of the image Jacobian J (no matrix
+  ///    inversion needed to build it, since the probes are axis-aligned
+  ///    in arm-space). If either probe fails (plan/execute error or
+  ///    marker invisible) or its pixel response is too weak
+  ///    (config_.centering_min_jacobian_column_px_per_m), the bootstrap
+  ///    fails outright — see jacobianConditionOk().
+  /// 3. Solve Δq = J⁻¹·(target - current) (closed-form 2x2 inverse, see
+  ///    invert2x2()) for a single corrective jump, clamped to
+  ///    config_.centering_max_jump_m, and execute it.
+  /// 4. Remeasure. If within config_.centering_pixel_tolerance on BOTH
+  ///    image axes simultaneously, done. Otherwise refine J with a
+  ///    Broyden update (secant-method generalization to 2D — standard in
+  ///    the uncalibrated visual servoing literature) from this move's
+  ///    actual (Δq, Δs), and repeat from step 3 — bounded by
+  ///    config_.centering_max_iterations total (bootstrap + corrections).
+  ///
+  /// On success, stores the result in session_centered_cal_ready_pose_
+  /// same as the old method did. Sets/clears show_centering_crosshair on
+  /// aruco_detector_node (via AsyncParametersClient, same mechanism as
+  /// handleSetDetectorMode) for the duration of the search.
+  ///
+  /// On failure, out_user_message is set to a short, USER-FACING
+  /// suggestion (2026-07-23 — e.g. "couldn't detect the marker
+  /// reliably... try improving lighting, moving the camera/marker
+  /// closer, or switching to hybrid detection mode") suitable for direct
+  /// display in the web app, distinct from the detailed RCLCPP_ERROR
+  /// logs above (which stay developer-facing/technical). Left unset
+  /// (untouched) on success. Categorizes every internal nullopt-return
+  /// site into one of three user-relevant buckets: marker never visible
+  /// to begin with, bootstrap couldn't get a reliable signal, or a
+  /// corrective move failed/lost the marker mid-search — all three are
+  /// plausibly fixed by the same handful of user actions, so one shared
+  /// message covers them; only the max-iterations-without-converging
+  /// case gets a distinct message (that one isn't a detection problem).
   std::optional<geometry_msgs::msg::Pose> centerOnMarkerUsingImage(
-    const geometry_msgs::msg::Pose & center_pose);
+    const geometry_msgs::msg::Pose & center_pose, std::string & out_user_message);
 
-  /// One step-and-remeasure iteration along a single axis (X xor Y, never
-  /// both) from current_pose: moves step_m in the given local-frame
-  /// direction (a VARIABLE distance, not always config_.centering_step_m —
-  /// see centerOnMarkerUsingImage's ratio-based step-size estimation),
-  /// waits for a fresh Detection2D, and returns the new pixel offset along
-  /// that axis (positive/negative per image pixel convention) if the
-  /// marker was visible afterward, or std::nullopt if the move failed
-  /// outright OR the marker wasn't visible (both treated as "this
-  /// direction made things worse" by the caller). Does not decide
-  /// direction itself — centerOnMarkerUsingImage compares this against the
-  /// previous offset to decide whether to continue or reverse.
-  std::optional<double> stepAndMeasureAxisOffset(
-    const geometry_msgs::msg::Pose & current_pose,
-    double x_axis, double y_axis, bool is_x_axis, double step_m);
+  /// One step-and-remeasure move: offsets current_pose by
+  /// (dx_m, dy_m) in its own local X/Y plane (see offsetInLocalPlane),
+  /// waits for a fresh Detection2D, and returns the FULL 2D pixel offset
+  /// from image center (Δu, Δv) — both axes, regardless of which arm
+  /// axis moved — if the marker was visible afterward, or std::nullopt if
+  /// the move failed outright OR the marker wasn't visible. Deliberately
+  /// returns both axes (2026-07-23 — the old stepAndMeasureAxisOffset
+  /// returned only the searched axis, discarding the other axis's
+  /// incidental movement, which is exactly the data centerOnMarkerUsingImage's
+  /// Jacobian estimate needs to see cross-axis coupling).
+  std::optional<std::pair<double, double>> stepAndMeasurePixelOffset(
+    const geometry_msgs::msg::Pose & current_pose, double dx_m, double dy_m);
 
   /// Returns the most recent aruco_marker Detection2D's (cx, cy) if one
   /// was received after `after`, else std::nullopt — polls rather than
@@ -399,10 +511,16 @@ private:
   OrchestratorConfig config_;
 
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr marker_pose_sub_;
+  /// See currentPoseNameCallback — clears pending_manual_adjustment_ on
+  /// any preset-pose transition trajectory_planner reports.
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr current_pose_name_sub_;
   /// See detections2dCallback — feeds centerOnMarkerUsingImage's pixel
-  /// measurements. Classical detector only for now (2026-07-23) — see
-  /// class doc comment; extend to yolo_marker_bridge_node.py's own
-  /// detections_2d publish when that pipeline gains aruco_marker support.
+  /// measurements. Works with EITHER detector as of 2026-07-23 —
+  /// yolo_marker_bridge_node.py now also publishes an "aruco_marker"
+  /// Detection2D entry (previously only aruco_detector_node did, which
+  /// silently made image-based centering fail/time out whenever hybrid
+  /// mode was active — closed by adding the matching publish to
+  /// yolo_marker_bridge_node.py's publish_detections_2d).
   rclcpp::Subscription<visual_calibration_msgs::msg::Detection2DArray>::SharedPtr
     detections_2d_sub_;
   /// See cameraInfoCallback — read once, purely for image_width_/
@@ -420,16 +538,66 @@ private:
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr cancel_auto_calibrate_service_;
   /// See handleSetDetectorMode. Lazily constructed on first use (inside
   /// getClassicalDetectorParamClient/getHybridDetectorParamClient), NOT in
-  /// this node's own constructor — rclcpp::SyncParametersClient's
-  /// constructor requires a std::shared_ptr<Node>, obtained here via
-  /// shared_from_this(), which throws if called before this node object is
-  /// itself already wrapped in a shared_ptr by whoever created it (true by
-  /// the time any service callback runs, NOT true during this node's own
-  /// constructor body).
-  rclcpp::SyncParametersClient::SharedPtr classical_detector_param_client_;
-  rclcpp::SyncParametersClient::SharedPtr hybrid_detector_param_client_;
-  rclcpp::SyncParametersClient::SharedPtr getClassicalDetectorParamClient();
-  rclcpp::SyncParametersClient::SharedPtr getHybridDetectorParamClient();
+  /// this node's own constructor — construction requires a
+  /// std::shared_ptr<Node>, obtained here via shared_from_this(), which
+  /// throws if called before this node object is itself already wrapped
+  /// in a shared_ptr by whoever created it (true by the time any service
+  /// callback runs, NOT true during this node's own constructor body).
+  ///
+  /// Deliberately rclcpp::AsyncParametersClient, NOT SyncParametersClient
+  /// (2026-07-23 — was SyncParametersClient originally). SyncParametersClient's
+  /// blocking calls (set_parameters/set_parameters_atomically) internally
+  /// call rclcpp::executors::spin_node_until_future_complete(), which
+  /// unconditionally does executor.add_node(this)/remove_node(this) around
+  /// the wait — see that function's own "does not work recursively; can't
+  /// call spin_node_until_future_complete inside a callback executed by an
+  /// executor" comment in rclcpp's executors.hpp. Since this node's own
+  /// callbacks (e.g. centerOnMarkerUsingImage, called from the
+  /// ~/auto_calibrate goal callback) are exactly that — already running
+  /// inside a callback this node's own executor is spinning — that
+  /// add_node() always throws "Node has already been added to an
+  /// executor." Passing our own executor into SyncParametersClient's
+  /// executor-taking constructor (an earlier attempted fix, same day)
+  /// does NOT help — spin_node_until_future_complete() still calls
+  /// add_node() on whichever executor it's given, unconditionally, so the
+  /// crash reproduced identically even after that change. Using
+  /// AsyncParametersClient + waitForParametersFuture()'s manual
+  /// future-polling instead sidesteps this class of bug completely: no
+  /// executor spin is ever invoked from within our own callback — the
+  /// response is serviced by another MultiThreadedExecutor worker thread
+  /// while we just poll the std::shared_future.
+  rclcpp::AsyncParametersClient::SharedPtr classical_detector_param_client_;
+  rclcpp::AsyncParametersClient::SharedPtr hybrid_detector_param_client_;
+  rclcpp::AsyncParametersClient::SharedPtr getClassicalDetectorParamClient();
+  rclcpp::AsyncParametersClient::SharedPtr getHybridDetectorParamClient();
+
+  /// Polls (does NOT spin any executor) a parameters-client future until
+  /// it's ready or timeout_sec elapses. Safe to call from within a
+  /// callback this node's own executor is already spinning — see the
+  /// doc comment above classical_detector_param_client_ for why the
+  /// SyncParametersClient equivalent is NOT safe here. Returns nullopt on
+  /// timeout.
+  template<typename ResultT>
+  std::optional<ResultT> waitForParametersFuture(
+    std::shared_future<ResultT> future, double timeout_sec)
+  {
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::duration<double>(timeout_sec);
+    while (std::chrono::steady_clock::now() < deadline) {
+      if (future.wait_for(std::chrono::milliseconds(20)) == std::future_status::ready) {
+        return future.get();
+      }
+    }
+    return std::nullopt;
+  }
+  /// Dedicated callback group for set_detector_mode_service_ (2026-07-24)
+  /// — see that service's construction site in the constructor for why:
+  /// handleSetDetectorMode blocks waiting for AsyncParametersClient
+  /// responses, which under this node's shared default callback group
+  /// (used everywhere else — no other explicit groups exist) deadlocked
+  /// against itself, since the same group also needs to process those
+  /// incoming responses.
+  rclcpp::CallbackGroup::SharedPtr set_detector_mode_callback_group_;
   rclcpp::Service<visual_calibration_msgs::srv::SetDetectorMode>::SharedPtr
     set_detector_mode_service_;
   /// The in-flight goal from the most recent ~/start_auto_calibrate call,
@@ -454,6 +622,16 @@ private:
     get_standoff_pose_client_;
   rclcpp::Client<visual_calibration_msgs::srv::TracePath>::SharedPtr trace_path_client_;
   rclcpp::Client<visual_calibration_msgs::srv::MoveToPreset>::SharedPtr move_to_preset_client_;
+  /// Reused for its response's center_pose field only (2026-07-24) — a
+  /// read-only "what is the arm's current Cartesian pose right now" query
+  /// (see TrajectoryPlanner::polygonWaypointsAroundStandoff's TF-based
+  /// implementation, fixed 2026-07-22 to avoid a MoveGroupInterface
+  /// callback-group deadlock — this reuses that already-proven-safe
+  /// mechanism rather than adding a new service/TF buffer to this node).
+  /// The returned waypoints themselves are discarded — see
+  /// getCurrentArmPose().
+  rclcpp::Client<visual_calibration_msgs::srv::GetPolygonWaypoints>::SharedPtr
+    get_polygon_waypoints_client_;
   /// The most recent auto-centered pose (set by runAutoCenterProbe on
   /// success), if any — treated as this session's effective cal_ready
   /// until the arm is moved elsewhere or a fresh ~/auto_calibrate run
@@ -464,6 +642,24 @@ private:
   /// session reuses the corrected center rather than drifting back to the
   /// original (possibly off-marker-center) cal_ready pose.
   std::optional<geometry_msgs::msg::Pose> session_centered_cal_ready_pose_;
+
+  /// True once a ~/auto_calibrate run's auto-centering stage has failed
+  /// (2026-07-24) — the user was shown a message suggesting they fine-tune
+  /// the pose via the web app's control drawer (see
+  /// centerOnMarkerUsingImage's kDetectionTroubleMessage/etc.) and is
+  /// expected to press the SAME Calibrate button again afterward. While
+  /// this is true, executeAutoCalibrate's Stage 1 calibrates from the
+  /// arm's CURRENT pose (via getCurrentArmPose()) instead of returning to
+  /// cal_ready first — a single button that behaves automatically based
+  /// on this internal state, rather than a separate button/goal field.
+  /// Cleared: (a) once a ~/auto_calibrate run reaches Stage 4 (calibrate),
+  /// success or failure — see executeAutoCalibrate; (b) whenever
+  /// trajectory_planner reports (via ~/current_pose_name,
+  /// currentPoseNameCallback) that the arm moved to ANY named preset pose
+  /// — the user choosing a different preset button is treated as
+  /// abandoning whatever manual fine-tune was in progress. In-memory
+  /// only, lost on node restart, same as session_centered_cal_ready_pose_.
+  bool pending_manual_adjustment_ = false;
 
   /// Guards latest_marker_pose_stamp_, notified by markerPoseCallback and
   /// read by isMarkerVisibleAfter. Deliberately separate from

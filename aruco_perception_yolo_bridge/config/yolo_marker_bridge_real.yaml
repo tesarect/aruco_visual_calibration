@@ -1,0 +1,43 @@
+# Real robot topics (D415 over Zenoh -- see CLAUDE.md's Real Robot Camera
+# Setup section and aruco_perception/config/aruco_detector_real.yaml,
+# which this mirrors). pose_topic is intentionally identical to the
+# classical detector's -- this node is meant to be a drop-in swap, never a
+# parallel publisher. detections_2d_topic (cup_holder/hole, requested by
+# depth-perception) has no classical-detector equivalent to mirror -- it's
+# new with this node.
+yolo_marker_bridge_node:
+  ros__parameters:
+    image_topic: "/D415/color/image_raw"
+    camera_info_topic: "/D415/color/camera_info"
+    pose_topic: "/aruco_perception/marker_pose"
+    detections_2d_topic: "/aruco_perception/detections_2d"
+
+    # classical/hybrid switch: false = classical aruco_detector_node is the
+    # active marker-pose publisher on startup. Only gates the aruco_marker
+    # publish -- cup_holder/hole detections_2d always publish regardless.
+    # Flipped live by calibration_orchestrator_node via set_parameters, no
+    # restart needed — see yolo_marker_bridge_node.py's class doc comment.
+    active: false
+
+    # Assumes the YOLO inference server (YOLO-pipeline/inference_server.py)
+    # is running inside ~/yolo_venv on the same rosject machine as this
+    # node. Per the locked HTTP-server architecture, this is
+    # localhost-only, never a remote URL.
+    inference_server_url: "http://127.0.0.1:8600/detect"
+    # Bumped 1.0 -> 3.0 (2026-07-24, live real testing) — 1.0s was too
+    # tight for JPEG-encode + HTTP round-trip + a full YOLO forward pass
+    # on this rosject's hardware, hit on essentially every frame
+    # ("Read timed out (read timeout=1.0)"). PLACEHOLDER — may still need
+    # further tuning once actual per-frame inference latency is measured
+    # directly on this machine.
+    request_timeout_sec: 3.0
+    confidence_threshold: 0.25
+    jpeg_quality: 90
+
+    # Overlay -- same param names/defaults as aruco_detector_real.yaml's
+    # classical overlay, so /aruco_perception/overlay_image looks identical
+    # regardless of which detector produced it.
+    publish_overlay_image: true
+    overlay_image_topic: "/aruco_perception/overlay_image"
+    overlay_border_color_bgr: [0, 255, 255]
+    marker_length_m: 0.045

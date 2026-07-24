@@ -1,0 +1,18 @@
+# Switches which detector actively publishes geometry_msgs/PoseStamped on
+# /aruco_perception/marker_pose — classical (aruco_perception's
+# ArucoDetectorNode) or hybrid (aruco_perception_yolo_bridge's
+# YoloMarkerBridgeNode). Handled by calibration_orchestrator_node's
+# ~/set_detector_mode, which flips exactly one of the two nodes' "active"
+# bool parameter true (and the other false) via the standard ROS
+# set_parameters service — no lifecycle nodes, no process start/stop, both
+# nodes stay running/subscribed the whole time. yolo_marker_bridge_node
+# also keeps publishing cup_holder/hole detections_2d continuously
+# regardless of this switch (depth-perception needs that stream either way)
+# — this only ever affects the aruco_marker pose publish.
+#
+# mode: "classical" or "hybrid" — not a bool, so a third mode is never a
+# breaking change to this service's shape, only a new accepted string value.
+string mode
+---
+bool success
+string message

@@ -41,9 +41,33 @@ def generate_launch_description():
     # trajectory_execution.yaml's content (allowed_execution_duration_scaling)
     # is instead applied below via SetParameter, alongside use_sim_time —
     # see that comment for why.
+    # .planning_pipelines(pipelines=["ompl"], load_all=False) restricts
+    # move_group's PlanningPipeline dispatch to OMPL only — necessary but
+    # NOT sufficient to keep CHOMP out of the process; see the
+    # `capabilities` SetParameter below and
+    # real_ur3e_moveit_config/launch/move_group.launch.py's matching
+    # comment for the full investigation.
+    #
+    # DO NOT add "chomp" or "pilz_industrial_motion_planner" here — neither
+    # is configured (no chomp_planning.yaml / pilz planning yaml in this
+    # package; only pilz_cartesian_limits.yaml exists, which isn't the same
+    # thing) or tested against this project's planning group. Only "ompl"
+    # is verified — see trajectory_planner_sim.yaml's planning_pipeline_id
+    # comment.
+    #
+    # .pilz_cartesian_limits(file_path=...) must ALSO be called explicitly
+    # once .planning_pipelines() is called explicitly — see
+    # real_ur3e_moveit_config/launch/move_group.launch.py's matching
+    # comment for why (to_dict() unconditionally reads
+    # self.pilz_cartesian_limits["robot_description_planning"] with no
+    # None-check; omitting this crashed move_group startup with KeyError:
+    # 'robot_description_planning', confirmed via `ros2 launch ... --debug`
+    # full traceback, 2026-07-19).
     moveit_config = (
         MoveItConfigsBuilder("name", package_name="sim_ur3e_moveit_config")
         .trajectory_execution(file_path="config/moveit_controllers.yaml")
+        .planning_pipelines(pipelines=["ompl"], load_all=False)
+        .pilz_cartesian_limits(file_path="config/pilz_cartesian_limits.yaml")
         .to_moveit_configs()
     )
     move_group_ld = generate_move_group_launch(moveit_config)
@@ -63,6 +87,33 @@ def generate_launch_description():
             SetParameter(
                 name="trajectory_execution.allowed_execution_duration_scaling",
                 value=4.0),
+            # Root cause of the chomp_planner crash: move_group loads the
+            # CHOMP planner PLUGIN directly via pluginlib as part of one of
+            # its default MoveGroupCapability classes (most likely
+            # MoveGroupQueryPlannersService) — completely independent of
+            # planning_pipelines, which was already confirmed clean
+            # (ompl-only) via a full `ros2 param dump /move_group`.
+            # Confirmed via `cat /proc/$(pgrep -f
+            # moveit_ros_move_group/move_group)/maps | grep -i chomp`
+            # showing libmoveit_chomp_planner_plugin.so genuinely loaded
+            # into move_group's own process memory (2026-07-19) — see
+            # real_ur3e_moveit_config/launch/move_group.launch.py's
+            # matching comment for the full investigation.
+            # ros-humble-moveit-planners-chomp is installed system-wide in
+            # this rosject, so its plugin is globally discoverable by
+            # pluginlib no matter what our own yaml says — we deliberately
+            # do not touch that system-wide install, and instead whitelist
+            # only the capabilities TrajectoryPlanner actually uses (no
+            # /compute_ik, /compute_fk, /check_state_validity,
+            # /query_planner_interface, /clear_octomap, or
+            # /plan_kinematic_path call anywhere in this codebase).
+            SetParameter(
+                name="capabilities",
+                value=(
+                    "move_group/MoveGroupMoveAction "
+                    "move_group/MoveGroupExecuteTrajectoryAction "
+                    "move_group/MoveGroupCartesianPathService"
+                )),
             move_group_ld,
         ]),
     ])

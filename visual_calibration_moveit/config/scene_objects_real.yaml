@@ -31,22 +31,23 @@ planning_scene_setup:
     cupholder.enabled: true
     countertop.enabled: true
     wall.enabled: true
+    camera.enabled: true
 
     # Coffee machine — rough box, padded. Fill in real rough distances.
     coffee_machine.shape_type: "box"
     coffee_machine.pose.x: 0.5
-    coffee_machine.pose.y: 0.88
+    coffee_machine.pose.y: 0.78
     coffee_machine.pose.z: -0.032
     coffee_machine.pose.yaw: 1.57
     coffee_machine.box_names: ["body"]
-    coffee_machine.boxes.body.size: [0.6, 0.6, 0.8]
+    coffee_machine.boxes.body.size: [0.6, 0.9, 0.8]
     coffee_machine.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
 
     # Barista cupholder/top — rough box, padded.
     cupholder.shape_type: "box"
     cupholder.pose.x: -0.26
     cupholder.pose.y: 0.04
-    cupholder.pose.z: -0.632
+    cupholder.pose.z: -0.832
     cupholder.pose.yaw: 1.57
     cupholder.box_names: ["body"]
     cupholder.boxes.body.size: [0.5, 0.5, 0.9]
@@ -68,9 +69,30 @@ planning_scene_setup:
     # easy to clip through in a rough estimate; err thick).
     wall.shape_type: "box"
     wall.pose.x: 0.3
-    wall.pose.y: -0.56
+    wall.pose.y: -0.50
     wall.pose.z: -0.032
     wall.pose.yaw: 0.0
     wall.box_names: ["body"]
     wall.boxes.body.size: [2.0, 0.3, 2.0]
     wall.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
+
+    # Camera housing (D415, wall-mounted) — ROUGH PLACEHOLDER, not measured
+    # (2026-07-20). The camera protrudes forward off the wall's front face
+    # by some amount not yet measured — this box exists purely so the arm
+    # doesn't clip it, not to model its true size/shape yet. wall's body is
+    # centered at y=-0.56 with size_y=0.3, so its front face (facing the
+    # room, +Y) is at y = -0.56 + 0.15 = -0.41 — this box's y is placed
+    # just in front of that. z=0.3 is a guess at "above table height"
+    # (countertop's own body top is roughly z=-0.601+1.2/2=-0.001) — pad
+    # generously, same convention as every other object in this file. YOU
+    # WILL MOVE THIS — update camera.pose.x/y/z (and size if needed) once
+    # the camera's real mount point is measured, same
+    # measurecorner/measurecompute workflow as the other objects.
+    camera.shape_type: "box"
+    camera.pose.x: -0.2
+    camera.pose.y: -0.4
+    camera.pose.z: 0.5
+    camera.pose.yaw: 0.0
+    camera.box_names: ["body"]
+    camera.boxes.body.size: [0.8, 0.3, 0.3]
+    camera.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]

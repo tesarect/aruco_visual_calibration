@@ -21,9 +21,9 @@ planning_scene_setup:
     # other object, same convention as scene_objects_real.yaml's camera.*.
     camera.enabled: true
     camera.shape_type: "box"
-    camera.pose.x: 0.3
+    camera.pose.x: -0.28
     camera.pose.y: -0.4
-    camera.pose.z: 0.3
+    camera.pose.z: 0.33
     camera.pose.yaw: 0.0
     camera.box_names: ["body"]
     camera.boxes.body.size: [0.2, 0.2, 0.2]

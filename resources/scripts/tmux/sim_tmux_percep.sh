@@ -26,6 +26,10 @@ fi
 
 tmux new-session -d -s "$SESSION" -n "$WINDOW"
 
+# Keep crashed panes visible (pane_dead=1, exit status shown) instead of
+# vanishing, so node_dashboard.py can distinguish "crashed" from "never existed".
+tmux set-option -t "$SESSION" remain-on-exit on
+
 # Pane 0 — rqt_image_view on the raw camera feed. Polls for Gazebo's
 # camera topics indirectly by waiting on the base session's move_group.
 PANE0=$(tmux list-panes -t "$SESSION:$WINDOW" -F "#{pane_id}")

@@ -1,0 +1,105 @@
+# OMPL pipeline config — was previously ABSENT from this package, so
+# move_group ran with MoveIt's compiled-in defaults: RRTConnect, first
+# collision-free solution accepted, no path-length/smoothness objective.
+# That's why the arm's real-world trajectories looked twisted/unnecessarily
+# long and swung joints close to each other despite planning succeeding
+# with no collision — RRTConnect is a satisficing planner (fast, but no
+# bias toward short/smooth solutions), and there was no shortcutting or
+# optimization pass afterward either.
+#
+# ur_manipulator's default_planner_config now points at an optimizing
+# planner (RRTstar) that keeps searching until planning_time runs out,
+# minimizing path length (joint-space distance) — giving TrajectoryPlanner
+# (see visual_calibration_moveit/trajectory_planner.cpp) something to
+# actually get a "good" plan from instead of just "a valid" one.
+# RRTConnectkConfigDefault stays available (planner_configs below) as a
+# fast fallback for callers that explicitly want it.
+
+# request_adapters/response_adapters must be a single space-separated
+# string, NOT a YAML list — move_group declares these as a plain string
+# parameter (not string_array) in this MoveIt/Humble build; a YAML list
+# here throws rclcpp::exceptions::InvalidParameterTypeException at
+# move_group startup ("expected [string] got [string_array]"), crashing
+# the node before the planning pipeline ever loads (found 2026-07-19).
+#
+# Plugin names below are ALL under default_planner_request_adapters/ (not
+# default_planning_request_adapters/ or default_planning_response_adapters/
+# — those don't exist in this installed MoveIt build, ros-humble-moveit
+# 2.5.4). Root-caused via move_group's own startup log ("Exception while
+# loading planning adapter plugin ... does not exist. Declared types are
+# chomp/OptimizerAdapter default_planner_request_adapters/AddIterativeSplineParameterization
+# default_planner_request_adapters/AddRuckigTrajectorySmoothing
+# default_planner_request_adapters/AddTimeOptimalParameterization
+# default_planner_request_adapters/AddTimeParameterization
+# default_planner_request_adapters/Empty
+# default_planner_request_adapters/FixStartStateBounds
+# default_planner_request_adapters/FixStartStateCollision
+# default_planner_request_adapters/FixStartStatePathConstraints
+# default_planner_request_adapters/FixWorkspaceBounds
+# default_planner_request_adapters/ResolveConstraintFrames" — captured via
+# base_term_move_group.log, 2026-07-19). All 4 of our previous adapter
+# names were wrong and silently failed to load (move_group logs the
+# exception but does NOT fail startup), leaving the ompl pipeline with
+# ZERO working request adapters — no ResolveConstraintFrames,
+# FixStartStateBounds, or FixStartStateCollision — which is why plan()
+# aborted with no real path forward. The CHOMP "Only joint-space goals are
+# supported" error seen afterward was a red herring/fallback symptom of
+# THIS failure, not a separate bug — see move_group.launch.py's
+# capabilities comment (that fix is still worth keeping, but was not the
+# actual root cause).
+# 2.5.4 has no separate request/response adapter split (unlike newer
+# MoveIt) — there is only ONE adapter chain, request_adapters, covering
+# both start-state fixup/validation AND post-plan trajectory processing
+# (AddTimeOptimalParameterization does time-parameterization on the
+# returned trajectory). A separate response_adapters key is NOT read by
+# this build at all — move_group's startup log showed zero exceptions for
+# it (only request_adapters' 4 entries threw), meaning it silently loaded
+# nothing rather than erroring; do not reintroduce a response_adapters key
+# expecting it to do anything on 2.5.4.
+# planning_plugin (SINGULAR) is the parameter planning_pipeline::PlanningPipeline
+# actually reads at construction to pick ONE planner plugin class to load
+# — planning_plugins (PLURAL, just below) is a separate key that does NOT
+# by itself disambiguate/restrict which plugin gets used. Without
+# planning_plugin set, move_group logs "Multiple planning plugins
+# available. You should specify the '~planning_plugin' parameter. Using
+# 'chomp_interface/CHOMPPlanner' for now." and silently loads CHOMP as the
+# ompl pipeline's actual planner — even though planning_plugins names only
+# ompl_interface/OMPLPlanner, and even though .planning_pipelines(pipelines=
+# ["ompl"]) in move_group.launch.py correctly restricts which PIPELINE
+# NAMES load. pluginlib's system-wide registry (moveit_planners_ompl AND
+# moveit_planners_chomp both installed) makes every PlannerManager-derived
+# plugin "available" regardless of ompl_planning.yaml's contents —
+# planning_plugin is what disambiguates. THIS is the actual root cause of
+# "Only joint-space goals are supported" (chomp_planner rejecting a
+# pose-target goal) seen throughout 2026-07-19 — confirmed via
+# base_term_move_group.log showing "MoveGroup context using planning
+# plugin chomp_interface/CHOMPPlanner" despite every other pipeline/
+# capabilities/adapter fix already being correct.
+planning_plugin: ompl_interface/OMPLPlanner
+planning_plugins: ompl_interface/OMPLPlanner
+
+request_adapters: >-
+  default_planner_request_adapters/ResolveConstraintFrames
+  default_planner_request_adapters/FixWorkspaceBounds
+  default_planner_request_adapters/FixStartStateBounds
+  default_planner_request_adapters/FixStartStateCollision
+  default_planner_request_adapters/FixStartStatePathConstraints
+  default_planner_request_adapters/AddTimeOptimalParameterization
+
+planner_configs:
+  RRTConnectkConfigDefault:
+    type: geometric::RRTConnect
+    range: 0.0
+  RRTstarkConfigDefault:
+    type: geometric::RRTstar
+    range: 0.0
+    goal_bias: 0.05
+    delay_collision_checking: 1
+
+ur_manipulator:
+  default_planner_config: RRTstarkConfigDefault
+  planner_configs:
+    - RRTConnectkConfigDefault
+    - RRTstarkConfigDefault
+  projection_evaluator: joints(shoulder_pan_joint,shoulder_lift_joint)
+  longest_valid_segment_fraction: 0.005

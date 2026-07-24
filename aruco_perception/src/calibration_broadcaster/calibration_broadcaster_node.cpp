@@ -309,11 +309,31 @@ bool CalibrationBroadcasterNode::runRandomPhase(
     // on why this must predate the move starting, not just its settling.
     const rclcpp::Time before_move = get_clock()->now();
     if (!tracePathBlocking(candidate)) {
-      out_result = std::make_shared<Calibrate::Result>();
-      out_result->success = false;
-      out_result->message = "~/trace_path failed for random-phase sample " +
-        std::to_string(samples_already_collected + i + 1);
-      return false;
+      // A failed move (e.g. planAndExecuteCartesian refusing an
+      // incomplete straight-line path — see trajectory_planner.cpp's
+      // cartesian_min_fraction check) is treated the same as an
+      // invisible-marker candidate: discarded, not counted, retried with
+      // a new random candidate, bounded by the same consecutive-failure
+      // cap (2026-07-23 — a random offset can point in any direction, so
+      // occasionally landing on one direction's Cartesian-path limit is
+      // expected, not a reason to abort an otherwise-successful run). No
+      // return-to-center needed here — planAndExecuteCartesian refuses
+      // BEFORE calling execute() on an incomplete path, so the arm never
+      // actually moved; it's already still at the last good pose.
+      ++consecutive_failures;
+      RCLCPP_INFO(
+        get_logger(), "Random-phase candidate's move failed (attempt %d/%d consecutive) — "
+        "trying a new candidate", consecutive_failures,
+        config_.random_phase_max_consecutive_failures);
+
+      if (consecutive_failures >= config_.random_phase_max_consecutive_failures) {
+        out_result = std::make_shared<Calibrate::Result>();
+        out_result->success = false;
+        out_result->message = "Random phase gave up after " +
+          std::to_string(consecutive_failures) + " consecutive failed/invisible candidates";
+        return false;
+      }
+      continue;
     }
 
     if (!isMarkerVisibleNow(before_move)) {
@@ -329,7 +349,7 @@ bool CalibrationBroadcasterNode::runRandomPhase(
         out_result = std::make_shared<Calibrate::Result>();
         out_result->success = false;
         out_result->message = "Random phase gave up after " +
-          std::to_string(consecutive_failures) + " consecutive invisible candidates";
+          std::to_string(consecutive_failures) + " consecutive failed/invisible candidates";
         return false;
       }
 

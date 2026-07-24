@@ -1,0 +1,11 @@
+# Moves the arm to a named preset from preset_poses_sim.yaml/_real.yaml —
+# e.g. "home", "standby", or "cal_ready". Prefers a joint-value preset
+# (setJointValueTarget — pins the exact IK branch, no ambiguity) if one is
+# loaded for name; otherwise falls back to the preset's Cartesian pose
+# (setPoseTarget) if one is loaded instead. Fails if NEITHER a joint-value
+# nor a Cartesian preset exists for name — never consults TF (unlike
+# ~/get_standoff_pose) — see TrajectoryPlanner::planAndExecuteToPreset.
+string name
+---
+bool success
+string message

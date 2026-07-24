@@ -1,0 +1,10 @@
+# Simulation wrist-mounted RGBD sensor topics (see CLAUDE.md's Key Topics
+# section). These names come from the sim's Gazebo camera plugin — if this
+# node logs "waiting for frames" and never receives any, double-check these
+# against a live `ros2 topic list` first (documentation in this project is
+# known to drift from the actual running system).
+depth_perception_node:
+  ros__parameters:
+    rgb_image_topic: "/wrist_rgbd_depth_sensor/image_raw"
+    depth_image_topic: "/wrist_rgbd_depth_sensor/depth/image_raw"
+    camera_info_topic: "/wrist_rgbd_depth_sensor/camera_info"

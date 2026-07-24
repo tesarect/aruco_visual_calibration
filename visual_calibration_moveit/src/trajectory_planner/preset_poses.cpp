@@ -28,6 +28,28 @@ PresetPoses::PresetPoses(const rclcpp::Node::SharedPtr & node)
       continue;
     }
 
+    // joint_values takes priority over position/orientation if a preset
+    // somehow declares both (shouldn't happen in practice — each preset
+    // is meant to be one or the other, see preset_poses.hpp's doc
+    // comment) — checked first since a 6-element joint_values array is
+    // the more specific/intentional choice when present.
+    if (node->has_parameter(name + ".joint_values")) {
+      const std::vector<double> joint_values =
+        node->get_parameter(name + ".joint_values").as_double_array();
+
+      if (joint_values.size() != 6) {
+        RCLCPP_ERROR(
+          node->get_logger(),
+          "Preset '%s' has a malformed joint_values (expected 6 elements, "
+          "got %zu) — skipping this preset.",
+          name.c_str(), joint_values.size());
+        continue;
+      }
+
+      joint_values_[name] = joint_values;
+      continue;
+    }
+
     const std::vector<double> position =
       node->get_parameter(name + ".position").as_double_array();
     const std::vector<double> orientation =
@@ -59,6 +81,15 @@ std::optional<geometry_msgs::msg::Pose> PresetPoses::get(const std::string & nam
 {
   const auto it = poses_.find(name);
   if (it == poses_.end()) {
+    return std::nullopt;
+  }
+  return it->second;
+}
+
+std::optional<std::vector<double>> PresetPoses::getJointValues(const std::string & name) const
+{
+  const auto it = joint_values_.find(name);
+  if (it == joint_values_.end()) {
     return std::nullopt;
   }
   return it->second;

@@ -18,6 +18,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
 find_package(visual_calibration_msgs REQUIRED)
+find_package(robotiq_85_msgs REQUIRED)
 
 add_executable(planning_scene_setup
   src/planning_scene_setup/planning_scene_setup.cpp
@@ -53,6 +54,7 @@ ament_target_dependencies(trajectory_planner
   geometry_msgs
   std_srvs
   visual_calibration_msgs
+  robotiq_85_msgs
 )
 
 # MoveIt Task Constructor: deactivated, not just unbuildable-and-skipped.

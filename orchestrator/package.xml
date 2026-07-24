@@ -18,6 +18,31 @@
   <depend>tf2</depend>
   <depend>tf2_geometry_msgs</depend>
 
+  <!-- New launch/bringup_orchestrator_pipeline.launch.py (staged/ordered
+       bringup, see visual_calibration_moveit/launch/bringup_full_sim_README.md)
+       IncludeLaunchDescription's both of these packages' own
+       bringup_*.launch.py, and uses rclpy directly (via OpaqueFunction) to
+       poll ros2-graph node presence as a readiness gate — neither was
+       previously needed by this package's plain C++ node.
+
+       exec_depend on visual_calibration_moveit REMOVED (2026-07-23,
+       explicit user direction) — it formed a circular package dependency
+       with visual_calibration_moveit's own matching exec_depend on
+       orchestrator (both added for the same reason: each package's new
+       bringup_*.launch.py IncludeLaunchDescription's the other's bringup
+       launch file — a genuine mutual runtime dependency between launch
+       files that colcon's package-level topological sort cannot
+       represent, since it doesn't distinguish "depends on this package's
+       launch file" from "depends on this package's library"). Removed
+       from THIS side to unblock local builds; visual_calibration_moveit's
+       exec_depend on this package was left in place. If
+       bringup_orchestrator_pipeline.launch.py's IncludeLaunchDescription
+       of visual_calibration_moveit's bringup file needs this dependency
+       restored, reconcile with whoever owns that bringup work first
+       rather than just re-adding it, since the cycle will return. -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>aruco_perception</exec_depend>
+
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

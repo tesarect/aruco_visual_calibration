@@ -13,6 +13,7 @@ enum class SceneObjectId
   Cupholder,
   Countertop,
   Wall,
+  Camera,
 };
 
 /// How a SceneObjectConfig's geometry should be interpreted:

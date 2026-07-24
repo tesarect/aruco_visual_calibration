@@ -1,0 +1,148 @@
+// Declarative pipeline — SIMULATION staged deployment.
+//
+// Manually triggered ("Build Now") — no SCM polling/webhook trigger block
+// on purpose (see .claude/agents/jenkins-deploy.md's design decisions).
+// Every stage shells out to resources/jenkins/scripts/*.sh, which are
+// hand-copied onto this rosject (this project deploys by file copy, not
+// git — Jenkins has no SCM configured to pull this Jenkinsfile from,
+// see the setup notes at the bottom of this file / the summary given to
+// the user).
+//
+// Stage list mirrors sim_tmux_base.sh -> sim_tmux_trajcal.sh's dependency
+// chain, expressed as logged, pass/fail Jenkins stages instead of tmux
+// panes:
+//   Build -> Base (Gazebo/move_group/planning_scene) ->
+//   Trajectory+Perception (orchestrator pipeline) -> YOLO pipeline ->
+//   [optional] Calibration run -> [optional] Web stack
+//
+// depth_perception is intentionally NOT its own stage here — verified
+// (2026-07-24) it is not included by bringup_full_sim/bringup_orchestrator_
+// pipeline or any tmux script; it's a separate, not-yet-wired-in feature
+// (Barista cupholder task). It still gets BUILT (stage_build.sh's package
+// list matches aliases.sh's vcbuild exactly), just not launched. Revisit
+// if/when it's actually integrated into the calibration pipeline.
+//
+// Long-lived background processes (Gazebo, move_group, the orchestrator/
+// yolo launch trees) are PID-tracked by pipeline_common.sh's track_pid as
+// each stage backgrounds them; the post block below kills everything
+// tracked, on every outcome (success, failure, or manual abort), so a run
+// never leaves stray ROS processes for the next Jenkins build or a
+// subsequent tmux session to collide with.
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        // Guards against a stage's readiness-wait looping forever if a
+        // downstream node/process never comes up and its own script-level
+        // timeout somehow doesn't fire — belt and suspenders, not a
+        // replacement for each stage script's own timeout args.
+        timeout(time: 45, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        booleanParam(name: 'RUN_CALIBRATION', defaultValue: false,
+            description: 'Run a full auto-calibrate sequence after bringup (optional — a staged demo run may just want bringup verified, not an actual calibration).')
+        booleanParam(name: 'RUN_WEBSTACK', defaultValue: false,
+            description: 'Start the web dashboard (rosbridge + React app) as a final stage. Independent of Jenkins itself either way — see sim_tmux_webstack.sh header.')
+        booleanParam(name: 'SKIP_BUILD', defaultValue: false,
+            description: 'Skip colcon build (use the workspace as already built — faster re-runs while iterating on later stages only).')
+    }
+
+    environment {
+        SCRIPTS_DIR = "${env.HOME}/ros2_ws/src/visual_calibration/resources/jenkins/scripts"
+    }
+
+    stages {
+        stage('Build') {
+            when { expression { return !params.SKIP_BUILD } }
+            steps {
+                sh "bash '${SCRIPTS_DIR}/stage_build.sh'"
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'logs/build_colcon.log', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Base (sim)') {
+            steps {
+                sh "bash '${SCRIPTS_DIR}/stage_base_sim.sh'"
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'logs/base_sim_*.log', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Trajectory + Perception') {
+            steps {
+                sh "bash '${SCRIPTS_DIR}/stage_orchestrator_pipeline.sh' sim"
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'logs/orchestrator_pipeline_sim.log', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('YOLO pipeline') {
+            steps {
+                sh "bash '${SCRIPTS_DIR}/stage_yolo_pipeline.sh' sim"
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'logs/yolo_pipeline_sim.log', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Calibration run') {
+            when { expression { return params.RUN_CALIBRATION } }
+            steps {
+                sh "bash '${SCRIPTS_DIR}/stage_calibration.sh' sim"
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'logs/calibration_sim.log', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Web stack') {
+            when { expression { return params.RUN_WEBSTACK } }
+            steps {
+                sh "bash '${SCRIPTS_DIR}/stage_webstack.sh' sim"
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'logs/webstack_sim*.log', allowEmptyArchive: true
+                }
+            }
+        }
+    }
+
+    post {
+        // Runs exactly once, regardless of which stage failed/succeeded or
+        // whether the build was manually aborted — the one place that
+        // guarantees Gazebo/move_group/the bringup launch trees actually
+        // get torn down (see pipeline_common.sh's header on why this is
+        // needed: a `sh` step backgrounding a process does not imply
+        // Jenkins will clean it up on its own when the build ends).
+        always {
+            sh "bash '${SCRIPTS_DIR}/pipeline_common.sh' 2>/dev/null || true"
+            sh '''
+                set -uo pipefail
+                SCRIPTS_DIR="$SCRIPTS_DIR"
+                . "$SCRIPTS_DIR/pipeline_common.sh"
+                kill_tracked_pids
+                kill_stray_ros_processes
+            '''
+            archiveArtifacts artifacts: 'logs/**/*.log', allowEmptyArchive: true
+        }
+    }
+}

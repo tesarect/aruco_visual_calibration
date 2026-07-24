@@ -70,10 +70,20 @@ trajectory_planner:
     # Minimum achieved fraction of a straight-line Cartesian path required
     # to execute it at all (planAndExecuteCartesian's min_fraction) — see
     # trajectory_planner_real.yaml's comment for the full explanation and
-    # the safety tradeoff of lowering it. Kept at the original 0.95
-    # default here; real's testing is what surfaced the need to make this
-    # configurable, sim hasn't needed a lower value so far.
-    cartesian_min_fraction: 0.95
+    # the safety tradeoff of lowering it.
+    # Lowered 0.95 -> 0.75 (2026-07-23, explicit user decision, sim) — a
+    # live test of calibration_orchestrator_node's image-based centering
+    # feature (its Jacobian-bootstrap probe, a ~0.05-0.10m local-frame
+    # move near cal_ready) hit this refusal at 72.7% achieved for a
+    # Y-direction probe (matches this project's earlier finding of
+    # 50-83% achieved for -X/+Y/-Y near cal_ready, X staying 100% — see
+    # transient-humming-donut.md's "Root cause found for the asymmetric
+    # probe distances"). 0.75 sits comfortably above that measured range
+    # without going so permissive that a wildly-short partial path could
+    # execute. Accepted tradeoff: a Cartesian move landing between 75-95%
+    # complete will now EXECUTE (stopping short at an unplanned
+    # intermediate pose) instead of being refused outright.
+    cartesian_min_fraction: 0.75
 
     # If true, TrajectoryPlanner moves to the "home" preset once on startup
     # (see runStartupSequence, called from the constructor) — requires a

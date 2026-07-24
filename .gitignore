@@ -3,3 +3,7 @@ __freq_cmds
 __freq_cmds
 resources/docs/class_docs/CONVENTIONS.md
 resources/docs/class_docs/PENDING_yaml_param_docs.md
+resources/scripts/python/measure_scene_box.py
+resources/docs/stale_packages_review.md
+resources/docs/info_stat.md
+graphify-out/

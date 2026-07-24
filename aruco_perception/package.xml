@@ -21,6 +21,13 @@
   <depend>visual_calibration_msgs</depend>
   <depend>libopencv-dev</depend>
 
+  <!-- New launch/bringup_aruco_pipeline.launch.py (staged/ordered bringup,
+       see visual_calibration_moveit/launch/bringup_full_sim_README.md)
+       uses rclpy directly (via OpaqueFunction) to poll ros2-graph node
+       presence as a readiness gate — not previously needed by this
+       package's plain C++ nodes. -->
+  <exec_depend>rclpy</exec_depend>
+
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
 

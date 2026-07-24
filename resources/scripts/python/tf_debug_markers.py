@@ -3,14 +3,25 @@
 offsetInFrontOf() target pose, so the standoff/orientation math used by
 trajectory_planner can be checked visually before running plan+execute.
 
-Run standalone alongside the sim:
-    python3 tf_debug_markers.py
+Run standalone alongside the sim or real robot:
+    python3 tf_debug_markers.py --env sim
+    python3 tf_debug_markers.py --env real
+
+Frame names (camera_frame, end_effector_frame) and standoff_m/
+facing_rpy_rad are kept in sync with visual_calibration_moveit/config/
+trajectory_planner_<env>.yaml — those yaml files are the source of truth
+for frame names (see e.g. trajectory_planner_real.yaml's comment on why
+real uses robotiq_85_base_link, not aruco_link — the latter comes from
+an ad-hoc, untracked static_transform_publisher process on real, not a
+tracked launch file). If those yaml values change, update WATCH_FRAMES_
+BY_ENV/CAMERA_FRAME_BY_ENV here to match.
 
 Each watched frame (and the computed target) publishes on its own topic
 under /tf_debug_markers/<frame_name>, so each can be added as a separate
 MarkerArray display in RViz and toggled on/off independently.
 """
 
+import argparse
 import math
 
 import rclpy
@@ -22,18 +33,38 @@ from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Pose, TransformStamped
 
 PLANNING_FRAME = "base_link"
-CAMERA_FRAME = "wrist_rgbd_camera_depth_optical_frame"
-WATCH_FRAMES = [
-    "base_link",
-    "wrist_rgbd_camera_depth_optical_frame",
-    "tool0",
-    "rg2_gripper_base_link",
-    "rg2_gripper_aruco_link",
-    "rg2_gripper_left_thumb",
-    "rg2_gripper_right_thumb",
-]
 
-# Kept in sync with trajectory_planner_sim.yaml's standoff_m/facing_rpy_rad.
+CAMERA_FRAME_BY_ENV = {
+    "sim": "wrist_rgbd_camera_depth_optical_frame",
+    "real": "camera_depth_optical_frame",
+}
+
+# sim: RG2 gripper. real: Robotiq 85 — end_effector_frame is
+# robotiq_85_base_link (per trajectory_planner_real.yaml), NOT aruco_link
+# or a robotiq_85_*_thumb frame (neither exists on real's URDF).
+WATCH_FRAMES_BY_ENV = {
+    "sim": [
+        "base_link",
+        "wrist_rgbd_camera_depth_optical_frame",
+        "tool0",
+        "rg2_gripper_base_link",
+        "rg2_gripper_aruco_link",
+        "rg2_gripper_left_thumb",
+        "rg2_gripper_right_thumb",
+    ],
+    "real": [
+        "base_link",
+        "camera_depth_optical_frame",
+        "tool0",
+        "robotiq_85_base_link",
+        "robotiq_85_left_finger_link",
+        "robotiq_85_right_finger_link",
+    ],
+}
+
+# Same in both envs — see trajectory_planner_sim.yaml/_real.yaml's
+# standoff_m/facing_rpy_rad (real's is a placeholder carried over from
+# sim, not yet re-tuned — see that file's header).
 STANDOFF_M = 0.25
 FACING_RPY_RAD = (3.14159265, 0.0, 1.57079633)
 AXIS_LENGTH = 0.3
@@ -113,13 +144,15 @@ def offset_in_front_of(camera_tf: TransformStamped, standoff_m: float, facing_rp
 
 class TfDebugMarkers(Node):
 
-    def __init__(self):
+    def __init__(self, env: str):
         super().__init__("tf_debug_markers")
+        self.camera_frame = CAMERA_FRAME_BY_ENV[env]
+        self.watch_frames = WATCH_FRAMES_BY_ENV[env]
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.pubs = {
             name: self.create_publisher(MarkerArray, f"/tf_debug_markers/{name}", 10)
-            for name in WATCH_FRAMES + ["computed_target"]
+            for name in self.watch_frames + ["computed_target"]
         }
         self.timer = self.create_timer(0.5, self.on_timer)
 
@@ -185,7 +218,7 @@ class TfDebugMarkers(Node):
         return m
 
     def on_timer(self):
-        for frame in WATCH_FRAMES:
+        for frame in self.watch_frames:
             try:
                 tf = self.tf_buffer.lookup_transform(
                     PLANNING_FRAME, frame, Time())
@@ -204,7 +237,7 @@ class TfDebugMarkers(Node):
 
         try:
             camera_tf = self.tf_buffer.lookup_transform(
-                PLANNING_FRAME, CAMERA_FRAME, Time())
+                PLANNING_FRAME, self.camera_frame, Time())
             target_pose = offset_in_front_of(camera_tf, STANDOFF_M, FACING_RPY_RAD)
             out = MarkerArray()
             out.markers.extend(
@@ -224,8 +257,14 @@ def _point(x, y, z):
 
 
 def main():
-    rclpy.init()
-    node = TfDebugMarkers()
+    parser = argparse.ArgumentParser(description=__doc__,
+                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--env", choices=CAMERA_FRAME_BY_ENV.keys(), default="sim",
+                         help="Which environment's frame names to watch (default: sim)")
+    args, ros_args = parser.parse_known_args()
+
+    rclpy.init(args=ros_args)
+    node = TfDebugMarkers(args.env)
     rclpy.spin(node)
     node.destroy_node()
     rclpy.shutdown()

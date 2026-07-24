@@ -48,11 +48,24 @@ alias startjenkins="bash ~/ros2_ws/src/visual_calibration/resources/jenkins/inst
 # jenkins.sh's own already-running check, stop_stale.sh) — not reinvented.
 alias killjenkins="pkill -f 'java .*jenkins\.war' && echo 'Jenkins stopped.' || echo 'No Jenkins process found.'"
 
+# Loki + Promtail + Grafana lifecycle — same standalone-lifecycle
+# reasoning as startjenkins: independent of tmuxwebstacksim/the web
+# dashboard, idempotent, setsid-detached (see install_grafana.sh). INTERNAL
+# ONLY for now — all three bind 127.0.0.1, no webpage_ws proxy route yet
+# (see todo.txt SIDE TRACK section). Ships Jenkins' build_colcon.log into
+# Loki via Promtail; Grafana's Loki datasource is pre-provisioned.
+alias startgrafana="bash ~/ros2_ws/src/visual_calibration/resources/grafana/install_grafana.sh"
+
+# Stops all three — same setsid-survival reasoning as killjenkins (they
+# will NOT stop on their own or when a tmux session is killed).
+alias killgrafana="pkill -f '/grafana_stack/bin/loki ' ; pkill -f '/grafana_stack/bin/promtail ' ; pkill -f '/grafana_stack/bin/grafana-.*/bin/grafana ' ; echo 'Grafana stack stopped (any that were running).'"
+
 # Convenience only — brings up Jenkins AND the web dashboard together in
 # one command, correct order (webpage_ws/start_all.sh). startjenkins and
 # `cd webpage_ws/app && npm run start` still work independently on their
 # own any time — this doesn't replace that, it's just the "I want both,
 # right now" shortcut. Usage: startall sim   (or: startall real)
+# start jenkins + web [TODO: add grafana]
 startall() {
     local env="${1:-sim}"
     bash ~/webpage_ws/start_all.sh --env "$env"

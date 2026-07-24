@@ -12,6 +12,10 @@ fi
 
 tmux new-session -d -s "$SESSION" -n "$WINDOW"
 
+# Keep crashed panes visible (pane_dead=1, exit status shown) instead of
+# vanishing, so node_dashboard.py can distinguish "crashed" from "never existed".
+tmux set-option -t "$SESSION" remain-on-exit on
+
 PANE0=$(tmux list-panes -t "$SESSION:$WINDOW" -F "#{pane_id}")
 PANE1=$(tmux split-window -t "$PANE0" -h -P -F "#{pane_id}")
 PANE2=$(tmux split-window -t "$PANE0" -v -P -F "#{pane_id}")

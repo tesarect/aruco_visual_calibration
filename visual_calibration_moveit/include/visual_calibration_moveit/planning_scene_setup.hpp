@@ -14,8 +14,9 @@ namespace visual_calibration_moveit
 {
 
 /// Populates the MoveIt2 planning scene with known static obstacles
-/// (coffee machine, cupholder, countertop, wall) so trajectory planning
-/// avoids them.
+/// (coffee machine, cupholder, countertop, wall, camera housing — real
+/// robot only, see scene_objects_real.yaml's camera.* entries) so
+/// trajectory planning avoids them.
 class PlanningSceneSetup : public rclcpp::Node
 {
 public:

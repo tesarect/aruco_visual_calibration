@@ -1,0 +1,38 @@
+# Goal: run the full auto-calibrate sequence — move to cal_ready/standoff,
+# wait for it to settle, optionally auto-center on the marker (see
+# orchestrator's auto_center_enabled param — a standing YAML/param toggle
+# set via the web app's set_parameters call, same pattern already used for
+# ~/calibrate's planning_mode; not a per-call goal field, matching this
+# project's convention of tuning via YAML params rather than per-call
+# args), then call calibration_broadcaster_node's ~/calibrate action and
+# relay its result. Empty for now, same reasoning as Calibrate.action's
+# empty goal.
+#
+# Whether Stage 1 actually moves to cal_ready or instead calibrates from
+# the arm's current pose is decided INTERNALLY by the node itself (see
+# CalibrationOrchestratorNode::pending_manual_adjustment_'s doc comment,
+# 2026-07-24) — not a per-call goal field. The single existing
+# ~/start_auto_calibrate/~/auto_calibrate entry point behaves
+# automatically based on that internal state (set when a previous
+# auto-centering attempt failed, cleared once calibration completes or a
+# preset-pose move happens) — no separate goal field or second
+# button/service needed.
+---
+# Result: mirrors Calibrate.action's result fields, plus which stage failed
+# if success is false (empty string on success).
+bool success
+string message
+float64 max_spread_deg
+float64 mean_spread_deg
+# Empty on success. One of "cal_ready", "auto_center", "calibrate" —
+# which stage of the sequence failed, for a caller (e.g. the web app) to
+# show a more specific error than the generic message string alone.
+string failed_stage
+---
+# Feedback: one line per stage transition, e.g. "Moving to cal_ready",
+# "Auto-centering on marker", "Calibrating (sample 3/10)" — the last form
+# mirrors Calibrate.action's feedback once that stage is reached, so a
+# caller only listening to this action still sees per-sample progress.
+string stage
+uint32 samples_collected
+uint32 samples_total

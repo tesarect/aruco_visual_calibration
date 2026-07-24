@@ -1,0 +1,37 @@
+# Simulation topics (see CLAUDE.md's Key Topics section and
+# aruco_perception/config/aruco_detector_sim.yaml, which this mirrors).
+# pose_topic is intentionally identical to the classical detector's --
+# this node is meant to be a drop-in swap, never a parallel publisher.
+# detections_2d_topic (cup_holder/hole, requested by depth-perception) has
+# no classical-detector equivalent to mirror -- it's new with this node.
+yolo_marker_bridge_node:
+  ros__parameters:
+    image_topic: "/wrist_rgbd_depth_sensor/image_raw"
+    camera_info_topic: "/wrist_rgbd_depth_sensor/camera_info"
+    pose_topic: "/aruco_perception/marker_pose"
+    detections_2d_topic: "/aruco_perception/detections_2d"
+
+    # classical/hybrid switch: false = classical aruco_detector_node is the
+    # active marker-pose publisher on startup. Only gates the aruco_marker
+    # publish -- cup_holder/hole detections_2d always publish regardless.
+    # Flipped live by calibration_orchestrator_node via set_parameters, no
+    # restart needed — see yolo_marker_bridge_node.py's class doc comment.
+    active: false
+
+    # Assumes the YOLO inference server (YOLO-pipeline/inference_server.py)
+    # is running on the same machine as this node -- true today for both
+    # the local dev box and the rosject's ~/yolo_venv setup. Per the
+    # locked HTTP-server architecture, this is localhost-only, never a
+    # remote URL.
+    inference_server_url: "http://127.0.0.1:8600/detect"
+    request_timeout_sec: 1.0
+    confidence_threshold: 0.25
+    jpeg_quality: 90
+
+    # Overlay -- same param names/defaults as aruco_detector_sim.yaml's
+    # classical overlay, so /aruco_perception/overlay_image looks identical
+    # regardless of which detector produced it.
+    publish_overlay_image: true
+    overlay_image_topic: "/aruco_perception/overlay_image"
+    overlay_border_color_bgr: [0, 255, 255]
+    marker_length_m: 0.045

@@ -1,0 +1,10 @@
+# PLACEHOLDER — not yet confirmed against the real D415 (over Zenoh).
+# camera_info_topic/rgb_image_topic below match the D415 color topics used
+# elsewhere in this project (see aruco_detector_real.yaml), but the D415's
+# depth topic name has not yet been captured live from the real robot —
+# verify with `ros2 topic list` on the rosject before trusting this file.
+depth_perception_node:
+  ros__parameters:
+    rgb_image_topic: "/D415/color/image_raw"
+    depth_image_topic: "/D415/depth/image_raw"  # UNCONFIRMED placeholder
+    camera_info_topic: "/D415/color/camera_info"
