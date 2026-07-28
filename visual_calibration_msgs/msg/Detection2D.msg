@@ -27,3 +27,16 @@ float64 confidence
 # depth-perception can sample a small patch within it rather than a single
 # pixel (more robust against invalid/noisy single-pixel depth reads).
 float64[4] bbox
+
+# ONLY meaningful for class_name == "hole" — a fixed image-space quadrant
+# label (1=top-left, 2=top-right, 3=bottom-left, 4=bottom-right) computed
+# by yolo_marker_bridge_node.py's publish_detections_2d() from each hole's
+# (cx, cy) relative to the frame's cup_holder/hole-group center. The
+# wall-fixed camera only pitches (never rolls/mirrors), so a simple 2-axis
+# above/below + left/right split is robust here -- see the design decision
+# this field was added for. Left at 0 (unset/not-applicable) for
+# "aruco_marker" and "cup_holder" entries, since only one of each ever
+# exists in frame -- no ambiguity to label. Additive field: existing
+# consumers (e.g. calibration_orchestrator_node's detections2dCallback)
+# read named fields only, never break from this addition.
+int32 hole_number

@@ -8,3 +8,46 @@ depth_perception_node:
     rgb_image_topic: "/wrist_rgbd_depth_sensor/image_raw"
     depth_image_topic: "/wrist_rgbd_depth_sensor/depth/image_raw"
     camera_info_topic: "/wrist_rgbd_depth_sensor/camera_info"
+
+    # Published by yolo_marker_bridge_node (aruco_perception_yolo_bridge) —
+    # carries per-frame cup_holder/hole (and aruco_marker) 2D pixel
+    # detections. Confirmed live on the real robot 2026-07 under this exact
+    # name; sim uses the same topic name/message type, only the underlying
+    # camera differs.
+    detections_2d_topic: "/aruco_perception/detections_2d"
+
+    # Gazebo's libgazebo_ros_camera plugin (confirmed in
+    # intel_r430.urdf.xacro, the macro this sim's wrist_rgbd sensor is
+    # built from) publishes 32FC1 depth already in meters, so no scaling
+    # is needed — see DepthPerceptionConfig::depth_scale_to_meters's doc
+    # comment for when this would need to change.
+    depth_scale_to_meters: 1.0
+
+    # 5x5 pixel patch (half-size 2) sampled around each detection's
+    # centroid before taking the median depth.
+    depth_patch_half_size_px: 2
+
+    # Published by calibration_orchestrator_node — see
+    # DepthPerceptionConfig::pause_while_calibration's doc comment.
+    pause_while_calibration: true
+    auto_calibrate_status_topic: "/calibration_orchestrator_node/auto_calibrate_status"
+
+    # Rolling-window sample count per tracked instance (cup_holder, or
+    # each hole_1..hole_4) before the oldest sample is dropped — see
+    # RollingWindow's doc comment.
+    rolling_window_size: 15
+
+    # "Hold last known position" drift threshold (2026-07-27) — see
+    # DepthPerceptionConfig::stable_drift_threshold_m's doc comment. A new
+    # median must move more than this many meters from the held position
+    # before it's accepted as a real change; holes/cup_holder are
+    # physically fixed, so this filters both per-frame jitter AND gaps
+    # where YOLO returns no detection at all that frame.
+    stable_drift_threshold_m: 0.10
+
+    # Continuous, gap-free "held position" stream for every tracked
+    # instance ever seen — see StablePositionArray.msg's own doc comment.
+    # Consumed by yolo_marker_bridge_node's overlay (drawing a stabilized
+    # dot/label alongside its own raw per-frame boxes) and, eventually, a
+    # camera->base_link TF broadcaster.
+    stable_positions_topic: "/depth_perception/stable_positions"

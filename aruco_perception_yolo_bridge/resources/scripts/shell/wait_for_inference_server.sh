@@ -18,7 +18,11 @@
 
 TIMEOUT_SEC="${1:-30}"
 EXPECTED_ENV="${2:-}"
-HEALTH_URL="http://127.0.0.1:8600/health"
+# Moved 8600 -> 8601 (2026-07-28) -- a stale, never-killed old
+# inference_server.py silently squatted on 8600, causing every fresh
+# server start to fail binding without fully exiting. Must match
+# YOLO-pipeline/config/server_{sim,real}.yaml's own port.
+HEALTH_URL="http://127.0.0.1:8601/health"
 ELAPSED=0
 
 echo "Waiting for inference_server.py at $HEALTH_URL (timeout ${TIMEOUT_SEC}s)..."

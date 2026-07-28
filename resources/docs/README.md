@@ -40,12 +40,25 @@ trusting it on real hardware.
   `max_spread_deg` result fields mean.
 - [aruco_perception](./aruco_perception.md) — the marker detection and
   TF-chaining nodes.
+- [aruco_perception_yolo_bridge](./aruco_perception_yolo_bridge.md) — the
+  YOLO-backed alternative marker/cupholder/hole detector, and how it swaps
+  in for `aruco_perception`'s classical detector.
+- [orchestrator](./orchestrator.md) — `calibration_orchestrator_node`,
+  which chains "move to cal_ready" → "auto-center on the marker" →
+  "calibrate" into one action, and exposes the rosbridge-reachable web
+  facade in front of it.
+- [depth_perception](./depth_perception.md) — the camera-input smoke-test
+  node this package currently has (hole/cupholder 3D pose estimation is
+  planned but not implemented yet).
 - [visual_calibration_moveit](./visual_calibration_moveit.md) — the MoveIt2
   interaction nodes (planning scene setup, trajectory planning, and the
   MoveIt Task Constructor node).
 - [aruco_moveit_config](./aruco_moveit_config.md) — this project's MoveIt2
   config for the UR3e + RG2 gripper, and specifically the one deliberate
   change made to it (the `tip_link` change in the SRDF).
+- [sim_ur3e_moveit_config / real_ur3e_moveit_config](./ur3e_moveit_config_variants.md)
+  — the project-owned, environment-split copies of the instructor-provided
+  `ur3e_moveit_config` that `move_group` actually launches from today.
 - [calibration_validation](./calibration_validation.md) — the sim-only node
   that automatically checks the broadcast calibration TF against
   simulation's own ground-truth camera TF.
@@ -61,5 +74,7 @@ package/class-level "who talks to whom" diagram; see
 documentation conventions used throughout.
 
 - [class_docs/aruco_perception.md](./class_docs/aruco_perception.md)
+- [class_docs/aruco_perception_yolo_bridge.md](./class_docs/aruco_perception_yolo_bridge.md)
+- [class_docs/orchestrator.md](./class_docs/orchestrator.md)
 - [class_docs/visual_calibration_moveit.md](./class_docs/visual_calibration_moveit.md)
 - [class_docs/visual_calibration_msgs.md](./class_docs/visual_calibration_msgs.md)

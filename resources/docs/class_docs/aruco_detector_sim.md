@@ -18,9 +18,10 @@ itself.
 
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
-| `publish_overlay_image` | bool | `true` | Whether to draw and publish a debug image with the detected marker's border and axes. |
+| `publish_overlay_image` | bool | `true` | Whether to draw and publish a debug image with the detected marker's border and axes, on every processed frame (not just frames where the marker was found). |
 | `overlay_image_topic` | string | `/aruco_perception/overlay_image` | Topic the overlay image is published on when enabled. |
 | `overlay_border_color_bgr` | int[3] | `[0, 255, 255]` | BGR (not RGB) color OpenCV draws the marker's detected border in — default is yellow. |
+| `detections_2d_topic` | string | `/aruco_perception/detections_2d` | Where this node publishes the marker's pixel-space centroid/bbox as a `Detection2D` (`class_name` `"aruco_marker"`) when found — the same topic `aruco_perception_yolo_bridge`'s `yolo_marker_bridge_node` publishes `cup_holder`/`hole` detections on. |
 
 ## Marker identity (known/given)
 
@@ -29,6 +30,7 @@ itself.
 | `marker_length_m` | double | `0.045` | Physical side length of the marker in meters — must match the real marker exactly, since it directly scales the estimated pose's translation. |
 | `dictionary_name` | string | `DICT_4X4_50` | Which OpenCV predefined ArUco dictionary to match candidates against. One of `DICT_4X4_50`, `DICT_4X4_100`, `DICT_4X4_250`, `DICT_4X4_1000` (see `dictionaryFromName`); any other value throws at startup. |
 | `marker_id` | int | `0` | The single marker ID this node looks for in each frame. Markers with other IDs in view are ignored. |
+| `active` | bool | `true` | Startup default for the classical/hybrid detector switch — `true` means this node is the one actually publishing `marker_pose` on startup. Re-read live (never cached) every frame, so `calibration_orchestrator_node`'s `~/set_detector_mode` takes effect immediately, no restart. See [../orchestrator.md](../orchestrator.md). |
 
 ## Detection tuning
 

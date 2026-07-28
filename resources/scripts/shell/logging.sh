@@ -15,9 +15,14 @@
 # no separate "node log" distinct from this in these scripts (they run
 # nodes in the foreground, not as daemons with their own log sinks).
 #
-# All sessions share one flat log directory (ros2_ws/log/tmux/, no
-# per-launch timestamp subfolder) — clear it yourself between sessions
-# with `rm -rf ~/ros2_ws/log/tmux/*` when you want a clean slate.
+# Logs are split by env under ros2_ws/log/tmux/{sim,real}/ (no per-launch
+# timestamp subfolder within each) — clear one side yourself with
+# `rm -rf ~/ros2_ws/log/tmux/sim/*` (or `real`) when you want a clean
+# slate without touching the other env's history. Which subfolder a given
+# session's logs land in is derived from $SESSION itself (see
+# setup_log_dir below) — any session name containing "real" (e.g.
+# base_real_term, real_deploy) goes to log/tmux/real/, everything else to
+# log/tmux/sim/. No call site needs to pass env explicitly.
 #
 # Usage in a *_base.sh/*_trajcal.sh script, near the top (after SESSION is
 # set):
@@ -27,7 +32,7 @@
 #                                                            # passes to
 #                                                            # wrap_log
 #   parse_log_args "$@"
-#   setup_log_dir
+#   setup_log_dir "$SESSION"
 # then wrap each pane's command (note: SESSION now passed to wrap_log too,
 # since log filenames are session-prefixed):
 #   tmux send-keys -t "$PANE1" "$(wrap_log "$SESSION" move_group "ros2 launch sim_ur3e_moveit_config move_group.launch.py")" C-m
@@ -68,18 +73,31 @@ parse_log_args() {
     done
 }
 
-# Ensures ros2_ws/log/tmux/ itself exists and exports LOG_DIR for wrap_log
-# to use — no per-session subfolder, no timestamp: every pane's log is a
-# flat file directly under here (session-prefixed, see wrap_log), and
-# clearing history between sessions is a manual `rm -rf ~/ros2_ws/log/tmux/*`
-# rather than something this script manages. No-op (dir not created) if no
-# pane was requested via parse_log_args — avoids creating an empty
+# Ensures ros2_ws/log/tmux/{sim,real}/ exists and exports LOG_DIR for
+# wrap_log to use — env subfolder, no further per-launch timestamp
+# subfolder within it: every pane's log is a flat file directly under
+# LOG_DIR (session-prefixed, see wrap_log), and clearing history between
+# sessions is a manual `rm -rf ~/ros2_ws/log/tmux/sim/*` (or `real`)
+# rather than something this script manages. No-op (dir not created) if
+# no pane was requested via parse_log_args — avoids creating an empty
 # directory on every plain, unlogged launch.
+#
+# Usage: setup_log_dir "$SESSION" — env is inferred from whether SESSION
+# contains "real" (case-insensitive: base_real_term, trajcal_real_term,
+# yolo_real_term, webstack_real_term, real_deploy all match; base_term,
+# trajcal_term, yolo_term, webstack_term, sim_deploy don't) — matches
+# every current session-naming convention in resources/scripts/tmux/
+# without needing each of the ~13 call sites to pass env separately.
 setup_log_dir() {
+    local session="${1:-}"
     if [ "${#LOG_PANES[@]}" -eq 0 ]; then
         return
     fi
-    export LOG_DIR="$HOME/ros2_ws/log/tmux"
+    local env_subdir="sim"
+    if [[ "${session,,}" == *real* ]]; then
+        env_subdir="real"
+    fi
+    export LOG_DIR="$HOME/ros2_ws/log/tmux/$env_subdir"
     mkdir -p "$LOG_DIR"
     echo "Logging enabled for: ${!LOG_PANES[*]}"
     echo "Log directory: $LOG_DIR"
@@ -88,15 +106,16 @@ setup_log_dir() {
 # Wraps $3 (a full shell command string, as already passed to `tmux
 # send-keys`) with `2>&1 | tee "$LOG_DIR/$1_$2.log"` IF $2 was requested via
 # parse_log_args — otherwise returns $3 unchanged. Filename is
-# <session>_<pane>.log — session-prefixed since LOG_DIR is now shared
-# across every session (no per-launch subfolder), so e.g. base_term and
-# trajcal_term logging the same pane name can't collide. Overwrites (plain
-# tee, not tee -a) each time the wrapped command (re)starts — a restarted
-# pane's log reflects only that latest run, not a mix of several restarts
-# concatenated together (this was tee -a until 2026-07-22; append made it
-# hard to tell which run a given log line belonged to during iterative
-# rebuild/restart/retest cycles). If you want history across restarts,
-# copy the file out yourself before restarting.
+# <session>_<pane>.log — session-prefixed since LOG_DIR is shared across
+# every session within the same env's subfolder (no per-launch subfolder
+# beyond sim/real), so e.g. base_term and trajcal_term logging the same
+# pane name can't collide. Overwrites (plain tee, not tee -a) each time
+# the wrapped command (re)starts — a restarted pane's log reflects only
+# that latest run, not a mix of several restarts concatenated together
+# (this was tee -a until 2026-07-22; append made it hard to tell which
+# run a given log line belonged to during iterative rebuild/restart/
+# retest cycles). If you want history across restarts, copy the file out
+# yourself before restarting.
 wrap_log() {
     local session="${1:?wrap_log requires a session name}"
     local pane_name="${2:?wrap_log requires a pane name}"

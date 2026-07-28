@@ -23,16 +23,33 @@ yolo_marker_bridge_node:
     # is running inside ~/yolo_venv on the same rosject machine as this
     # node. Per the locked HTTP-server architecture, this is
     # localhost-only, never a remote URL.
-    inference_server_url: "http://127.0.0.1:8600/detect"
+    # Moved 8600 -> 8601 (2026-07-28) -- see sim's own comment for the
+    # full reason (a stale, never-killed old inference_server.py process
+    # silently squatting on 8600). Must match YOLO-pipeline/config/
+    # server_real.yaml's own port.
+    inference_server_url: "http://127.0.0.1:8601/detect"
     # Bumped 1.0 -> 3.0 (2026-07-24, live real testing) — 1.0s was too
     # tight for JPEG-encode + HTTP round-trip + a full YOLO forward pass
     # on this rosject's hardware, hit on essentially every frame
-    # ("Read timed out (read timeout=1.0)"). PLACEHOLDER — may still need
+    # ("Read timed out (read timeout=1.0)"). Bumped 3.0 -> 8.0 (2026-07-26,
+    # rosbag-playback test) — still timing out at 3.0s even with
+    # inference_server.py confirmed healthy (model_loaded:true); suspected
+    # first-request model cold-start cost. PLACEHOLDER — may still need
     # further tuning once actual per-frame inference latency is measured
     # directly on this machine.
-    request_timeout_sec: 3.0
+    # request_timeout_sec: 3.0
+    request_timeout_sec: 8.0
     confidence_threshold: 0.25
     jpeg_quality: 90
+
+    # Downscale before sending to inference_server.py (2026-07-28) — CPU-
+    # only env, no GPU; smaller image = less YOLO compute per request.
+    # Native width here is 424 (D415), so this is a smaller reduction than
+    # sim's 640->320, but kept the same target value as sim per explicit
+    # choice (consistent behavior across environments).
+    # possible values: 0 (disabled, native 424 resolution), 160, 240, 320,
+    # or any other positive integer up to 424.
+    detect_max_width_px: 320
 
     # Overlay -- same param names/defaults as aruco_detector_real.yaml's
     # classical overlay, so /aruco_perception/overlay_image looks identical
@@ -41,3 +58,25 @@ yolo_marker_bridge_node:
     overlay_image_topic: "/aruco_perception/overlay_image"
     overlay_border_color_bgr: [0, 255, 255]
     marker_length_m: 0.045
+
+    # Marker-cascade throttling (2026-07-27) -- see
+    # yolo_marker_bridge_node.py's __init__ comment for the full
+    # rationale (inference_server.py's marker cascade found costing
+    # 0.17-0.36s/request live, even with no marker present, starving
+    # cup_holder/hole of a smoother detection stream). 10 = only 1 in 10
+    # camera frames actually attempts marker detection; set to 1 to
+    # restore the original always-check-every-frame behavior.
+    marker_check_every_n_frames: 10
+    # Always force full-rate marker checking whenever "active" (above) is
+    # true, regardless of marker_check_every_n_frames -- calibration/
+    # auto-centering must never be starved by this throttle. Keep this
+    # true; only set false for isolated testing of the throttle itself.
+    marker_check_full_rate_when_active: false
+
+    # depth_perception_node's continuous "held position" stream (2026-07-27)
+    # — subscribed here purely to draw a stabilized dot/label on THIS
+    # node's own overlay image, alongside its raw per-frame YOLO boxes.
+    # See yolo_marker_bridge_node.py's module doc comment and
+    # StablePositionArray.msg for the full rationale. Must match
+    # depth_perception_{sim,real}.yaml's own stable_positions_topic.
+    stable_positions_topic: "/depth_perception/stable_positions"

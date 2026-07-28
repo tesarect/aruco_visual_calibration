@@ -11,6 +11,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/AutoCalibrateStatus.msg"
   "msg/Detection2D.msg"
   "msg/Detection2DArray.msg"
+  "msg/StablePosition.msg"
+  "msg/StablePositionArray.msg"
   "srv/TracePath.srv"
   "srv/GetPolygonWaypoints.srv"
   "srv/GetStandoffPose.srv"

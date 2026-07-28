@@ -14,13 +14,20 @@
 # [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion
 # =====================================================================================================
 
-alias srcrc="source ~/.bashrc"
+# alias srcrc="source ~/.bashrc"
 alias vcdir="cd ~/ros2_ws/src/visual_calibration/"
 alias shdir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/shell/"
 alias tmuxdir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/"
 alias pydir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/python/"
 alias viewcam="ros2 run rqt_image_view rqt_image_view /wrist_rgbd_depth_sensor/image_raw"
 alias viewoverlaycam="ros2 run rqt_image_view rqt_image_view /aruco_perception/overlay_image"
+
+# swri_console — rosout GUI log viewer (alternative to rqt_console),
+# installed by setup.sh/setup_real.sh (ros-humble-swri-console). Also
+# fired up automatically as its own small pane by tmuxdebug — this alias
+# is for launching it standalone, independent of that session.
+alias startswriconsole="ros2 run swri_console swri_console"
+alias killswriconsole="pkill -f 'swri_console' && echo 'swri_console stopped.' || echo 'No swri_console process found.'"
 
 # Curses TUI: green/yellow/red status of every titled tmux pane across all
 # sessions (base/trajcal/percep/webstack/...), cross-referenced against
@@ -33,42 +40,27 @@ alias installweb="bash ~/webpage_ws/setup_rosject.sh"
 alias initweb="source ~/webpage_ws/scripts/session_init.sh"
 alias statusweb="bash ~/webpage_ws/scripts/session_status.sh"
 
-# Standalone Jenkins lifecycle — deliberately NOT part of installweb/
-# tmuxwebstacksim. Jenkins is meant to be the thing that TRIGGERS sim/
-# trajectory/Zenoh/etc. nodes itself via pipeline stages, so it must be
-# startable on its own, independent of whether the web dashboard is ever
-# touched this session (and vice versa — the dashboard must not require
-# Jenkins to be up either). Idempotent — safe to call every session.
-alias startjenkins="bash ~/ros2_ws/src/visual_calibration/resources/jenkins/install_jenkins.sh"
+# TEMP-DISABLED for a resource-contention test (Jenkins/Grafana suspected
+# of starving Gazebo/move_group on the rosject — starting Jenkins alone
+# was seen to crash even a direct `ros2 launch` of the sim). Uncomment to
+# restore normal Jenkins lifecycle once the test is done.
+# alias startjenkins="bash ~/ros2_ws/src/visual_calibration/resources/jenkins/install_jenkins.sh"
+# alias killjenkins="pkill -f 'java .*jenkins\.war' && echo 'Jenkins stopped.' || echo 'No Jenkins process found.'"
 
-# Jenkins is launched via setsid (see install_jenkins.sh) specifically so
-# it survives tmux/session teardown — it will NOT stop on its own, or when
-# tmuxwebstacksim/any tmux session is killed. This is the only way to stop
-# it. Same pkill pattern used everywhere else this session (install_
-# jenkins.sh's own already-running check, stop_stale.sh) — not reinvented.
-alias killjenkins="pkill -f 'java .*jenkins\.war' && echo 'Jenkins stopped.' || echo 'No Jenkins process found.'"
+# TEMP-DISABLED — see startjenkins/killjenkins note above, same test.
+# alias startgrafana="bash ~/ros2_ws/src/visual_calibration/resources/grafana/install_grafana.sh"
+# alias killgrafana="pkill -f '/grafana_stack/bin/loki ' ; pkill -f '/grafana_stack/bin/promtail ' ; pkill -f '/grafana_stack/bin/grafana-.*/bin/grafana ' ; echo 'Grafana stack stopped (any that were running).'"
 
-# Loki + Promtail + Grafana lifecycle — same standalone-lifecycle
-# reasoning as startjenkins: independent of tmuxwebstacksim/the web
-# dashboard, idempotent, setsid-detached (see install_grafana.sh). INTERNAL
-# ONLY for now — all three bind 127.0.0.1, no webpage_ws proxy route yet
-# (see todo.txt SIDE TRACK section). Ships Jenkins' build_colcon.log into
-# Loki via Promtail; Grafana's Loki datasource is pre-provisioned.
-alias startgrafana="bash ~/ros2_ws/src/visual_calibration/resources/grafana/install_grafana.sh"
-
-# Stops all three — same setsid-survival reasoning as killjenkins (they
-# will NOT stop on their own or when a tmux session is killed).
-alias killgrafana="pkill -f '/grafana_stack/bin/loki ' ; pkill -f '/grafana_stack/bin/promtail ' ; pkill -f '/grafana_stack/bin/grafana-.*/bin/grafana ' ; echo 'Grafana stack stopped (any that were running).'"
-
-# Convenience only — brings up Jenkins AND the web dashboard together in
-# one command, correct order (webpage_ws/start_all.sh). startjenkins and
-# `cd webpage_ws/app && npm run start` still work independently on their
-# own any time — this doesn't replace that, it's just the "I want both,
-# right now" shortcut. Usage: startall sim   (or: startall real)
-# start jenkins + web [TODO: add grafana]
+# TEMP: webpage-only during the Jenkins/Grafana resource-contention test —
+# normally also starts Jenkins first (see webpage_ws/start_all.sh, itself
+# temporarily stripped to webpage-only). Restore the original startall
+# body (bash ~/webpage_ws/start_all.sh --env "$env") once the test is done.
 startall() {
     local env="${1:-sim}"
-    bash ~/webpage_ws/start_all.sh --env "$env"
+    cd ~/webpage_ws || return
+    bash ./setup_rosject.sh --env "$env"
+    cd ~/webpage_ws/app || return
+    npm run start
 }
 
 alias startrosbridge="ros2 launch rosbridge_server rosbridge_websocket_launch.xml"
@@ -83,6 +75,14 @@ cleanpull() {
 killsim() {
     pkill gzclient*
 }
+
+# TEMP-DISABLED — see startjenkins/killjenkins note above, same test.
+# restartgrafana() {
+#     # kill grafana
+#     pkill -f '/grafana_stack/bin/loki '; pkill -f '/grafana_stack/bin/promtail ' ; pkill -f '/grafana_stack/bin/grafana-.*/bin/grafana ' ; echo 'Grafana stack stopped (any that were running).'
+#     # start grafana
+#     bash ~/ros2_ws/src/visual_calibration/resources/grafana/install_grafana.sh
+# }
 
 customkill() {
     local key="$1"
@@ -208,9 +208,9 @@ tmuxyoloreal() {
     bash ./real_tmux_yolo.sh "$@"
 }
 
-# `tmuxwebstacksim` defaults to extracting sim's URDF; pass `real` to
-# extract real's instead, e.g. `tmuxwebstacksim real`.
-tmuxwebstacksim() {
+# `tmuxwebstack` defaults to extracting sim's URDF; pass `real` to
+# extract real's instead, e.g. `tmuxwebstack real`.
+tmuxwebstack() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
     bash ./sim_tmux_webstack.sh "$@"
 }
@@ -218,6 +218,24 @@ tmuxwebstacksim() {
 tmuxpercepsim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
     bash ./sim_tmux_percep.sh
+}
+
+# Master launchers — fire base+trajcal+yolo (essential_logs=on) + debug (no
+# logs) in one call, in the correct order, as four WINDOWS in ONE shared
+# tmux session (sim_deploy / real_deploy), then attach once (switch
+# windows with prefix+0/1/2/3 or prefix+w). See orchestrate_tmux_sim.sh/
+# orchestrate_tmux_real.sh headers for the full sequencing rationale —
+# this is convenience only, tmuxbasesim/tmuxtrajcalsim/tmuxyolosim/
+# tmuxdebug etc. still work independently any time (own separate
+# sessions), same as startall vs. startjenkins/npm run start.
+orchestratetmuxsim() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./orchestrate_tmux_sim.sh
+}
+
+orchestratetmuxreal() {
+    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
+    bash ./orchestrate_tmux_real.sh
 }
 
 tmuxgit() {
@@ -617,8 +635,8 @@ completesimsetup() {
     # statusweb
     bash ~/webpage_ws/scripts/session_status.sh
     # # install yolo
-    # sudo apt install -y python3.10-venv
-    # bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
+    sudo apt install -y python3.10-venv
+    bash ~/ros2_ws/src/visual_calibration/resources/scripts/shell/install_yolo.sh
 }
 
 completerealsetup() {

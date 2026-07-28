@@ -32,7 +32,7 @@ SHELL_DIR="$RESOURCES_DIR/shell"
 source "$SHELL_DIR/logging.sh"
 declare_loggable_panes zenoh_bridge move_group rviz planning_scene
 parse_log_args "$@"
-setup_log_dir
+setup_log_dir "$SESSION"
 
 STAT_CHECK=false
 for arg in "$@"; do

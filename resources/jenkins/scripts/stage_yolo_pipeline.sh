@@ -22,7 +22,15 @@ source "$SCRIPT_DIR/pipeline_common.sh"
 RESOURCES_SHELL_DIR="$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell"
 ENV_NAME="${1:?Usage: stage_yolo_pipeline.sh <sim|real>}"
 
+# colcon's generated setup.bash references its own internal vars (e.g.
+# COLCON_TRACE) without defaulting them — fatal under this script's own
+# `set -u` (confirmed live in stage_base_sim.sh: "setup.bash: line 11:
+# COLCON_TRACE: unbound variable" killed that stage before it ran a
+# single ros2 command; same root cause applies here). Disable -u for just
+# this one sourced file, then restore it immediately after.
+set +u
 source ~/ros2_ws/install/setup.bash
+set -u
 
 if [ ! -x "$HOME/yolo_venv/bin/python3" ]; then
     echo "[stage_yolo_pipeline] ~/yolo_venv not found — run installyolo (install_yolo.sh) on this rosject first. Failing stage."

@@ -1,8 +1,10 @@
 #!/bin/bash
 # Debug tmux session: tf_debug_markers.py (RViz axis markers at key TF
 # frames), rqt_image_view loaded directly on the ArUco overlay topic,
-# rqt_graph, and a large empty shell at ~/ros2_ws for ad-hoc work. Pulled
-# out of sim_tmux_base.sh/real_tmux_base.sh so this always-optional visual
+# rqt_graph, swri_console (rosout GUI log viewer, added 2026-07-26 — see
+# setup.sh/setup_real.sh, which now install ros-humble-swri-console), and
+# a large empty shell at ~/ros2_ws for ad-hoc work. Pulled out of
+# sim_tmux_base.sh/real_tmux_base.sh so this always-optional visual
 # debugging isn't tied to the base session's lifecycle.
 #
 # Requires the matching base session (sim_tmux_base.sh/real_tmux_base.sh)
@@ -60,16 +62,26 @@ PANE3=$(tmux split-window -t "$PANE1" -v -P -F "#{pane_id}")
 tmux send-keys -t "$PANE3" \
 "ros2 run rqt_graph rqt_graph" C-m
 
+# Pane 4 — swri_console, a rosout GUI log viewer (alternative to
+# rqt_console — filterable/searchable multi-node log history, not just a
+# live tail). Tiny pane like the other GUI tools here is fine/expected —
+# it's meant to be glanced at via the rosject's VNC, not read line-by-line
+# in-pane.
+PANE4=$(tmux split-window -t "$PANE1" -v -P -F "#{pane_id}")
+tmux send-keys -t "$PANE4" \
+"ros2 run swri_console swri_console" C-m
+
 tmux select-pane -t "$PANE0" -T "Scratch (ros2_ws)"
 tmux select-pane -t "$PANE1" -T "Marker Debugger"
 tmux select-pane -t "$PANE2" -T "Overlay Image"
 tmux select-pane -t "$PANE3" -T "RQt Graph"
+tmux select-pane -t "$PANE4" -T "SWRI Console"
 
 tmux set-option -t "$SESSION" pane-border-status top
 tmux set-option -t "$SESSION" pane-border-format "#{?pane_active,#[fg=green]▶ ,}#{pane_title}"
 
 # main-vertical: pane 0 (the shell) stays large on the left; the other
-# three stack narrow on the right, per main-pane-width below.
+# four stack narrow on the right, per main-pane-width below.
 tmux set-option -t "$SESSION" main-pane-width "65%"
 tmux select-layout -t "$SESSION:$WINDOW" main-vertical
 

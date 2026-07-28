@@ -77,8 +77,22 @@ a summary for readers of this file only):
       "image_jpeg_base64": "<base64 JPEG bytes>",
       "camera_matrix": [[fx,0,cx],[0,fy,cy],[0,0,1]],
       "dist_coeffs": [d0, d1, ...],
-      "conf": 0.25
+      "conf": 0.25,
+      "skip_marker": false
     }
+  skip_marker (added 2026-07-27): optional, defaults false server-side if
+  omitted. When true, inference_server.py skips the ArUco marker cascade
+  entirely for this request (no "aruco_marker" key in the response) --
+  cup_holder/hole detection is UNAFFECTED either way, it was never part of
+  the cascade. This node decides skip_marker per-frame via
+  marker_check_every_n_frames/marker_check_full_rate_when_active (see
+  __init__) -- the marker cascade was found live to cost 0.17-0.36s/request
+  even when no marker was present, the dominant cost in a ~0.4-0.6s total
+  /detect call, starving cup_holder/hole of a smoother detection stream.
+  Full-rate checking is always forced (skip_marker=false) whenever this
+  node's own "active" param is true, so calibration/auto-centering (both
+  of which DO need reliable per-attempt marker detection, unlike
+  cup_holder/hole) are never starved by this throttle.
   Response body (each key entirely OMITTED, never null/empty, if that class
   was not found in the frame):
     {
@@ -98,6 +112,29 @@ a summary for readers of this file only):
   circle size to solve against; depth-perception adds the 3D piece
   downstream). HTTP 400 with {"error": "..."} on a malformed/missing
   request field.
+
+  "hole" entries additionally get a hole_number (1-4, fixed image-space
+  quadrant: top-left/top-right/bottom-left/bottom-right) on the PUBLISHED
+  Detection2D -- NOT part of the inference_server.py response above, this
+  is computed client-side in publish_detections_2d()/assign_hole_quadrants()
+  since it only needs 2D pixel positions already in the response. See
+  Detection2D.msg's hole_number field comment for the full rule.
+
+Stabilized-overlay subscription (2026-07-27) -- a deliberate exception to
+this node's otherwise one-directional (image in, poses/detections out)
+data flow: also subscribes to depth_perception_node's
+visual_calibration_msgs/StablePositionArray (stable_positions_topic,
+default /depth_perception/stable_positions) purely to draw its held,
+drift-filtered per-instance positions onto the SAME overlay image this
+node already publishes, alongside its own raw per-frame YOLO boxes/labels
+-- see publish_overlay_image_msg. This exists because a raw per-frame
+overlay alone still visibly "flickers" whenever YOLO misses a detection
+for a frame or two, even though depth_perception's own held position
+never actually gaps. Kept as loosely coupled as that requirement allows:
+this node only reads StablePosition's published fields (px/py/drifted/
+etc.), never depth_perception's internal rolling-window state, and
+degrades gracefully if depth_perception_node isn't running at all (simply
+never receives anything on that topic, draws nothing extra).
 """
 
 import base64
@@ -113,7 +150,7 @@ from rclpy.qos import qos_profile_sensor_data
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PoseStamped
-from visual_calibration_msgs.msg import Detection2D, Detection2DArray
+from visual_calibration_msgs.msg import Detection2D, Detection2DArray, StablePositionArray
 
 
 def rotation_matrix_to_quaternion(rotation_matrix):
@@ -159,6 +196,54 @@ def rotation_matrix_to_quaternion(rotation_matrix):
         z = 0.25 * s
 
     return (x, y, z, w)
+
+
+def assign_hole_quadrants(detections, result):
+    """Assigns each "hole" Detection2D in `detections` (mutated in place) a
+    fixed image-space quadrant label via hole_number:
+        1 = top-left, 2 = top-right, 3 = bottom-left, 4 = bottom-right.
+
+    Decided design (simpler than an angle-around-centroid sort): the camera
+    here is wall-fixed with at most pitch variation -- it never rolls or
+    views from a mirrored/opposite angle -- so a plain 2-axis image-space
+    split (above/below a horizontal line, left/right of a vertical line) is
+    robust, unlike on a moving wrist camera where it wouldn't be.
+
+    Reference point for the horizontal/vertical split: the cup_holder's own
+    detected bbox center, if "cup_holder" was present in this frame's
+    /detect response (most robust -- one physical object, detected
+    independently of how many holes happened to be visible). Falls back to
+    the centroid of this frame's own hole detections (mean cx, mean cy) if
+    no cup_holder was detected that frame -- still a reasonable reference
+    since holes are arranged around the cup_holder.
+    """
+    holes = [d for d in detections if d.class_name == "hole"]
+    if not holes:
+        return
+
+    if "cup_holder" in result:
+        bbox = result["cup_holder"][0].get("bbox") if result["cup_holder"] else None
+    else:
+        bbox = None
+
+    if bbox is not None:
+        ref_x = (bbox[0] + bbox[2]) / 2.0
+        ref_y = (bbox[1] + bbox[3]) / 2.0
+    else:
+        ref_x = sum(d.cx for d in holes) / len(holes)
+        ref_y = sum(d.cy for d in holes) / len(holes)
+
+    for d in holes:
+        top = d.cy < ref_y
+        left = d.cx < ref_x
+        if top and left:
+            d.hole_number = 1
+        elif top and not left:
+            d.hole_number = 2
+        elif not top and left:
+            d.hole_number = 3
+        else:
+            d.hole_number = 4
 
 
 class YoloMarkerBridgeNode(Node):
@@ -234,6 +319,109 @@ class YoloMarkerBridgeNode(Node):
         )
         self.jpeg_quality = int(self.get_parameter("jpeg_quality").value)
 
+        # Detection-resolution downscaling (2026-07-28) -- confirmed live:
+        # this project's sim AND real environments are both CPU-only (no
+        # GPU, `nvidia-smi` unavailable on either), and YOLO inference is
+        # the genuine compute bottleneck (0.4-0.6s/request even with the
+        # marker cascade throttled) -- not a bug in any ROS-side code, a
+        # hardware/environment throughput ceiling. Extensive live parameter
+        # sweeps (confidence_threshold, marker_check_every_n_frames,
+        # jpeg_quality, rolling_window_size, stable_drift_threshold_m) all
+        # confirmed NOT to move the needle, since none of them reduce the
+        # actual per-request YOLO forward-pass cost. A smaller input image
+        # genuinely does: fewer pixels for the model to convolve over.
+        # 0 = disabled (send the frame at its native resolution, this
+        # node's original behavior) -- opt-in, not a silent default change.
+        # When set, ANY value > 0 also requires the corresponding rescale-
+        # back-to-native-resolution logic in _process_image/
+        # publish_detections_2d/publish_marker_pose below -- see
+        # scale_intrinsics_and_size()'s own doc comment for why this is
+        # handled entirely on THIS side, not inference_server.py's (that
+        # server already correctly trusts whatever camera_matrix/image
+        # size a caller sends, per aruco_pose.py's own scale_camera_matrix
+        # design -- confirmed by reading it directly, not assumed).
+        self.detect_max_width_px = int(
+            self.get_parameter("detect_max_width_px").value
+        )
+
+        # Marker-cascade throttling (2026-07-27) -- live-lab testing found
+        # inference_server.py's /detect spending 0.17-0.36s/request on the
+        # ArUco marker cascade alone, even when no marker was present,
+        # starving cup_holder/hole detection of a smoother/faster stream.
+        # Confirmed via a dedicated code-reading pass that
+        # calibration_broadcaster_node's per-waypoint sampling (a single
+        # blocking wait per waypoint, 5-8s timeout) tolerates this
+        # throttle fine, but calibration_orchestrator_node's image-based
+        # auto-centering (an iterative rapid move+detect loop) does NOT --
+        # see marker_check_full_rate_when_active below for how that's kept
+        # safe.
+        #
+        # 1 = check every frame (this endpoint's original, unthrottled
+        # behavior) -- so this param defaults conservatively even before
+        # considering the "active" override below.
+        self.marker_check_every_n_frames = int(
+            self.get_parameter("marker_check_every_n_frames").value
+        )
+        # When true AND this node's own "active" param is true (this
+        # detector is the one currently driving marker_pose for
+        # calibration/centering), the cascade always runs at full rate
+        # regardless of marker_check_every_n_frames above -- calibration
+        # and auto-centering must never be starved by this throttle.
+        # Default true: the throttle should only ever relax detection
+        # while this detector ISN'T the one calibration/centering depends
+        # on; it should never silently apply during an active run.
+        self.marker_check_full_rate_when_active = bool(
+            self.get_parameter("marker_check_full_rate_when_active").value
+        )
+        # Incremented once per image_callback invocation -- see
+        # image_callback's skip_marker computation below.
+        self._frame_count = 0
+
+        # Drop-stale-frames guard (2026-07-27) -- confirmed live: the whole
+        # pipeline (overlay_image, detections_2d, stable_positions) was
+        # only updating at ~2.7Hz with uneven 0.02-0.67s gaps, all in
+        # lockstep, causing everything on the overlay to appear to
+        # blink/vanish together. Root cause: image_sub's
+        # MutuallyExclusiveCallbackGroup QUEUES every incoming image
+        # message while a previous image_callback invocation is still
+        # blocked on requests.post() to inference_server.py (bounded by
+        # request_timeout_sec, up to 8s on real) -- so by the time a
+        # queued frame's turn comes, it's already stale (a much newer
+        # camera frame has since arrived), but it still gets processed and
+        # published anyway, burning an entire inference cycle on outdated
+        # data. Since the true bottleneck is the YOLO model's actual
+        # compute time (confirmed via inference_server.py's own timing
+        # log: ~0.4-0.6s/request), no amount of ROS-side concurrency makes
+        # inference itself faster -- queuing stale frames only adds
+        # latency, it never lets the pipeline "catch up". Fix: if a
+        # request is already in flight when a new frame arrives, skip that
+        # frame immediately instead of waiting to process it later -- see
+        # image_callback's guard at its top.
+        self._request_in_flight = False
+
+        # Stabilized-overlay feed (2026-07-27) -- depth_perception_node
+        # publishes a continuous, gap-free "held position" per instance
+        # (see visual_calibration_msgs/StablePositionArray.msg) built from
+        # THIS node's own detections_2d stream. Subscribing back to it here
+        # is a deliberate exception to this node's otherwise one-directional
+        # data flow (image in, poses/detections out): the user explicitly
+        # wants ONE overlay image showing both this frame's raw YOLO boxes
+        # AND depth_perception's stabilized dots, rather than two separate
+        # images to compare. Kept as loosely coupled as that requirement
+        # allows: this node only ever reads the published message contract
+        # (px/py/drifted/etc.), never depth_perception's internal state, and
+        # degrades gracefully (silently draws nothing extra) if
+        # depth_perception_node isn't running at all -- see
+        # latest_stable_positions_callback/publish_overlay_image_msg.
+        self.stable_positions_topic = self.get_parameter(
+            "stable_positions_topic"
+        ).value
+        self._latest_stable_positions = None
+        self.stable_positions_sub = self.create_subscription(
+            StablePositionArray, self.stable_positions_topic,
+            self.stable_positions_callback, 10,
+        )
+
         self.bridge = CvBridge()
 
         # Camera intrinsics: only ever the most recently received
@@ -260,38 +448,58 @@ class YoloMarkerBridgeNode(Node):
         else:
             self.overlay_image_pub = None
 
-        # Own callback group (2026-07-24, fixed a live bug), separate from
-        # the node's default group that ROS's built-in set_parameters
-        # service callback runs in -- see main()'s doc comment for the
-        # full story (image_callback blocks on a synchronous HTTP request
-        # for up to request_timeout_sec, which under a single shared
-        # default MutuallyExclusive group also blocks set_parameters from
-        # running until that HTTP call returns, even with a
-        # MultiThreadedExecutor -- a MultiThreadedExecutor only allows
-        # DIFFERENT callback groups to run concurrently, it does not by
-        # itself parallelize callbacks that share one group). Both
-        # subscriptions share ONE MutuallyExclusiveCallbackGroup (not
-        # Reentrant) since image_callback/camera_info_callback don't need
-        # to run concurrently WITH EACH OTHER, just concurrently with
-        # everything else (parameter service, etc).
-        self._sensor_callback_group = MutuallyExclusiveCallbackGroup()
+        # Separate callback groups (2026-07-24 fixed one live bug via
+        # MultiThreadedExecutor + a shared group for both subscriptions;
+        # 2026-07-27 fixed a SECOND live bug this introduced) -- see
+        # main()'s doc comment for the full MultiThreadedExecutor story
+        # (image_callback blocks on a synchronous HTTP request for up to
+        # request_timeout_sec, which under single-threaded spin also
+        # blocked set_parameters).
+        #
+        # image_sub and camera_info_sub were originally put in ONE shared
+        # MutuallyExclusiveCallbackGroup on the theory that they "don't
+        # need to run concurrently with each other" -- confirmed live
+        # WRONG: a MutuallyExclusiveCallbackGroup queues every callback
+        # sharing it, including different callbacks on different topics.
+        # camera_info publishes far more often than image_callback (bounded
+        # by request_timeout_sec, up to 3s per frame) can keep up with, so
+        # every camera_info message queued behind whichever image_callback
+        # was in flight -- and since new ones keep arriving faster than
+        # image_callback drains the queue, camera_info_callback could be
+        # starved indefinitely. Confirmed live: "No camera_info received
+        # yet" repeating forever despite `ros2 topic echo` proving the
+        # topic itself was publishing fine the whole time.
+        #
+        # camera_info_callback is cheap (three numpy assignments, no I/O)
+        # and needs to run promptly/often -- it now gets its OWN group, so
+        # it's never queued behind an in-flight image_callback. image_sub
+        # keeps its own group too (still separate from the node's default
+        # group, preserving the 2026-07-24 fix for set_parameters).
+        self._image_callback_group = MutuallyExclusiveCallbackGroup()
+        self._camera_info_callback_group = MutuallyExclusiveCallbackGroup()
         self.image_sub = self.create_subscription(
             Image, self.image_topic, self.image_callback,
             qos_profile_sensor_data,
-            callback_group=self._sensor_callback_group,
+            callback_group=self._image_callback_group,
         )
         self.camera_info_sub = self.create_subscription(
             CameraInfo, self.camera_info_topic, self.camera_info_callback,
             qos_profile_sensor_data,
-            callback_group=self._sensor_callback_group,
+            callback_group=self._camera_info_callback_group,
         )
 
         self.get_logger().info(
             "yolo_marker_bridge_node ready (image_topic: '%s', "
             "camera_info_topic: '%s', pose_topic: '%s', "
-            "detections_2d_topic: '%s', inference_server_url: '%s')" % (
+            "detections_2d_topic: '%s', inference_server_url: '%s', "
+            "marker_check_every_n_frames: %d, "
+            "marker_check_full_rate_when_active: %s, "
+            "stable_positions_topic: '%s')" % (
                 self.image_topic, self.camera_info_topic, self.pose_topic,
                 self.detections_2d_topic, self.inference_server_url,
+                self.marker_check_every_n_frames,
+                self.marker_check_full_rate_when_active,
+                self.stable_positions_topic,
             )
         )
 
@@ -303,7 +511,32 @@ class YoloMarkerBridgeNode(Node):
         self.camera_matrix = np.array(msg.k, dtype=float).reshape(3, 3)
         self.dist_coeffs = np.array(msg.d, dtype=float)
 
+    def stable_positions_callback(self, msg):
+        # Just caches the latest message for publish_overlay_image_msg to
+        # read -- no processing here, matching camera_info_callback's own
+        # "always refresh, never derive anything in the callback itself"
+        # pattern. If depth_perception_node is never running,
+        # self._latest_stable_positions simply stays None forever and the
+        # overlay silently draws nothing extra for it -- see
+        # publish_overlay_image_msg's own guard.
+        self._latest_stable_positions = msg
+
     def image_callback(self, msg):
+        # Drop-stale-frames guard -- see self._request_in_flight's own
+        # doc comment in __init__ for the full rationale. Checked BEFORE
+        # any other work (camera_matrix check, cv_bridge conversion, etc)
+        # so a frame that arrives mid-request costs nothing beyond this
+        # one boolean check, rather than being queued and processed stale
+        # later by image_sub's MutuallyExclusiveCallbackGroup.
+        if self._request_in_flight:
+            return
+        self._request_in_flight = True
+        try:
+            self._process_image(msg)
+        finally:
+            self._request_in_flight = False
+
+    def _process_image(self, msg):
         if self.camera_matrix is None:
             self.get_logger().warn(
                 "No camera_info received yet on '%s' -- skipping detection "
@@ -322,8 +555,41 @@ class YoloMarkerBridgeNode(Node):
             )
             return
 
+        # Detection-resolution downscaling (2026-07-28) -- see
+        # detect_max_width_px's own __init__ comment for the full
+        # rationale. detect_image/detect_camera_matrix are what's actually
+        # SENT to inference_server.py; cv_image itself is left untouched
+        # (still needed at full resolution for the overlay draw below).
+        # rescale_factor is applied to every 2D pixel field in the
+        # response before anything downstream (marker_pose, detections_2d,
+        # overlay) ever sees it -- see the rescale block after the request
+        # completes.
+        detect_image = cv_image
+        detect_camera_matrix = self.camera_matrix
+        rescale_factor = 1.0
+        if self.detect_max_width_px > 0 and cv_image.shape[1] > self.detect_max_width_px:
+            rescale_factor = cv_image.shape[1] / self.detect_max_width_px
+            new_width = self.detect_max_width_px
+            new_height = int(round(cv_image.shape[0] / rescale_factor))
+            detect_image = cv2.resize(
+                cv_image, (new_width, new_height), interpolation=cv2.INTER_AREA
+            )
+            # fx/fy/cx/cy scale down by the same factor as the image --
+            # see aruco_pose.py's scale_camera_matrix, which does the exact
+            # same proportional scaling; not reused directly here since
+            # that function lives in the isolated YOLO venv (never
+            # imported into this rclpy process, per this project's locked
+            # ABI-isolation architecture) -- this is the small, standard
+            # pinhole-intrinsics scaling formula, safe to duplicate rather
+            # than cross an intentional process boundary for it.
+            detect_camera_matrix = self.camera_matrix.copy()
+            detect_camera_matrix[0, 0] /= rescale_factor  # fx
+            detect_camera_matrix[1, 1] /= rescale_factor  # fy
+            detect_camera_matrix[0, 2] /= rescale_factor  # cx
+            detect_camera_matrix[1, 2] /= rescale_factor  # cy
+
         ok, jpeg_bytes = cv2.imencode(
-            ".jpg", cv_image,
+            ".jpg", detect_image,
             [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality],
         )
         if not ok:
@@ -335,11 +601,30 @@ class YoloMarkerBridgeNode(Node):
 
         image_b64 = base64.b64encode(jpeg_bytes.tobytes()).decode("ascii")
 
+        # Marker-cascade throttling decision (2026-07-27) -- see
+        # marker_check_every_n_frames/marker_check_full_rate_when_active's
+        # own comments in __init__ for the full rationale. "active" is
+        # re-read live here (not cached), matching the same fresh-read
+        # pattern already used for the marker_pose-publish gate below --
+        # so a calibration_orchestrator_node set_parameters call flipping
+        # "active" takes effect on the very next frame for this override
+        # too, not just for the pose-publish gate.
+        self._frame_count += 1
+        full_rate_forced = (
+            self.marker_check_full_rate_when_active
+            and bool(self.get_parameter("active").value)
+        )
+        skip_marker = (
+            not full_rate_forced
+            and (self._frame_count % self.marker_check_every_n_frames != 0)
+        )
+
         request_body = {
             "image_jpeg_base64": image_b64,
-            "camera_matrix": self.camera_matrix.tolist(),
+            "camera_matrix": detect_camera_matrix.tolist(),
             "dist_coeffs": self.dist_coeffs.tolist(),
             "conf": self.confidence_threshold,
+            "skip_marker": skip_marker,
         }
 
         try:
@@ -372,6 +657,30 @@ class YoloMarkerBridgeNode(Node):
             )
             return
 
+        # Rescale every 2D pixel field back to cv_image's TRUE native
+        # resolution -- a no-op (rescale_factor == 1.0) when
+        # detect_max_width_px is disabled/didn't trigger this frame. Done
+        # ONCE, here, so every downstream consumer (publish_marker_pose,
+        # publish_detections_2d, publish_overlay_image_msg) keeps working
+        # against full-resolution pixel coordinates with zero changes of
+        # its own -- none of them need to know downscaling happened.
+        # aruco_marker's rvec/tvec (a 3D metric position/orientation, not
+        # pixels) is DELIBERATELY left untouched: solvePnP already used
+        # detect_camera_matrix (scaled to match the downscaled image), so
+        # that result is already correct in real-world units -- only
+        # "corners" (raw pixel coordinates) needs this correction.
+        if rescale_factor != 1.0:
+            if "aruco_marker" in result:
+                result["aruco_marker"]["corners"] = [
+                    [x * rescale_factor, y * rescale_factor]
+                    for x, y in result["aruco_marker"]["corners"]
+                ]
+            for class_name in ("cup_holder", "hole"):
+                for detection in result.get(class_name, []):
+                    detection["cx"] *= rescale_factor
+                    detection["cy"] *= rescale_factor
+                    detection["bbox"] = [v * rescale_factor for v in detection["bbox"]]
+
         # classical/hybrid switch: only publish the marker pose when this
         # node is the active detector -- live re-read, never cached, see
         # class doc comment / the "active" parameter's declare_parameter
@@ -382,9 +691,17 @@ class YoloMarkerBridgeNode(Node):
         # Overlay: independent of "active" -- an operator debugging hybrid
         # mode still wants the visual confirmation even if this node isn't
         # currently the one publishing marker_pose (see publish_overlay_image's
-        # declare_parameter comment above).
-        if "aruco_marker" in result and self.overlay_image_pub is not None:
-            self.publish_overlay_image_msg(msg, cv_image, result["aruco_marker"])
+        # declare_parameter comment above). Published whenever there's
+        # anything to draw -- aruco_marker corners/axes, per-hole quadrant
+        # labels, OR depth_perception's stabilized positions (2026-07-27) --
+        # that last condition is why a stabilized dot can still be drawn/
+        # published even on a frame where THIS frame's result has neither
+        # aruco_marker nor hole at all.
+        if self.overlay_image_pub is not None and (
+            "aruco_marker" in result or "hole" in result
+            or self._latest_stable_positions is not None
+        ):
+            self.publish_overlay_image_msg(msg, cv_image, result)
 
         # cup_holder/hole publish unconditionally, regardless of "active" --
         # depth-perception needs this stream running continuously either way.
@@ -444,7 +761,14 @@ class YoloMarkerBridgeNode(Node):
                 det.confidence = float(d.get("confidence", 0.0))
                 bbox = d.get("bbox", [0.0, 0.0, 0.0, 0.0])
                 det.bbox = [float(v) for v in bbox]
+                det.hole_number = 0  # unset/not-applicable by default
                 array_msg.detections.append(det)
+
+        # Quadrant-label every "hole" entry just added above (aruco_marker/
+        # cup_holder are left at hole_number=0 -- only one of each ever
+        # exists in frame, no ambiguity to label). See assign_hole_quadrants'
+        # own doc comment for the exact rule.
+        assign_hole_quadrants(array_msg.detections, result)
 
         self.detections_2d_pub.publish(array_msg)
 
@@ -473,31 +797,100 @@ class YoloMarkerBridgeNode(Node):
 
         self.pose_pub.publish(pose_msg)
 
-    def publish_overlay_image_msg(self, image_msg, cv_image, marker_result):
-        """Yellow border + XYZ axes overlay, matching aruco_detector_node.cpp's
-        classical overlay_image exactly (same drawDetectedMarkers/
-        drawFrameAxes calls, same overlay_border_color_bgr default, same
-        bgr8 encoding -- so a viewer/consumer of /aruco_perception/
-        overlay_image sees identical visuals regardless of which detector
-        produced it). Draws on a COPY of cv_image (never mutates the frame
-        used for the /detect request above)."""
+    def publish_overlay_image_msg(self, image_msg, cv_image, result):
+        """Yellow border + XYZ axes overlay for aruco_marker (matching
+        aruco_detector_node.cpp's classical overlay_image exactly -- same
+        drawDetectedMarkers/drawFrameAxes calls, same
+        overlay_border_color_bgr default, same bgr8 encoding -- so a viewer/
+        consumer of /aruco_perception/overlay_image sees identical visuals
+        regardless of which detector produced it), PLUS each "hole"
+        detection's quadrant label (see assign_hole_quadrants) drawn as text
+        near its centroid -- the label needs to land on this same overlay
+        image, which is why it's computed here in the bridge/producer node
+        rather than downstream in a consumer. Draws on a COPY of cv_image
+        (never mutates the frame used for the /detect request above)."""
         overlay = cv_image.copy()
 
-        # corners: [[x,y],[x,y],[x,y],[x,y]] from inference_server.py,
-        # already in full-frame pixel space (see corners_to_full_frame).
-        # drawDetectedMarkers expects a list of (1, 4, 2) float32 arrays,
-        # one per detected marker -- we only ever have the one.
-        corners = np.array(marker_result["corners"], dtype=np.float32).reshape(1, 1, 4, 2)
-        cv2.aruco.drawDetectedMarkers(
-            overlay, list(corners), None, self.overlay_border_color_bgr
-        )
+        if "aruco_marker" in result:
+            marker_result = result["aruco_marker"]
+            # corners: [[x,y],[x,y],[x,y],[x,y]] from inference_server.py,
+            # already in full-frame pixel space (see corners_to_full_frame).
+            # drawDetectedMarkers expects a list of (1, 4, 2) float32 arrays,
+            # one per detected marker -- we only ever have the one.
+            corners = np.array(marker_result["corners"], dtype=np.float32).reshape(1, 1, 4, 2)
+            cv2.aruco.drawDetectedMarkers(
+                overlay, list(corners), None, self.overlay_border_color_bgr
+            )
 
-        rvec = np.array(marker_result["rvec"], dtype=np.float64)
-        tvec = np.array(marker_result["tvec"], dtype=np.float64)
-        cv2.drawFrameAxes(
-            overlay, self.camera_matrix, self.dist_coeffs, rvec, tvec,
-            self.marker_length_m * 0.5,
-        )
+            rvec = np.array(marker_result["rvec"], dtype=np.float64)
+            tvec = np.array(marker_result["tvec"], dtype=np.float64)
+            cv2.drawFrameAxes(
+                overlay, self.camera_matrix, self.dist_coeffs, rvec, tvec,
+                self.marker_length_m * 0.5,
+            )
+
+        if "hole" in result:
+            # Recompute the same quadrant assignment used for the published
+            # Detection2DArray (cheap, keeps this function independent of
+            # publish_detections_2d's own Detection2D list) so the overlay's
+            # drawn labels always match what was published this frame.
+            holes = [Detection2D() for _ in result["hole"]]
+            for det, d in zip(holes, result["hole"]):
+                det.class_name = "hole"
+                det.cx = float(d.get("cx", 0.0))
+                det.cy = float(d.get("cy", 0.0))
+            assign_hole_quadrants(holes, result)
+
+            for det in holes:
+                label = str(det.hole_number)
+                text_pos = (int(det.cx) + 8, int(det.cy) - 8)
+                # Black outline + green fill for readability against any
+                # background (matches the "clear/readable" requirement --
+                # a single solid color alone can wash out against a light
+                # cup_holder surface).
+                cv2.putText(
+                    overlay, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9, (0, 0, 0), 3, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    overlay, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9, (0, 255, 0), 2, cv2.LINE_AA,
+                )
+                cv2.circle(overlay, (int(det.cx), int(det.cy)), 4, (0, 255, 0), -1)
+
+        # depth_perception_node's stabilized positions (2026-07-27) --
+        # drawn in a DISTINCT color (cyan/magenta) from the green raw-YOLO
+        # markers above, specifically so the two are visually
+        # distinguishable on one image: this is the "held last known
+        # position" the flicker-fix mechanism produces, not this frame's
+        # raw detection. Drawn regardless of whether "hole"/"aruco_marker"
+        # were present in THIS frame's result at all -- that's the whole
+        # point of subscribing to a continuous stream instead of deriving
+        # this from `result` -- so a stabilized dot keeps showing even on
+        # a frame where YOLO found nothing. No-op (nothing extra drawn) if
+        # depth_perception_node has never published anything yet.
+        if self._latest_stable_positions is not None:
+            for position in self._latest_stable_positions.positions:
+                px, py = int(position.px), int(position.py)
+                # Magenta = held (unchanged since last real update), cyan =
+                # just drifted (this exact update moved the position) --
+                # lets an operator visually confirm real movement is being
+                # tracked, not just that a dot exists.
+                color = (255, 255, 0) if position.drifted else (255, 0, 255)
+                cv2.circle(overlay, (px, py), 8, color, 2)
+                if position.class_name == "hole":
+                    label = "h%d*" % position.hole_number
+                else:
+                    label = "%s*" % position.class_name
+                text_pos = (px + 8, py + 20)
+                cv2.putText(
+                    overlay, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, (0, 0, 0), 3, cv2.LINE_AA,
+                )
+                cv2.putText(
+                    overlay, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6, color, 1, cv2.LINE_AA,
+                )
 
         try:
             overlay_msg = self.bridge.cv2_to_imgmsg(overlay, encoding="bgr8")

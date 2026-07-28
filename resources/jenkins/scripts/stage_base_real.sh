@@ -20,7 +20,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/pipeline_common.sh"
 
 RESOURCES_SHELL_DIR="$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell"
+
+# colcon's generated setup.bash references its own internal vars (e.g.
+# COLCON_TRACE) without defaulting them — fatal under this script's own
+# `set -u` (confirmed live in stage_base_sim.sh: "setup.bash: line 11:
+# COLCON_TRACE: unbound variable" killed that stage before it ran a
+# single ros2 command; same root cause applies here). Disable -u for just
+# this one sourced file, then restore it immediately after.
+set +u
 source ~/ros2_ws/install/setup.bash
+set -u
 
 echo "=== [stage_base_real] Checking real robot driver status (fail-fast) ==="
 if ! "$RESOURCES_SHELL_DIR/check_real_driver_fastfail.sh"; then

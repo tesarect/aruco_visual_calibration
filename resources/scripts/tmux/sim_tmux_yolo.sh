@@ -42,7 +42,7 @@ YOLO_BRIDGE_SCRIPTS_DIR="$RESOURCES_DIR/../../aruco_perception_yolo_bridge/resou
 source "$SHELL_DIR/logging.sh"
 declare_loggable_panes inference_server yolo_marker_bridge
 parse_log_args "$@"
-setup_log_dir
+setup_log_dir "$SESSION"
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Killing existing tmux session: $SESSION"

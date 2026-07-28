@@ -184,25 +184,27 @@ fi
 # needed here (that would be interactive shell access, a different
 # feature, out of scope for this pipeline).
 #
-# Listing the specific blueocean-* sub-plugins actually needed (pipeline
-# visualization + dashboard + REST backing them), NOT the "blueocean"
-# umbrella meta-plugin — that umbrella pulls in every SCM-specific Blue
-# Ocean integration (blueocean-bitbucket-pipeline, blueocean-github-pipeline,
-# etc.), none of which apply here (this project deploys by hand-copy, not
-# git/Bitbucket/GitHub webhooks). Confirmed live: blueocean-bitbucket-
-# pipeline failed dependency resolution on this Jenkins version and
-# cascaded into blueocean-pipeline-editor and blueocean itself failing to
-# load — dropping the umbrella and the unneeded SCM plugins avoids pulling
-# in that broken dependency at all.
+# Using the "blueocean" umbrella meta-plugin + "blueocean-pipeline-editor"
+# explicitly (matches exactly what the user installed by hand through the
+# Jenkins UI — Manage Jenkins > Plugins > "Blue Ocean" + "Blue Ocean
+# Pipeline Editor" — and confirmed STABLE on their live instance). This
+# supersedes an EARLIER, narrower choice (blueocean-pipeline-editor/
+# -dashboard/-rest/-web only, deliberately excluding the umbrella): that
+# narrower list was chosen after blueocean-bitbucket-pipeline (a
+# transitive dep of the umbrella) once failed dependency resolution and
+# cascaded into blueocean-pipeline-editor/blueocean itself failing to
+# load. Reverted to the umbrella per the user's explicit choice after
+# confirming it installs/runs fine on their actual rosject — if a FRESH
+# install ever hits that same failure again, Jenkins will fail to start
+# and this is the first place to look; fall back to the narrower list
+# above (in this file's git history) if so.
 PLUGIN_DIR="$JENKINS_HOME/plugins"
 PLUGINS_TXT="$JENKINS_HOME/plugins.txt"
 cat > "$PLUGINS_TXT" <<'EOF'
 workflow-aggregator
 pipeline-stage-view
+blueocean
 blueocean-pipeline-editor
-blueocean-dashboard
-blueocean-rest
-blueocean-web
 timestamper
 ws-cleanup
 EOF

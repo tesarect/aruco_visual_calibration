@@ -19,15 +19,28 @@
 # as any other package in that list; whether to also RUN it is a separate,
 # still-open question flagged to the user, not decided here.
 #
-# BUILD_MODE (env var, set by the Jenkinsfile from its BUILD_MODE choice
-# parameter — dev|deploy, default dev): "dev" runs an incremental
-# --symlink-install build (matches vcbuildsymlink — fast re-runs, for
-# iterating on the pipeline itself); "deploy" wipes build/install for the
-# packages above first (matches vccleanbuildsymlink) then builds clean —
-# for actual "fresh, verified, presentation-ready" runs. Defaults to "dev"
-# if unset so this script still works standalone (e.g. run by hand outside
-# Jenkins) without needing the var exported first.
-BUILD_MODE="${BUILD_MODE:-dev}"
+# BUILD (env var, set by the Jenkinsfile from its BUILD choice parameter —
+# complete_build|vcpkgs_build|none, default vcpkgs_build): three distinct
+# modes, added after a move_group startup failure in the Base(sim) stage
+# raised the question of whether a stale/partial build was the real root
+# cause (rather than a readiness-check timing issue) —
+#   complete_build — matches aliases.sh's allcleanbuild(): wipes the
+#     ENTIRE build/, install/, and log/ directories, then a plain
+#     `colcon build` (whole workspace, no --packages-up-to, no
+#     --symlink-install). Slowest, most thorough — rules out ANY stale
+#     artifact anywhere in the workspace, not just this project's own
+#     packages.
+#   vcpkgs_build — matches aliases.sh's vccleanbuildsymlink(): wipes
+#     build/install for ONLY the package list above, then
+#     `colcon build --packages-up-to ... --symlink-install`. Faster than
+#     complete_build (doesn't touch instructor-provided/vendored
+#     packages' existing build artifacts), still guarantees a fresh build
+#     of everything this project actually owns.
+#   none — skips colcon build entirely, assumes `~/ros2_ws/install`
+#     already has a working build from a prior run. Fastest — for
+#     re-testing a LATER stage (e.g. Base (sim)) without re-touching the
+#     build at all.
+BUILD="${BUILD:-vcpkgs_build}"
 
 set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,8 +56,25 @@ PACKAGES="sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs
     depth_perception orchestrator calibration_validation real_ur3e_description \
     robotiq_85_msgs"
 
-if [ "$BUILD_MODE" = "deploy" ]; then
-    echo "=== [stage_build] BUILD_MODE=deploy — wiping build/install for the package list first (matches vccleanbuildsymlink) ==="
+case "$BUILD" in
+  none)
+    echo "=== [stage_build] BUILD=none — skipping colcon build entirely (assumes ~/ros2_ws/install is already built) ==="
+    : > "$BUILD_LOG"
+    echo "=== [stage_build] Build stage complete (skipped) ==="
+    exit 0
+    ;;
+
+  complete_build)
+    echo "=== [stage_build] BUILD=complete_build — wiping build/, install/, log/ entirely (matches allcleanbuild) ==="
+    rm -rf build/ install/ log/
+    echo "=== [stage_build] colcon build (whole workspace, no --packages-up-to, no --symlink-install) ==="
+    colcon build \
+        > "$BUILD_LOG" 2>&1
+    BUILD_STATUS=$?
+    ;;
+
+  vcpkgs_build)
+    echo "=== [stage_build] BUILD=vcpkgs_build — wiping build/install for the package list only (matches vccleanbuildsymlink) ==="
     rm -rf build/sim_ur3e_moveit_config build/real_ur3e_moveit_config \
         build/visual_calibration_msgs build/visual_calibration_moveit \
         build/aruco_perception build/aruco_perception_yolo_bridge \
@@ -55,16 +85,18 @@ if [ "$BUILD_MODE" = "deploy" ]; then
         install/aruco_perception install/aruco_perception_yolo_bridge \
         install/depth_perception install/orchestrator install/calibration_validation \
         install/real_ur3e_description install/robotiq_85_msgs
-elif [ "$BUILD_MODE" != "dev" ]; then
-    echo "[stage_build] Unknown BUILD_MODE '$BUILD_MODE' (expected dev|deploy) — failing stage."
-    exit 1
-fi
+    echo "=== [stage_build] colcon build --packages-up-to ... --symlink-install (see header for full list) ==="
+    # shellcheck disable=SC2086
+    colcon build --packages-up-to $PACKAGES --symlink-install \
+        > "$BUILD_LOG" 2>&1
+    BUILD_STATUS=$?
+    ;;
 
-echo "=== [stage_build] BUILD_MODE=$BUILD_MODE — colcon build --packages-up-to ... --symlink-install (see header for full list) ==="
-# shellcheck disable=SC2086
-colcon build --packages-up-to $PACKAGES --symlink-install \
-    > "$BUILD_LOG" 2>&1
-BUILD_STATUS=$?
+  *)
+    echo "[stage_build] Unknown BUILD '$BUILD' (expected complete_build|vcpkgs_build|none) — failing stage."
+    exit 1
+    ;;
+esac
 
 if [ "$BUILD_STATUS" -ne 0 ]; then
     echo "[stage_build] colcon build FAILED (exit $BUILD_STATUS) — see build_colcon.log — failing stage."

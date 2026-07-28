@@ -2,9 +2,10 @@
 
 # visual_calibration_moveit — class docs
 
-Classes documented here: `PlanningSceneSetup`, `TrajectoryPlanner`. Plus the
-supporting (non-class) types in `scene_object_types.hpp`, covered under
-`PlanningSceneSetup` since that's the only class that uses them.
+Classes documented here: `PlanningSceneSetup`, `TrajectoryPlanner`,
+`PresetPoses`. Plus the supporting (non-class) types in
+`scene_object_types.hpp`, covered under `PlanningSceneSetup` since that's
+the only class that uses them.
 
 Not documented: `MtcTrajectory` — a disabled stub (MoveIt Task Constructor
 build is unavailable upstream, see `README.md`'s known-limitation note), not
@@ -12,7 +13,8 @@ real working code.
 
 Per-parameter YAML references:
 [scene_objects.md](./scene_objects.md),
-[trajectory_planner.md](./trajectory_planner.md).
+[trajectory_planner.md](./trajectory_planner.md),
+[preset_poses.md](./preset_poses.md).
 
 ---
 
@@ -35,8 +37,11 @@ classDiagram
 ```
 
 Publishes the cafeteria's static obstacles (coffee machine, cupholder,
-countertop, wall) into the MoveIt2 planning scene, so trajectory planning
-knows to avoid them. Parameters: [scene_objects.md](./scene_objects.md).
+countertop, wall, and — a placeholder guarding the wall-mounted real
+camera, also present in sim for style parity — camera) into the MoveIt2
+planning scene, so trajectory planning knows to avoid them. Each object can
+be individually disabled via its own `<object>.enabled` parameter without
+deleting its config. Parameters: [scene_objects.md](./scene_objects.md).
 
 ### PlanningSceneSetup
 
@@ -61,6 +66,7 @@ classDiagram
         Cupholder
         Countertop
         Wall
+        Camera
     }
     class ShapeType {
         <<enumeration>>
@@ -94,7 +100,10 @@ classDiagram
 ```
 
 - **`SceneObjectId`** — which known object this is (`CoffeeMachine`,
-  `Cupholder`, `Countertop`, `Wall`).
+  `Cupholder`, `Countertop`, `Wall`, `Camera` — the last a placeholder box
+  guarding the wall-mounted real camera, also present in sim for style
+  parity even though sim's camera is wrist-mounted and not a real
+  collision concern there).
 - **`ShapeType`** — whether the object's collision geometry is a loaded mesh
   file or one-or-more axis-aligned boxes.
 - **`Pose2D`** — a flat x/y/z/yaw pose (no full quaternion — every known
@@ -129,30 +138,81 @@ classDiagram
     class TrajectoryPlanner {
         +TrajectoryPlanner(node, planning_group)
         +planAndExecute(target_pose) bool
+        +planAndExecute(joint_values) bool
         +planAndExecuteCartesian(target_pose, min_fraction) bool
         +planAndExecuteInFrontOf(config, tf_timeout) bool
         +planAndExecuteInFrontOf(tf_timeout) bool
         +tracePath(waypoints, planning_mode) bool
-        +getPolygonWaypoints(tf_timeout) vector~Pose~
-        -polygonWaypointsAroundStandoff(tf_timeout) vector~Pose~
+        +getPolygonWaypoints(tf_timeout) pair~vector~Pose~, Pose~
+        +getStandoffPose(tf_timeout) optional~pair~Pose, bool~~
+        +getPresetPose(name) optional~Pose~
+        +getPresetJointValues(name) optional~vector~double~~
+        +planAndExecuteToPreset(name) bool
+        -polygonWaypointsAroundStandoff(tf_timeout) pair~vector~Pose~, Pose~
         -handleTracePath(request, response) void
         -handleTracePolygon(request, response) void
         -handleGetPolygonWaypoints(request, response) void
-        -loadStandoffConfigFromParams() StandoffConfig
-        -loadPolygonConfigFromParams() PolygonConfig
+        -handleGetStandoffPose(request, response) void
+        -handleGetPresetPose(request, response) void
+        -handleMoveToPreset(request, response) void
+        -onSequencedGoalReached(goal_pose) void
+        -onStayTimerFired() void
+        -onLiftWaitTimerFired() void
+        -closeGripperOnStartup() void
+        -runStartupSequence() void
+        -publishCurrentPoseName(name) void
+        -publishPlanningFailure(context, message) void
         -node_ Node
         -move_group_interface_ MoveGroupInterface
         -standoff_config_ StandoffConfig
         -polygon_config_ PolygonConfig
+        -planner_config_ PlannerConfig
+        -sequence_config_ SequenceConfig
+        -preset_poses_ PresetPoses
+        -arm_state_ ArmState
     }
     TrajectoryPlanner ..> StandoffConfig : uses
     TrajectoryPlanner ..> PolygonConfig : uses
+    TrajectoryPlanner ..> PlannerConfig : uses
+    TrajectoryPlanner ..> SequenceConfig : uses
+    TrajectoryPlanner ..> PresetPoses : uses
+    TrajectoryPlanner ..> ArmState : uses
+    class ArmState {
+        <<enumeration>>
+        IDLE
+        SETTLED_AT_GOAL
+        LIFTED_IDLE
+        STANDBY
+    }
 ```
 
 Drives the arm via MoveIt2's `MoveGroupInterface`: plans and executes moves
-to a target pose, either as single shots or as a sequence of waypoints. Has
-no awareness of calibration — it's a plain mover other nodes call into.
-Parameters: [trajectory_planner.md](./trajectory_planner.md).
+to a target pose or named preset, either as single shots or as a sequence
+of waypoints. Has no built-in understanding of what the robot's task is —
+it doesn't know what "calibration" or "inspection" means, only "move to
+this pose" — but does keep a small, bounded amount of memory about its own
+recent activity (`arm_state_`, `ArmState`) to automatically run a
+stay-then-lift-then-standby sequence after a "sequenced goal" (see
+`TracePath.srv`'s `is_sequenced_goal` field), so callers don't have to
+drive every step of that dance themselves. Parameters:
+[trajectory_planner.md](./trajectory_planner.md).
+
+**`ArmState`** — `IDLE` (no sequenced goal pending; also the state right
+after startup/home/cal_ready moves, which never trigger this machinery) →
+`SETTLED_AT_GOAL` (just reached a sequenced goal, waiting out
+`stay_seconds_at_goal`) → `LIFTED_IDLE` (lifted straight up to
+`lift_target_z_m`, waiting out `lift_wait_seconds` with no new sequenced
+goal) → `STANDBY` (at the `"standby"` preset, stays until the next
+sequenced goal). Every sequenced goal always resolves to the same two
+destinations (a lift straight up from wherever it was reached, then
+`"standby"`) — this does not track or return to any prior pose.
+
+**Startup sequence** (`runStartupSequence`, called once from the
+constructor): publishes an unconditional gripper-close command (see
+`closeGripperOnStartup`) first, then — if `move_to_home_on_startup` is true
+— moves to the `"home"` preset. Failures are logged and reported via
+`~/planning_failure`, never thrown, and never block node startup either
+way.
 
 ### TrajectoryPlanner
 
@@ -167,6 +227,21 @@ guarantee on the path, but generally more likely to succeed near limits or
 obstacles than the Cartesian variant.
 
 Parameters: `target_pose`
+
+### planAndExecute (joint values overload)
+
+Plans and executes directly to a joint configuration (`setJointValueTarget`)
+instead of a Cartesian pose (`setPoseTarget`) — no IK involved, so there's
+no ambiguity about which of the arm's multiple valid IK solutions gets
+used, since the exact joint values are given directly. Used via a
+joint-value preset (see `planAndExecuteToPreset`) when a specific joint
+configuration — not just a Cartesian pose — has been verified to work (the
+UR3e can reach the same Cartesian target via multiple IK branches that
+leave very different amounts of margin for downstream moves). Returns
+`false` without planning if `joint_values.size()` doesn't match the
+planning group's DOF count.
+
+Parameters: `joint_values`
 
 ### planAndExecuteCartesian
 
@@ -227,25 +302,202 @@ Parameters: `waypoints`, `planning_mode`
 
 ### getPolygonWaypoints
 
-Computes and returns the polygon waypoints around the standoff pose,
+Computes and returns the polygon waypoints AND their center pose,
 **without moving the arm** — lets a caller (e.g.
-`calibration_broadcaster_node`) drive them one at a time itself, without
-duplicating this class's standoff/polygon geometry or config.
+`calibration_broadcaster_node`) drive them one at a time itself, and
+generate its own additional offset poses from the same center (e.g. a
+random-pose sampling phase), without duplicating this class's polygon
+geometry/config or making a second "get current pose" round-trip. Returns
+an empty waypoint list (with a default-constructed center pose) if the
+current-pose TF lookup fails.
 
 Parameters: `tf_timeout`
 
-**The polygon waypoint math:** starting from the standoff pose (see
-`planAndExecuteInFrontOf`), `polygon_num_corners` points are placed evenly
-around a circle of radius `polygon_radius_m`, in the standoff pose's own
-local X/Y plane. Every corner keeps the same facing orientation as the
-center — only the position changes — so the target frame keeps facing the
-camera at every corner, just from a slightly different angle. Corners are
-returned in angular order, so consecutive waypoints are always physically
-adjacent (no jumping across the polygon between moves).
+**The polygon waypoint math:** starting from the arm's own **current
+pose** (not the camera's TF-derived standoff pose — redesigned so a
+caller's random-offset phase samples around wherever the arm actually is,
+not a value that may already be stale by the time sampling starts),
+`polygon_num_corners` points are placed evenly around a circle of radius
+`polygon_radius_m`, in that current pose's own local X/Y plane. Every
+corner keeps the same orientation as the center — only the position
+changes. Corners are returned in angular order, so consecutive waypoints
+are always physically adjacent (no jumping across the polygon between
+moves).
 
 ```mermaid
 flowchart TD
-    S["Standoff pose\n(center)"] --> P["Place N corners evenly\naround radius_m circle,\nin standoff's local X/Y plane"]
-    P --> O["Each corner keeps center's\nfacing orientation"]
-    O --> W["Ordered waypoint list\n(angular order)"]
+    S["Arm's current pose\n(center)"] --> P["Place N corners evenly\naround radius_m circle,\nin current pose's local X/Y plane"]
+    P --> O["Each corner keeps center's\norientation"]
+    O --> W["Ordered waypoint list\n(angular order) + center_pose"]
 ```
+
+### getStandoffPose
+
+Computes the standoff pose from the configured `StandoffConfig`
+**without moving the arm**. If the `camera_frame` TF lookup fails, falls
+back to the `"standoff"` entry in `preset_poses_` — the returned pair's
+second element (`used_fallback`) distinguishes which source was used.
+Returns `std::nullopt` only if neither a live TF lookup nor a `"standoff"`
+preset was available.
+
+Parameters: `tf_timeout`
+
+### getPresetPose
+
+Returns the named preset's Cartesian pose **without moving the arm**.
+Returns `std::nullopt` if no preset with that name was loaded (including
+if that name only has a joint-value preset).
+
+Parameters: `name`
+
+### getPresetJointValues
+
+Returns the named preset's joint values **without moving the arm**.
+Returns `std::nullopt` if no joint-value preset with that name was loaded
+(including if that name only has a Cartesian pose preset).
+
+Parameters: `name`
+
+### planAndExecuteToPreset
+
+Moves to the named preset — prefers a joint-value preset (pins the exact
+IK branch, via the `planAndExecute(joint_values)` overload) if one is
+loaded for `name`; otherwise falls back to the Cartesian pose preset if one
+is loaded instead. Returns `false` without planning if neither exists for
+`name`. Never consults TF — callers needing TF-first-then-preset-fallback
+behavior should use `getStandoffPose()`/`planAndExecuteInFrontOf()`
+instead.
+
+Parameters: `name`
+
+### onSequencedGoalReached
+
+Called after a successful `is_sequenced_goal` move. Cancels any pending
+stay/lift timer, transitions to `ArmState::SETTLED_AT_GOAL`, and
+(re)starts the stay timer for `stay_seconds_at_goal`. The lift computed
+once that timer fires is derived from `goal_pose` — the pose the arm just
+reached — not from any pose the arm was at before the goal.
+
+Parameters: `goal_pose`
+
+### onStayTimerFired
+
+Fires once the stay timer elapses. Plans and executes to `goal_pose_` with
+Z set to `lift_target_z_m` (same X/Y/orientation, an absolute Z target, not
+a relative offset). On success, transitions to `ArmState::LIFTED_IDLE` and
+starts the lift-wait timer. On failure, reports via
+`publishPlanningFailure` and returns to `ArmState::IDLE` — does not
+proceed to standby from a failed lift, since the arm's actual position at
+that point is uncertain.
+
+### onLiftWaitTimerFired
+
+Fires once the lift-wait timer elapses with no new sequenced goal having
+arrived (a new sequenced goal cancels this timer instead, via
+`onSequencedGoalReached`). Plans and executes to the `"standby"` preset; on
+success transitions to `ArmState::STANDBY` and publishes `"standby"` via
+`publishCurrentPoseName`. On failure, reports via `publishPlanningFailure`
+and returns to `ArmState::IDLE`.
+
+### closeGripperOnStartup
+
+Publishes one close command on `/gripper/cmd` (`robotiq_85_msgs/GripperCmd`)
+— called once, unconditionally, as the first step of `runStartupSequence`,
+before the home move. Unconditional rather than an "if open, close" check,
+because the real gripper's `/joint_states` entries were confirmed to report
+the same static value regardless of actual open/closed state — there's no
+reliable signal available to check first. Runs on both sim and real: on
+sim, nothing subscribes to `/gripper/cmd` (RG2 is driven via MoveIt's
+`gripper_controller` action instead), so the publish is a harmless no-op
+there. Does not wait for or verify the close completed (no feedback signal
+exists) — only pauses `gripper_close_settle_seconds` before
+`runStartupSequence` proceeds to the home move.
+
+### runStartupSequence
+
+Called once from the constructor. Publishes the startup gripper-close
+command first, then — if `move_to_home_on_startup` is true — moves to the
+`"home"` preset. An explicit, opt-in reversal of this node's original
+"never move on startup" design; the parameter makes auto-moving an
+auditable config decision rather than silent behavior. On failure, logs
+the error and reports it via `~/planning_failure` — never throws, never
+blocks node startup either way.
+
+### publishCurrentPoseName
+
+Publishes `name` on `~/current_pose_name` (`transient_local`, so a late
+subscriber — e.g. the web bridge reconnecting — immediately gets the last-
+published value instead of nothing). Called after every successful move
+that lands on a known named pose; not called for arbitrary/unnamed
+waypoints (e.g. calibration polygon corners).
+
+Parameters: `name`
+
+### publishPlanningFailure
+
+Publishes one `PlanningFailure` message on `~/planning_failure` — an
+event, not a state, so plain reliable QoS (no `transient_local`). Also
+logs via `RCLCPP_ERROR` at the call site; this method only handles the
+web-facing side.
+
+Parameters: `context`, `message`
+
+---
+
+## PresetPoses
+
+```mermaid
+classDiagram
+    class PresetPoses {
+        +PresetPoses(node)
+        +get(name) optional~Pose~
+        +getJointValues(name) optional~vector~double~~
+        -poses_ map~string, Pose~
+        -joint_values_ map~string, vector~double~~
+    }
+```
+
+Named fallback poses for `end_effector_frame`, in the planning frame —
+used when a deterministic pose can't be computed via TF (e.g. no
+`camera_frame` TF yet on the real robot before first calibration), OR to
+pin a move to one specific, already-verified joint configuration rather
+than whatever IK solution the planner happens to land on for a given
+Cartesian target. Loaded from `preset_poses_{sim,real}.yaml`; a node
+started without such a file ends up with an empty preset set, not an error
+— every named preset is optional by design. Parameters:
+[preset_poses.md](./preset_poses.md).
+
+**Why a preset can need joint values instead of just a pose:** the UR3e
+has multiple valid IK solutions (elbow-up/elbow-down, wrist-flipped, ...)
+for the same Cartesian target — which one a joint-space plan lands in
+depends on the path taken to get there, not just the target itself. Two
+different joint-space paths to the exact same Cartesian `cal_ready` pose
+were confirmed to produce joint configurations differing by 90–250° on
+several joints — only one of those configurations reliably let downstream
+Cartesian polygon-corner moves succeed. A Cartesian preset alone can't
+force a specific IK branch; a joint-value preset can, via
+`setJointValueTarget()` instead of `setPoseTarget()`.
+
+### PresetPoses
+
+Reads `preset_names` and, per entry, either a `<name>.position`/
+`<name>.orientation` pair or a `<name>.joint_values` array from `node`'s
+declared parameters.
+
+Parameters: `node`
+
+### get
+
+Returns the named preset's Cartesian pose, or `std::nullopt` if no
+Cartesian preset with that name was loaded (including if that name only
+has a joint-value preset).
+
+Parameters: `name`
+
+### getJointValues
+
+Returns the named preset's joint values (in the planning group's own
+joint order), or `std::nullopt` if no joint-value preset with that name
+was loaded.
+
+Parameters: `name`

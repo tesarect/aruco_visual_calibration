@@ -155,9 +155,30 @@ fi
 
 # JENKINS_HOME's workspace root — matches pipeline_common.sh's
 # WORKSPACE-derived $LOG_DIR (Jenkins sets $WORKSPACE per-job to
-# JENKINS_HOME/workspace/<job-name>). Globbing */logs/build_colcon.log
-# under workspace/ picks up build_colcon.log for ANY job name, not just
-# today's, without hardcoding the pipeline's job name here.
+# JENKINS_HOME/workspace/<job-name>, and pipeline_common.sh further nests
+# LOG_DIR under that job's own $BUILD_NUMBER — see that script's own
+# comment on why). Globbing */logs/*/*.log under workspace/ picks up
+# EVERY stage's log file (build_colcon.log, base_sim_gazebo.log,
+# base_sim_move_group.log, base_sim_rviz.log, etc. — see stage_build.sh/
+# stage_base_sim.sh's own $LOG_DIR/*.log naming) for ANY job name and ANY
+# build number, without hardcoding either here or an exhaustive list of
+# every log filename (a new stage script that writes to
+# $LOG_DIR/whatever.log is picked up automatically, no Promtail config
+# change needed).
+#
+# pipeline_stages below adds two labels:
+#   - "component", derived from each file's own name (e.g.
+#     "base_sim_gazebo", "build_colcon") via Promtail's builtin filename
+#     template function — lets Grafana filter by component (e.g.
+#     {component="base_sim_gazebo"}).
+#   - "build_number", extracted from the path segment pipeline_common.sh
+#     nests logs under (.../logs/<BUILD_NUMBER>/...) via a regex match —
+#     lets Grafana filter to a SPECIFIC Jenkins build (e.g.
+#     {build_number="42"}), or a dashboard template variable can default
+#     to the latest one, instead of every past build's logs staying
+#     interleaved together forever.
+# Both alongside the shared "job" label, so everything's still queryable
+# together as one combined stream when wanted (see the dashboards below).
 JENKINS_HOME_DIR="$HOME/ros2_ws/src/visual_calibration/jenkins"
 PROMTAIL_CONFIG="$PROMTAIL_HOME/promtail-config.yaml"
 cat > "$PROMTAIL_CONFIG" <<EOF
@@ -173,13 +194,24 @@ clients:
   - url: http://127.0.0.1:${LOKI_PORT}/loki/api/v1/push
 
 scrape_configs:
-  - job_name: jenkins_build_colcon
+  - job_name: visual_calibration_sim
     static_configs:
       - targets:
           - localhost
         labels:
-          job: jenkins_build_colcon
-          __path__: ${JENKINS_HOME_DIR}/workspace/*/logs/build_colcon.log
+          job: visual_calibration_sim
+          __path__: ${JENKINS_HOME_DIR}/workspace/*/logs/*/*.log
+    pipeline_stages:
+      - template:
+          source: component
+          template: '{{ base .Path | trimSuffix ".log" }}'
+      - labels:
+          component:
+      - regex:
+          source: filename
+          expression: '.*/logs/(?P<build_number>[^/]+)/[^/]+\.log$'
+      - labels:
+          build_number:
 EOF
 
 # ========= Resolve the real public path prefix =========
@@ -298,6 +330,13 @@ http_addr = 127.0.0.1
 http_port = ${GRAFANA_PORT}
 root_url = ${GRAFANA_ROOT_URL}
 serve_from_sub_path = ${GRAFANA_SERVE_FROM_SUB_PATH}
+# Logs every request's actual auth accept/reject decision straight to
+# grafana.log (off by default). Left ON permanently, not a temporary
+# debug flag — this project's Grafana auth setup went through several
+# rounds of guessing before this got turned on; keeping it on means any
+# future auth issue is diagnosable directly from the log instead of
+# inferring from curl round-trips and symptoms.
+router_logging = true
 
 [live]
 # See the GRAFANA_ALLOWED_ORIGINS resolution above for why this is set
@@ -338,11 +377,26 @@ admin_password = rosject_admin_pw
 # Live) — unlike a normal top-level navigation or fetch()/XHR, which Lax
 # does cover (explaining why regular page loads and non-live Explore
 # queries worked fine while only Live failed). SameSite=None is the
-# documented fix for exactly this case, and per browser spec (and
-# Grafana's own handling) requires Secure to also be set — Grafana sets
-# Secure automatically once cookie_samesite is none, no separate
-# cookie_secure line needed.
+# documented fix for exactly this case, and per browser spec requires
+# Secure to also be set on the cookie, or browsers silently refuse to
+# store/send it at all.
 cookie_samesite = none
+# cookie_secure=true: REQUIRED alongside cookie_samesite=none above — a
+# PRIOR version of this comment claimed Grafana sets Secure automatically
+# once cookie_samesite=none, which is FALSE (checked directly against
+# Grafana's own v11.4.0 defaults.ini: cookie_secure is a fully
+# independent, manually-set boolean, "default is false", with no
+# documented link to cookie_samesite at all). That incorrect assumption
+# caused a real bug: this whole stack is reached over HTTPS at the
+# browser, but Grafana itself only ever sees plain HTTP (this proxy talks
+# to Grafana over http://127.0.0.1, not https) — so without this setting,
+# Grafana's session cookie was missing Secure, and SameSite=None without
+# Secure gets silently dropped by browsers, causing login to succeed
+# server-side (confirmed via curl) while the browser never actually kept
+# the session, bouncing back to the login page every time. Set explicitly
+# per Grafana's own documented reverse-proxy-behind-HTTPS guidance, not
+# left to any implicit/inferred behavior.
+cookie_secure = true
 # csrf_trusted_origins: confirmed live — after the cookie_samesite fix,
 # login itself works (verified: POST .../login returns 200/"Logged in"),
 # but the forced "change default password" follow-up screen's own
@@ -388,12 +442,21 @@ EOF
 # view immediately after first boot, no manual "Add data source" click
 # needed (re-written every run, matching install_jenkins.sh's
 # re-provisioned-every-session convention).
+#
+# uid is set EXPLICITLY and fixed (not left to Grafana's auto-generated
+# default) so the "Jenkins Build Log" dashboard provisioned below can
+# reference this datasource by a known-stable ID — without this, Grafana
+# assigns a random uid per install, which would silently break the
+# dashboard's panel (pointing at a datasource UID from a PREVIOUS
+# install) every time this script re-provisions on a fresh rosject.
+LOKI_DATASOURCE_UID="loki-jenkins-logs"
 PROVISIONING_DS_DIR="$GRAFANA_HOME/provisioning/datasources"
 mkdir -p "$PROVISIONING_DS_DIR"
 cat > "$PROVISIONING_DS_DIR/loki.yaml" <<EOF
 apiVersion: 1
 datasources:
   - name: Loki
+    uid: ${LOKI_DATASOURCE_UID}
     type: loki
     access: proxy
     url: http://127.0.0.1:${LOKI_PORT}
@@ -402,6 +465,137 @@ datasources:
 EOF
 mkdir -p "$GRAFANA_HOME/provisioning/dashboards" "$GRAFANA_HOME/provisioning/alerting" \
   "$GRAFANA_HOME/provisioning/notifiers" "$GRAFANA_HOME/provisioning/plugins"
+
+# Provisioned "Jenkins Build Log" dashboard — same reasoning as the Loki
+# datasource above: one click from Grafana's home page straight to the
+# build log, instead of re-typing {job="jenkins_build_colcon"} into
+# Explore every session. Two pieces, both re-written every run: a
+# provider YAML (tells Grafana where to load dashboard JSON from) and the
+# dashboard JSON itself (one Logs panel, pre-filled with the query,
+# filterable by "component" — see the pipeline_stages label added to
+# Promtail's scrape_config above — while still showing every stage's log
+# combined/interleaved in one place via the shared "job" label).
+#
+# TWO variants, both provisioned side by side, so either can be tried/
+# switched between without editing config — per the user's request to be
+# able to test Live independently and drop it if it doesn't pan out
+# (Live's WebSocket handshake was confirmed working via curl earlier this
+# session, but never actually confirmed streaming NEW lines from a real
+# in-progress build — these two dashboards make that easy to verify):
+#   - "Simulation Visual Calibration Log" (sim-visual-calibration-log):
+#     refresh="10s", plain HTTP query polling — the proven-working
+#     mechanism, unaffected by the platform-nginx WebSocket question.
+#   - "Simulation Visual Calibration Log (Live)"
+#     (sim-visual-calibration-log-live): same query, but with the panel's
+#     own "Live" streaming enabled (liveNow) instead of interval polling.
+PROVISIONING_DASH_DIR="$GRAFANA_HOME/provisioning/dashboards"
+cat > "$PROVISIONING_DASH_DIR/provider.yaml" <<EOF
+apiVersion: 1
+providers:
+  - name: default
+    folder: ""
+    type: file
+    options:
+      path: ${PROVISIONING_DASH_DIR}
+EOF
+cat > "$PROVISIONING_DASH_DIR/sim-visual-calibration-log.json" <<EOF
+{
+  "title": "Simulation Visual Calibration Log",
+  "uid": "sim-visual-calibration-log",
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "10s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "logs",
+      "title": "All stages (filter by component=... in the query, e.g. component=\"base_sim_gazebo\")",
+      "gridPos": { "h": 24, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" },
+          "expr": "{job=\"visual_calibration_sim\"}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}
+EOF
+cat > "$PROVISIONING_DASH_DIR/sim-visual-calibration-log-live.json" <<EOF
+{
+  "title": "Simulation Visual Calibration Log (Live)",
+  "uid": "sim-visual-calibration-log-live",
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "liveNow": true,
+  "panels": [
+    {
+      "id": 1,
+      "type": "logs",
+      "title": "All stages, LIVE — WebSocket streaming (may not update through this rosject's platform proxy; see the non-Live dashboard if this stalls)",
+      "gridPos": { "h": 24, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" },
+          "expr": "{job=\"visual_calibration_sim\"}",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}
+EOF
+# Third variant — one panel PER component (Gazebo, move_group,
+# planning_scene, colcon build, etc.) instead of one combined stream, per
+# the user's request to compare both layouts and pick whichever suits
+# them. Panel list is a FIXED, hand-maintained set matching the log
+# filenames stage_build.sh/stage_base_sim.sh currently write (see the
+# component-label pipeline_stages comment above for how the label itself
+# is derived) — unlike the combined dashboard, which needs no changes when
+# a new stage script adds a new log file, THIS dashboard needs a new panel
+# block added by hand if a new component should show up here too.
+# 2-column tiled grid, 12 wide x 8 tall each.
+cat > "$PROVISIONING_DASH_DIR/sim-visual-calibration-log-by-component.json" <<EOF
+{
+  "title": "Simulation Visual Calibration Log (By Component)",
+  "uid": "sim-visual-calibration-log-by-component",
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-6h", "to": "now" },
+  "refresh": "10s",
+  "panels": [
+    { "id": 1, "type": "logs", "title": "build_colcon", "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }, "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }, "targets": [ { "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "expr": "{job=\"visual_calibration_sim\", component=\"build_colcon\"}", "refId": "A" } ] },
+    { "id": 2, "type": "logs", "title": "base_sim_gazebo", "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }, "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }, "targets": [ { "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "expr": "{job=\"visual_calibration_sim\", component=\"base_sim_gazebo\"}", "refId": "A" } ] },
+    { "id": 3, "type": "logs", "title": "base_sim_move_group", "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }, "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }, "targets": [ { "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "expr": "{job=\"visual_calibration_sim\", component=\"base_sim_move_group\"}", "refId": "A" } ] },
+    { "id": 4, "type": "logs", "title": "base_sim_planning_scene", "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }, "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }, "targets": [ { "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "expr": "{job=\"visual_calibration_sim\", component=\"base_sim_planning_scene\"}", "refId": "A" } ] },
+    { "id": 5, "type": "logs", "title": "base_sim_rviz (devdebug only)", "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 }, "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }, "targets": [ { "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "expr": "{job=\"visual_calibration_sim\", component=\"base_sim_rviz\"}", "refId": "A" } ] },
+    { "id": 6, "type": "logs", "title": "base_sim_tf_debug_markers (devdebug only)", "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 }, "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }, "targets": [ { "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "expr": "{job=\"visual_calibration_sim\", component=\"base_sim_tf_debug_markers\"}", "refId": "A" } ] },
+    { "id": 7, "type": "logs", "title": "base_sim_rqt_image_view (devdebug only)", "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 }, "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }, "targets": [ { "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "expr": "{job=\"visual_calibration_sim\", component=\"base_sim_rqt_image_view\"}", "refId": "A" } ] },
+    { "id": 8, "type": "logs", "title": "base_sim_rqt_graph (devdebug only)", "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 }, "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "options": { "showTime": true, "wrapLogMessage": true, "sortOrder": "Descending" }, "targets": [ { "datasource": { "type": "loki", "uid": "${LOKI_DATASOURCE_UID}" }, "expr": "{job=\"visual_calibration_sim\", component=\"base_sim_rqt_graph\"}", "refId": "A" } ] }
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}
+EOF
 
 # ========= Start (or report already-running) =========
 LOKI_LOG="$LOKI_HOME/loki.log"

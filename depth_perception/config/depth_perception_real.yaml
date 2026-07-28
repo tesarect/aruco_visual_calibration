@@ -1,10 +1,60 @@
-# PLACEHOLDER — not yet confirmed against the real D415 (over Zenoh).
-# camera_info_topic/rgb_image_topic below match the D415 color topics used
-# elsewhere in this project (see aruco_detector_real.yaml), but the D415's
-# depth topic name has not yet been captured live from the real robot —
-# verify with `ros2 topic list` on the rosject before trusting this file.
+# Confirmed 2026-07-27 against the recorded rosbag
+# new_diagnostics/rosbags/cupholder_depth_bag_2 (`ros2 bag info` + a direct
+# deserialize of one frame) — do not trust the topic list in progress.md/
+# CLAUDE.md for this, they were wrong here (both said /D415/depth/image_raw,
+# which this bag never recorded at all).
 depth_perception_node:
   ros__parameters:
     rgb_image_topic: "/D415/color/image_raw"
-    depth_image_topic: "/D415/depth/image_raw"  # UNCONFIRMED placeholder
+
+    # aligned_depth_to_color, NOT plain /D415/depth/image_raw — the D415's
+    # color and depth sensors sit at physically different positions on the
+    # camera, so an unaligned depth image would give a wrong 3D point for
+    # a pixel coordinate that came from YOLO running on the COLOR image.
+    # This topic is pre-registered to the color image's exact resolution
+    # (424x240, confirmed matching camera_info) and pixel grid, which is
+    # required for detection.cx/cy to index directly into it.
+    depth_image_topic: "/D415/aligned_depth_to_color/image_raw"
     camera_info_topic: "/D415/color/camera_info"
+
+    # Confirmed live: yolo_marker_bridge_node publishing real cup_holder
+    # (94-95% confidence) and hole (82-98% confidence) detections here.
+    detections_2d_topic: "/aruco_perception/detections_2d"
+
+    # Confirmed via direct rosbag inspection: this topic's encoding is
+    # 16UC1 (integer millimeters), NOT 32FC1 meters like sim's Gazebo
+    # plugin — a sampled real frame had a median raw value of 890, i.e.
+    # 0.89m, a plausible distance for a wall-mounted camera looking at a
+    # countertop. Do NOT copy sim's 1.0 here.
+    depth_scale_to_meters: 0.001
+
+    depth_patch_half_size_px: 2
+
+    # Published by calibration_orchestrator_node — see
+    # DepthPerceptionConfig::pause_while_calibration's doc comment.
+    pause_while_calibration: true
+    auto_calibrate_status_topic: "/calibration_orchestrator_node/auto_calibrate_status"
+
+    # Rolling-window sample count per tracked instance (cup_holder, or
+    # each hole_1..hole_4) before the oldest sample is dropped — see
+    # RollingWindow's doc comment.
+    rolling_window_size: 15
+
+    # "Hold last known position" drift threshold (2026-07-27) — see
+    # DepthPerceptionConfig::stable_drift_threshold_m's doc comment. A new
+    # median must move more than this many meters from the held position
+    # before it's accepted as a real change; holes/cup_holder are
+    # physically fixed, so this filters both per-frame jitter AND gaps
+    # where YOLO returns no detection at all that frame — confirmed live
+    # this session as the actual cause of the reported "flickering"
+    # (rolling_window_size alone, even set absurdly high, did not help,
+    # since a bigger window has nothing to average when no sample arrives
+    # at all).
+    stable_drift_threshold_m: 0.10
+
+    # Continuous, gap-free "held position" stream for every tracked
+    # instance ever seen — see StablePositionArray.msg's own doc comment.
+    # Consumed by yolo_marker_bridge_node's overlay (drawing a stabilized
+    # dot/label alongside its own raw per-frame boxes) and, eventually, a
+    # camera->base_link TF broadcaster.
+    stable_positions_topic: "/depth_perception/stable_positions"

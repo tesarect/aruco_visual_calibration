@@ -42,7 +42,7 @@ SHELL_DIR="$RESOURCES_DIR/shell"
 source "$SHELL_DIR/logging.sh"
 declare_loggable_panes rosbridge
 parse_log_args "$@"
-setup_log_dir
+setup_log_dir "$SESSION"
 
 if tmux has-session -t "$SESSION" 2>/dev/null; then
     echo "Killing existing tmux session: $SESSION"

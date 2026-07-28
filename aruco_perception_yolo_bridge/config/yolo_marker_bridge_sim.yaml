@@ -23,10 +23,27 @@ yolo_marker_bridge_node:
     # the local dev box and the rosject's ~/yolo_venv setup. Per the
     # locked HTTP-server architecture, this is localhost-only, never a
     # remote URL.
-    inference_server_url: "http://127.0.0.1:8600/detect"
-    request_timeout_sec: 1.0
+    # Moved 8600 -> 8601 (2026-07-28) -- a stale, never-killed old
+    # inference_server.py silently squatted on 8600, so a fresh server
+    # start failed to bind ("Address already in use") without fully
+    # exiting, leaving every /detect request served by outdated code
+    # regardless of what was fixed on the ROS side. Must match
+    # YOLO-pipeline/config/server_sim.yaml's own port.
+    inference_server_url: "http://127.0.0.1:8601/detect"
+    # Bumped 1.0 -> 8.0 (2026-07-28) -- confirmed live: inference_server.py
+    # was genuinely running (`ps aux` showed it alive) and the same
+    # request-timeout symptom real hit before (see real's own comment
+    # below/history) -- 1.0s is too tight for JPEG-encode + HTTP round-trip
+    # + a full YOLO forward pass, matching real's already-bumped value.
+    request_timeout_sec: 8.0
     confidence_threshold: 0.25
     jpeg_quality: 90
+
+    # Downscale before sending to inference_server.py (2026-07-28) — CPU-
+    # only env, no GPU; smaller image = less YOLO compute per request.
+    # possible values: 0 (disabled, native 640 resolution), 160, 240, 320,
+    # 480, or any other positive integer up to 640.
+    detect_max_width_px: 320
 
     # Overlay -- same param names/defaults as aruco_detector_sim.yaml's
     # classical overlay, so /aruco_perception/overlay_image looks identical
@@ -35,3 +52,25 @@ yolo_marker_bridge_node:
     overlay_image_topic: "/aruco_perception/overlay_image"
     overlay_border_color_bgr: [0, 255, 255]
     marker_length_m: 0.045
+
+    # Marker-cascade throttling (2026-07-27) -- see
+    # yolo_marker_bridge_node.py's __init__ comment for the full
+    # rationale (inference_server.py's marker cascade found costing
+    # 0.17-0.36s/request live, even with no marker present, starving
+    # cup_holder/hole of a smoother detection stream). 10 = only 1 in 10
+    # camera frames actually attempts marker detection; set to 1 to
+    # restore the original always-check-every-frame behavior.
+    marker_check_every_n_frames: 10
+    # Always force full-rate marker checking whenever "active" (above) is
+    # true, regardless of marker_check_every_n_frames -- calibration/
+    # auto-centering must never be starved by this throttle. Keep this
+    # true; only set false for isolated testing of the throttle itself.
+    marker_check_full_rate_when_active: false
+
+    # depth_perception_node's continuous "held position" stream (2026-07-27)
+    # — subscribed here purely to draw a stabilized dot/label on THIS
+    # node's own overlay image, alongside its raw per-frame YOLO boxes.
+    # See yolo_marker_bridge_node.py's module doc comment and
+    # StablePositionArray.msg for the full rationale. Must match
+    # depth_perception_{sim,real}.yaml's own stable_positions_topic.
+    stable_positions_topic: "/depth_perception/stable_positions"
