@@ -44,6 +44,22 @@ if [ ! -d "$VENV_DIR" ]; then
     exit 1
 fi
 
+# Kill any already-running inference_server.py FIRST (2026-07-28) — found
+# live, repeatedly, that this script previously just started a new
+# process every call with no check at all, silently leaving old instances
+# running (and still bound to the port) any time it was re-run without a
+# manual `pkill` first. This caused real, hard-to-diagnose bugs: a fresh
+# server start would fail to bind ("Address already in use") without
+# fully exiting, and the STALE old process kept serving every request —
+# meaning code fixes never actually took effect no matter how many times
+# this script was re-run, since the wrong process was answering the
+# whole time. pkill's own exit code is ignored (`|| true`) since "no
+# matching process" is the expected, successful case on a clean machine,
+# not an error.
+echo " ✚ Killing any existing inference_server.py first..."
+pkill -9 -f "python3 inference_server.py" || true
+sleep 1
+
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 cd "$YOLO_PIPELINE_DIR"

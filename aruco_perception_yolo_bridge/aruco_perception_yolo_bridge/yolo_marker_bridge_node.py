@@ -150,7 +150,12 @@ from rclpy.qos import qos_profile_sensor_data
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PoseStamped
-from visual_calibration_msgs.msg import Detection2D, Detection2DArray, StablePositionArray
+from visual_calibration_msgs.msg import (
+    AutoCalibrateStatus,
+    Detection2D,
+    Detection2DArray,
+    StablePositionArray,
+)
 
 
 def rotation_matrix_to_quaternion(rotation_matrix):
@@ -422,6 +427,39 @@ class YoloMarkerBridgeNode(Node):
             self.stable_positions_callback, 10,
         )
 
+        # "extras" overlay toggle (2026-07-28) -- the magenta/cyan
+        # stable_positions markers are OFF by default now (per explicit
+        # request to reduce visual complexity: "let's have only the green
+        # centroid marker") and only drawn when this is explicitly true --
+        # live-toggleable, same get_parameter-every-frame pattern as
+        # "active"/"show_centering_crosshair" elsewhere in this project, no
+        # restart needed. Eventually flippable from the web app's own
+        # "Extras" switch (see CalibrationPanel.tsx) via the standard ROS
+        # set_parameters service -- no new topic needed, since this only
+        # gates DRAWING of data already flowing on stable_positions_topic.
+        self.show_extras_markers = bool(
+            self.get_parameter("show_extras_markers").value
+        )
+
+        # Calibration-aware suppression (2026-07-28) -- confirmed live: the
+        # magenta/cyan stable markers (and, per user request, this SHOULD
+        # extend to the raw green marker too during calibration/centering)
+        # kept showing a HELD position while the arm physically blocked the
+        # camera's view mid-calibration, which read as "still detecting"
+        # when nothing fresh was actually being seen. Mirrors
+        # depth_perception_node's own calibration_paused_ pattern exactly
+        # (same topic, same phase check) -- kept independent rather than
+        # shared, since this node has its own separate reason to care
+        # (suppressing DRAWING here, not suppressing PROCESSING there).
+        self.auto_calibrate_status_topic = self.get_parameter(
+            "auto_calibrate_status_topic"
+        ).value
+        self._calibration_running = False
+        self.auto_calibrate_status_sub = self.create_subscription(
+            AutoCalibrateStatus, self.auto_calibrate_status_topic,
+            self.auto_calibrate_status_callback, 10,
+        )
+
         self.bridge = CvBridge()
 
         # Camera intrinsics: only ever the most recently received
@@ -494,12 +532,15 @@ class YoloMarkerBridgeNode(Node):
             "detections_2d_topic: '%s', inference_server_url: '%s', "
             "marker_check_every_n_frames: %d, "
             "marker_check_full_rate_when_active: %s, "
-            "stable_positions_topic: '%s')" % (
+            "stable_positions_topic: '%s', show_extras_markers: %s, "
+            "auto_calibrate_status_topic: '%s')" % (
                 self.image_topic, self.camera_info_topic, self.pose_topic,
                 self.detections_2d_topic, self.inference_server_url,
                 self.marker_check_every_n_frames,
                 self.marker_check_full_rate_when_active,
                 self.stable_positions_topic,
+                self.show_extras_markers,
+                self.auto_calibrate_status_topic,
             )
         )
 
@@ -520,6 +561,25 @@ class YoloMarkerBridgeNode(Node):
         # overlay silently draws nothing extra for it -- see
         # publish_overlay_image_msg's own guard.
         self._latest_stable_positions = msg
+
+    def auto_calibrate_status_callback(self, msg):
+        # Mirrors depth_perception_node's own autoCalibrateStatusCallback
+        # pattern exactly (same topic, same PHASE_RUNNING check) -- see
+        # self._calibration_running's own doc comment in __init__ for why
+        # this node tracks it independently rather than sharing state with
+        # depth_perception_node.
+        was_running = self._calibration_running
+        self._calibration_running = (msg.phase == AutoCalibrateStatus.PHASE_RUNNING)
+        if self._calibration_running and not was_running:
+            self.get_logger().info(
+                "~/auto_calibrate started (stage: '%s') -- suppressing overlay "
+                "markers until it finishes." % msg.stage
+            )
+        elif not self._calibration_running and was_running:
+            self.get_logger().info(
+                "~/auto_calibrate finished (success: %s) -- resuming overlay markers."
+                % msg.success
+            )
 
     def image_callback(self, msg):
         # Drop-stale-frames guard -- see self._request_in_flight's own
@@ -808,8 +868,34 @@ class YoloMarkerBridgeNode(Node):
         near its centroid -- the label needs to land on this same overlay
         image, which is why it's computed here in the bridge/producer node
         rather than downstream in a consumer. Draws on a COPY of cv_image
-        (never mutates the frame used for the /detect request above)."""
+        (never mutates the frame used for the /detect request above).
+
+        Calibration/self-centering suppression (2026-07-28): while
+        self._calibration_running is true (an ~/auto_calibrate run is
+        actively in progress, including its auto-centering stage -- see
+        auto_calibrate_status_callback), NO markers of any kind are drawn
+        -- confirmed live that a HELD/stable marker looked indistinguishable
+        from a genuinely fresh detection while the arm physically blocked
+        the camera's view mid-calibration, misleadingly reading as "still
+        detecting". The plain camera frame still publishes underneath (same
+        "never stop the stream, just stop drawing on it" convention as the
+        marker-not-found case below) so a viewer doesn't see a frozen image,
+        just a temporarily plain one.
+        """
         overlay = cv_image.copy()
+
+        if self._calibration_running:
+            try:
+                overlay_msg = self.bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
+            except CvBridgeError as e:
+                self.get_logger().error(
+                    "cv_bridge overlay conversion failed: %s" % str(e),
+                    throttle_duration_sec=5.0,
+                )
+                return
+            overlay_msg.header = image_msg.header
+            self.overlay_image_pub.publish(overlay_msg)
+            return
 
         if "aruco_marker" in result:
             marker_result = result["aruco_marker"]
@@ -869,7 +955,14 @@ class YoloMarkerBridgeNode(Node):
         # this from `result` -- so a stabilized dot keeps showing even on
         # a frame where YOLO found nothing. No-op (nothing extra drawn) if
         # depth_perception_node has never published anything yet.
-        if self._latest_stable_positions is not None:
+        #
+        # Gated behind show_extras_markers (2026-07-28, default OFF) -- per
+        # explicit request to reduce visual complexity ("let's have only
+        # the green centroid marker") -- live re-read every frame (never
+        # cached), same pattern as "active", so a future web "Extras"
+        # switch takes effect on the very next frame with no restart.
+        self.show_extras_markers = bool(self.get_parameter("show_extras_markers").value)
+        if self.show_extras_markers and self._latest_stable_positions is not None:
             for position in self._latest_stable_positions.positions:
                 px, py = int(position.px), int(position.py)
                 # Magenta = held (unchanged since last real update), cyan =

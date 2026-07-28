@@ -80,3 +80,23 @@ yolo_marker_bridge_node:
     # StablePositionArray.msg for the full rationale. Must match
     # depth_perception_{sim,real}.yaml's own stable_positions_topic.
     stable_positions_topic: "/depth_perception/stable_positions"
+
+    # "Extras" overlay toggle (2026-07-28) — default OFF: only the plain
+    # green raw-YOLO centroid/box is drawn. Set true (live, no restart —
+    # `ros2 param set /yolo_marker_bridge_node show_extras_markers true`)
+    # to also draw depth_perception's magenta (held)/cyan (just drifted)
+    # stable-position markers on the SAME overlay topic — no new topic
+    # needed, this only gates drawing of data already flowing on
+    # stable_positions_topic above.
+    show_extras_markers: false
+
+    # Calibration/self-centering suppression (2026-07-28) — while an
+    # ~/auto_calibrate run is in progress (including its auto-centering
+    # stage), ALL overlay markers (green + extras) are suppressed, not
+    # just extras — confirmed live that a held/stable marker was
+    # indistinguishable from a fresh detection while the arm physically
+    # blocked the camera mid-calibration. Must match
+    # calibration_orchestrator_{sim,real}.yaml's own
+    # auto_calibrate_status_pub_ topic (same one depth_perception_node
+    # already subscribes to for its own pause behavior).
+    auto_calibrate_status_topic: "/calibration_orchestrator_node/auto_calibrate_status"

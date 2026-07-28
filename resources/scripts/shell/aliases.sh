@@ -610,18 +610,55 @@ cleanlogs() {
     rm -rf log/
 }
 
-# Ensures every script under resources/scripts/{shell,tmux,python} is
-# executable. Needed because a plain file copy (cp -r / rsync without -p,
-# scp, drag-and-drop in some editors) does not preserve the executable
-# bit — this bit us repeatedly with tmux/python scripts run as
+# Ensures every .sh/.py script across the WHOLE project is executable, not
+# just resources/scripts/ — needed because a plain file copy (cp -r / rsync
+# without -p, scp, drag-and-drop in some editors) does not preserve the
+# executable bit — this bit us repeatedly with tmux/python scripts run as
 # `./script.sh` or invoked directly by other scripts (not via `bash
 # script.sh`, which works regardless of the bit). Safe to run anytime,
 # idempotent, and called automatically by completesimsetup/completerealsetup
 # so a fresh rosject copy never needs a manual chmod pass again.
+#
+# Covers, in one pass each:
+#   1. All of visual_calibration/ (resources/scripts/{shell,tmux,python}
+#      AND every other package's own .sh/.py files, e.g. each package's
+#      launch/*.py) — launch files are invoked by the Python interpreter
+#      via `ros2 launch` regardless of the executable bit, so chmod'ing
+#      them is harmless/best-effort rather than load-bearing, but keeps
+#      the sweep genuinely project-wide rather than stopping at
+#      resources/. Excludes build/ and install/ (colcon output, not
+#      source — never chmod generated files).
+#   2. ~/YOLO-pipeline (install_local.sh, inference_server.py, etc.) —
+#      EXCLUDES its own venv/ subdirectory, so this never touches
+#      third-party scripts bundled inside that virtualenv.
+#   3. ~/webpage_ws (setup_rosject.sh, scripts/session_init.sh,
+#      app/scripts/*.sh, etc.) — EXCLUDES node_modules/, same reasoning
+#      as excluding YOLO-pipeline's venv/ (never chmod third-party deps).
+#
+# Single flat `find` per location (not a nested `find -exec find`) — a
+# nested-find construct breaks under bfs (a find-compatible tool some
+# environments alias /usr/bin/find to), which rejects reusing "{}" across
+# an outer and inner -exec. A flat find with -not -path exclusions is
+# portable to both GNU find and bfs.
 fixscriptperms() {
-    find ~/ros2_ws/src/visual_calibration/resources/scripts \
-        \( -name "*.sh" -o -name "*.py" \) -exec chmod +x {} +
-    echo "🛂🔑-Fixed executable permissions under resources/scripts/"
+    find ~/ros2_ws/src/visual_calibration \
+        \( -name "*.sh" -o -name "*.py" \) \
+        -not -path "*/build/*" \
+        -not -path "*/install/*" \
+        -exec chmod +x {} +
+
+    if [ -d ~/YOLO-pipeline ]; then
+        find ~/YOLO-pipeline \( -name "*.sh" -o -name "*.py" \) \
+            -not -path "*/venv/*" -exec chmod +x {} +
+    fi
+
+    if [ -d ~/webpage_ws ]; then
+        find ~/webpage_ws \( -name "*.sh" -o -name "*.py" \) \
+            -not -path "*/node_modules/*" -exec chmod +x {} +
+    fi
+
+    echo "🛂🔑-Fixed executable permissions across all of visual_calibration/,"
+    echo "    ~/YOLO-pipeline, and ~/webpage_ws"
 }
 
 completesimsetup() {

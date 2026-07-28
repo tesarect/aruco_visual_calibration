@@ -30,12 +30,25 @@ yolo_marker_bridge_node:
     # regardless of what was fixed on the ROS side. Must match
     # YOLO-pipeline/config/server_sim.yaml's own port.
     inference_server_url: "http://127.0.0.1:8601/detect"
-    # Bumped 1.0 -> 8.0 (2026-07-28) -- confirmed live: inference_server.py
-    # was genuinely running (`ps aux` showed it alive) and the same
-    # request-timeout symptom real hit before (see real's own comment
-    # below/history) -- 1.0s is too tight for JPEG-encode + HTTP round-trip
-    # + a full YOLO forward pass, matching real's already-bumped value.
-    request_timeout_sec: 8.0
+    # Bumped 1.0 -> 8.0 -> 30.0 (2026-07-28) -- 8.0s was found live to be
+    # the ACTUAL bug, not just a slow-but-tolerable value: inference_server.py's
+    # Flask dev server is single-threaded and CANNOT be told to cancel a
+    # request that's already running once the client gives up on it. So
+    # once the client abandoned a request at 8s, the SERVER kept computing
+    # it anyway in the background -- and the very next camera frame then
+    # started a SECOND request while the first was still genuinely
+    # running, oversubscribing the CPU (torch/YOLO's own internal thread
+    # pool competing against itself across overlapping requests) and
+    # cascading into progressively worse times (confirmed live: single
+    # detect_centroids() calls measured at 6-12+ seconds, an order of
+    # magnitude worse than early/isolated requests). 30.0s is comfortably
+    # above every observed single-request time in that same log (worst
+    # seen: ~20s total), so the client should now never abandon a request
+    # the server is still legitimately working on -- this alone should
+    # stop the pile-up, since self._request_in_flight (see image_callback)
+    # already prevents a NEW request from starting while THIS ONE is still
+    # being awaited; it just couldn't help once the client gave up early.
+    request_timeout_sec: 30.0
     confidence_threshold: 0.25
     jpeg_quality: 90
 
@@ -74,3 +87,23 @@ yolo_marker_bridge_node:
     # StablePositionArray.msg for the full rationale. Must match
     # depth_perception_{sim,real}.yaml's own stable_positions_topic.
     stable_positions_topic: "/depth_perception/stable_positions"
+
+    # "Extras" overlay toggle (2026-07-28) — default OFF: only the plain
+    # green raw-YOLO centroid/box is drawn. Set true (live, no restart —
+    # `ros2 param set /yolo_marker_bridge_node show_extras_markers true`)
+    # to also draw depth_perception's magenta (held)/cyan (just drifted)
+    # stable-position markers on the SAME overlay topic — no new topic
+    # needed, this only gates drawing of data already flowing on
+    # stable_positions_topic above.
+    show_extras_markers: false
+
+    # Calibration/self-centering suppression (2026-07-28) — while an
+    # ~/auto_calibrate run is in progress (including its auto-centering
+    # stage), ALL overlay markers (green + extras) are suppressed, not
+    # just extras — confirmed live that a held/stable marker was
+    # indistinguishable from a fresh detection while the arm physically
+    # blocked the camera mid-calibration. Must match
+    # calibration_orchestrator_{sim,real}.yaml's own
+    # auto_calibrate_status_pub_ topic (same one depth_perception_node
+    # already subscribes to for its own pause behavior).
+    auto_calibrate_status_topic: "/calibration_orchestrator_node/auto_calibrate_status"
