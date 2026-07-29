@@ -44,12 +44,12 @@ source ~/ros2_ws/install/setup.bash && ros2 launch orchestrator calibration_orch
 bash ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/resources/scripts/shell/start_inference_server.sh sim
 ```
 
-10. `startyolomarkerbridge` (requires step 9 already running — NOTE: sim's actual `detections_2d` publisher is step 10b below, `cup_holder_detector_node`, NOT this. This step is kept running in sim only for the classical/hybrid `~/set_detector_mode` switch, same as the tmux sessions — see `sim_tmux_cupholder.sh`'s header for why sim needs its own classical detector instead of relying on YOLO) :
+10. `startyolomarkerbridge` (requires step 9 already running — NOTE: sim's actual `detections_2d` publisher is step 10b below, `cup_holder_detector_node`, NOT this. This step is kept running in sim only for the classical/hybrid `~/set_detector_mode` switch, same as the tmux sessions — see `tmuxdepthperceptionsim`'s header for why sim needs its own classical detector instead of relying on YOLO) :
 ```
 source ~/ros2_ws/install/setup.bash && ros2 run aruco_perception_yolo_bridge yolo_marker_bridge_node.py --ros-args --params-file ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/config/yolo_marker_bridge_sim.yaml
 ```
 
-10b. (no alias — `sim_tmux_cupholder.sh`, SIM ONLY, no real-robot equivalent) `cup_holder_detector_node` — classical OpenCV threshold+contour cup_holder/hole detector; sim's CPU-only rosject can't run the YOLO inference server fast enough for usable detection, so this is sim's drop-in alternative publisher on the exact same `/aruco_perception/detections_2d` topic step 10 uses on real :
+10b. (no alias — top pane of `tmuxdepthperceptionsim`/`sim_tmux_depth_perception.sh`, SIM ONLY, no real-robot equivalent) `cup_holder_detector_node` — classical OpenCV threshold+contour cup_holder/hole detector; sim's CPU-only rosject can't run the YOLO inference server fast enough for usable detection, so this is sim's drop-in alternative publisher on the exact same `/aruco_perception/detections_2d` topic step 10 uses on real :
 ```
 source ~/ros2_ws/install/setup.bash && ros2 launch aruco_perception cup_holder_detector.launch.py env:=sim
 ```
@@ -148,7 +148,7 @@ source ~/ros2_ws/install/setup.bash && ros2 launch orchestrator calibration_orch
 bash ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/resources/scripts/shell/start_inference_server.sh real
 ```
 
-10. `startyolomarkerbridge real` (requires step 9 already running — real's actual `detections_2d` publisher; unlike sim there is no classical-detector alternative, see `sim_tmux_cupholder.sh`'s header) :
+10. `startyolomarkerbridge real` (requires step 9 already running — real's actual `detections_2d` publisher; unlike sim there is no classical-detector alternative, see `tmuxdepthperceptionsim`'s header) :
 ```
 source ~/ros2_ws/install/setup.bash && ros2 run aruco_perception_yolo_bridge yolo_marker_bridge_node.py --ros-args --params-file ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/config/yolo_marker_bridge_real.yaml
 ```

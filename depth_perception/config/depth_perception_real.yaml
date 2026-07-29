@@ -55,6 +55,24 @@ depth_perception_node:
     # Continuous, gap-free "held position" stream for every tracked
     # instance ever seen — see StablePositionArray.msg's own doc comment.
     # Consumed by yolo_marker_bridge_node's overlay (drawing a stabilized
-    # dot/label alongside its own raw per-frame boxes) and, eventually, a
-    # camera->base_link TF broadcaster.
+    # dot/label alongside its own raw per-frame boxes) and this node's own
+    # broadcastInstanceTfs().
     stable_positions_topic: "/depth_perception/stable_positions"
+
+    # --- cup_holder/hole TF broadcasting (2026-07-29) ---
+    # Must match calibration_broadcaster_real.yaml's own known_chain_frame.
+    known_chain_frame: "base_link"
+    # Must match calibration_broadcaster_real.yaml's own
+    # broadcast_frame_suffix — appended to this node's own incoming
+    # detections_2d/depth header.frame_id (e.g. "D415_color_optical_frame")
+    # to form the calibrated camera frame to look up (confirmed live
+    # 2026-07-29: real actually broadcasts
+    # "D415_color_optical_frame_calibrated", NOT
+    # "camera_depth_optical_frame_calibrated" as an earlier web-app
+    # constant incorrectly assumed — see markerFrames.ts's own fix comment).
+    broadcast_frame_suffix: "_calibrated"
+    # Broadcasts base_link -> cup_holder/hole_1..hole_4 as live TF frames,
+    # chained through the calibrated camera TF — see
+    # broadcastInstanceTfs()'s doc comment. No-op (throttled log only)
+    # until a ~/calibrate run has completed at least once this session.
+    broadcast_instance_tfs: true

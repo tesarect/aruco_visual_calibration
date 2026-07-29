@@ -282,6 +282,20 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
         waitForFreshMarkerPose(sample_boundary);
 
       if (!marker_pose.has_value()) {
+        if (s > 0) {
+          // Soft-fail (2026-07-29) — see runRandomPhase's identical fix/
+          // comment for the full rationale: the marker can genuinely drop
+          // out of view between sample s=0 and a later s at the SAME
+          // waypoint (confirmed live), and hard-failing the entire
+          // calibration run over losing only the extra dual-sample (while
+          // already-collected samples from every prior waypoint are fine)
+          // throws away far more good data than it protects.
+          RCLCPP_WARN(
+            get_logger(), "Polygon-phase sample %d: marker lost after %d/%d samples at this "
+            "waypoint — keeping what was collected, moving to the next waypoint",
+            i + 1, s, config_.samples_per_waypoint);
+          break;
+        }
         out_result = std::make_shared<Calibrate::Result>();
         out_result->success = false;
         out_result->message = "Timed out waiting for a fresh marker_pose for sample " +
@@ -426,6 +440,26 @@ bool CalibrationBroadcasterNode::runRandomPhase(
       const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
         waitForFreshMarkerPose(sample_boundary);
       if (!marker_pose.has_value()) {
+        if (s > 0) {
+          // Soft-fail (2026-07-29): isMarkerVisibleNow() above only checks
+          // visibility ONCE, before this loop starts — it does not
+          // guarantee the marker stays visible across every sample of the
+          // pair. Confirmed live, repeatedly: the marker can genuinely
+          // drop out of view between sample s=0 and s=1 at a random-phase
+          // candidate (position offset from cal_ready can be enough to
+          // lose it, even at a tightened random_phase_max_offset_m), and
+          // previously this hard-failed the ENTIRE calibration run over
+          // losing just the 2nd of 2 samples at ONE candidate — discarding
+          // 21+ good samples already collected. s==0 timing out is still a
+          // hard failure below (the pre-move isMarkerVisibleNow check
+          // passing but the very first sample then timing out would be a
+          // genuine anomaly worth surfacing, not routine mid-pair drift).
+          RCLCPP_WARN(
+            get_logger(), "Random-phase sample %d: marker lost after %d/%d samples at this "
+            "candidate — keeping what was collected, moving to the next candidate",
+            samples_already_collected + i + 1, s, config_.samples_per_waypoint);
+          break;
+        }
         out_result = std::make_shared<Calibrate::Result>();
         out_result->success = false;
         out_result->message =

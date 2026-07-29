@@ -8,6 +8,8 @@
 #include <vector>
 
 #include <cv_bridge/cv_bridge.h>
+#include <tf2/LinearMath/Transform.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace depth_perception
 {
@@ -16,7 +18,10 @@ DepthPerceptionNode::DepthPerceptionNode()
 : Node(
     "depth_perception_node",
     rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true)),
-  config_(loadConfigFromParams())
+  config_(loadConfigFromParams()),
+  tf_buffer_(get_clock()),
+  tf_listener_(tf_buffer_),
+  instance_tf_broadcaster_(this)
 {
   rgb_image_sub_ = image_transport::create_subscription(
     this, config_.rgb_image_topic,
@@ -255,6 +260,68 @@ void DepthPerceptionNode::publishStablePositions(const std_msgs::msg::Header & h
   }
 
   stable_positions_pub_->publish(array_msg);
+
+  if (config_.broadcast_instance_tfs) {
+    broadcastInstanceTfs(header);
+  }
+}
+
+void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & header)
+{
+  const std::string calibrated_camera_frame = header.frame_id + config_.broadcast_frame_suffix;
+
+  geometry_msgs::msg::TransformStamped known_to_camera_tf;
+  try {
+    known_to_camera_tf = tf_buffer_.lookupTransform(
+      config_.known_chain_frame, calibrated_camera_frame, tf2::TimePointZero,
+      tf2::durationFromSec(0.5));
+  } catch (const tf2::TransformException & ex) {
+    // Expected/routine until a ~/calibrate run has completed at least
+    // once this session (calibration_broadcaster_node only ever
+    // broadcasts calibrated_camera_frame after a successful run) — not an
+    // error worth spamming every callback for.
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "broadcastInstanceTfs: '%s' -> '%s' not available yet (%s) — has a ~/calibrate run "
+      "completed this session?",
+      config_.known_chain_frame.c_str(), calibrated_camera_frame.c_str(), ex.what());
+    return;
+  }
+
+  tf2::Transform known_to_camera;
+  tf2::fromMsg(known_to_camera_tf.transform, known_to_camera);
+
+  for (const auto & [key, window] : rolling_windows_) {
+    if (!window.last_stable.valid) {
+      continue;
+    }
+
+    tf2::Transform camera_to_instance(
+      tf2::Quaternion::getIdentity(),
+      tf2::Vector3(window.last_stable.x, window.last_stable.y, window.last_stable.z));
+    const tf2::Transform known_to_instance = known_to_camera * camera_to_instance;
+
+    geometry_msgs::msg::TransformStamped instance_tf;
+    instance_tf.header.stamp = header.stamp;
+    instance_tf.header.frame_id = config_.known_chain_frame;
+    // "cup_holder" as-is (hole_number 0, unused); "hole_1".."hole_4" for
+    // holes — same instance_desc convention detections2dCallback's own
+    // logging already uses, kept consistent rather than inventing a
+    // second naming scheme for the same instances.
+    instance_tf.child_frame_id = key.class_name == "hole" ?
+      "hole_" + std::to_string(key.hole_number) : key.class_name;
+    instance_tf.transform.translation.x = known_to_instance.getOrigin().x();
+    instance_tf.transform.translation.y = known_to_instance.getOrigin().y();
+    instance_tf.transform.translation.z = known_to_instance.getOrigin().z();
+    // Position-only — no orientation estimate exists for cup_holder/hole
+    // (see BackProjectedPoint's own doc comment: position only, no
+    // orientation, no averaging-across-frames beyond the rolling window),
+    // so this TF's rotation is left as the identity quaternion rather than
+    // fabricating a meaningless one.
+    instance_tf.transform.rotation.w = 1.0;
+
+    instance_tf_broadcaster_.sendTransform(instance_tf);
+  }
 }
 
 void DepthPerceptionNode::reprojectToPixels(
@@ -449,6 +516,11 @@ DepthPerceptionConfig DepthPerceptionNode::loadConfigFromParams() const
   config.rolling_window_size = static_cast<int>(get_parameter("rolling_window_size").as_int());
   config.stable_drift_threshold_m = get_parameter("stable_drift_threshold_m").as_double();
   config.stable_positions_topic = get_parameter("stable_positions_topic").as_string();
+
+  config.known_chain_frame = get_parameter("known_chain_frame").as_string();
+  config.broadcast_frame_suffix = get_parameter("broadcast_frame_suffix").as_string();
+  config.broadcast_instance_tfs = get_parameter("broadcast_instance_tfs").as_bool();
+
   return config;
 }
 

@@ -13,6 +13,9 @@
 #include <std_msgs/msg/header.hpp>
 #include <image_transport/image_transport.hpp>
 #include <opencv2/core.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
 #include <visual_calibration_msgs/msg/auto_calibrate_status.hpp>
 #include <visual_calibration_msgs/msg/detection2_d_array.hpp>
 #include <visual_calibration_msgs/msg/stable_position_array.hpp>
@@ -116,9 +119,35 @@ struct DepthPerceptionConfig
   // plus its reprojected pixel coordinates (see StablePosition.msg's own
   // doc comment). Consumers: yolo_marker_bridge_node's overlay image
   // (drawing a stabilized dot alongside its own raw per-frame boxes), and
-  // eventually a camera->base_link TF broadcaster once calibration exists
-  // to chain through.
+  // this node's own broadcastInstanceTfs() (see below).
   std::string stable_positions_topic = "/depth_perception/stable_positions";
+
+  // --- cup_holder/hole TF broadcasting (2026-07-29) ---
+  // TF frame at the base of the calibrated chain — same frame
+  // calibration_broadcaster_node's known_chain_frame names ("base_link" in
+  // both sim and real, confirmed against calibration_broadcaster_{sim,real}.yaml).
+  std::string known_chain_frame = "base_link";
+
+  // Appended to the incoming StablePositionArray/detections_2d's own
+  // header.frame_id to form the calibrated camera frame name to look up —
+  // e.g. "D415_color_optical_frame" (real) becomes
+  // "D415_color_optical_frame_calibrated". MUST match
+  // calibration_broadcaster_node's own broadcast_frame_suffix exactly
+  // (same convention, deliberately not hardcoding a per-env frame name
+  // here — the incoming message's own frame_id already tells us which
+  // camera frame is in play, sim or real, so appending this suffix is
+  // sufficient without a separate sim/real frame-name split like the web
+  // app's markerFrames.ts needed).
+  std::string broadcast_frame_suffix = "_calibrated";
+
+  // When true (default), broadcastInstanceTfs() looks up the calibrated
+  // camera TF and publishes known_chain_frame -> cup_holder/hole_1..4 as
+  // live (non-static) TF frames, chaining each instance's held camera-
+  // frame position through the calibration result. Set false to disable
+  // (e.g. before any calibration has ever run — the lookup would simply
+  // fail/skip silently every time anyway, but this avoids the repeated
+  // failed-lookup log noise in that case).
+  bool broadcast_instance_tfs = true;
 };
 
 /*
@@ -347,7 +376,29 @@ private:
   // math — see StablePosition.msg's px/py fields.
   void reprojectToPixels(const BackProjectedPoint & point, double & out_px, double & out_py) const;
 
+  // Broadcasts config_.known_chain_frame -> "cup_holder"/"hole_1".."hole_4"
+  // (2026-07-29) for every tracked instance in rolling_windows_ whose
+  // last_stable is valid, chaining each instance's camera-frame held
+  // position through the calibrated camera TF (config_.known_chain_frame
+  // -> header.frame_id + config_.broadcast_frame_suffix, looked up fresh
+  // via tf_buffer_ every call — calibration_broadcaster_node broadcasts
+  // that frame once as a LATCHED static TF after a ~/calibrate run
+  // completes, so a lookup here works immediately whether that broadcast
+  // happened before or after this node started). No-op (logs a throttled
+  // warning once) if that lookup fails — e.g. no ~/calibrate run has ever
+  // completed yet in this session — same "silently does nothing useful
+  // until its dependency exists" pattern this project's other calibration-
+  // dependent consumers already use (see depth-perception agent's own
+  // doc comment on this exact dependency). A no-op entirely if
+  // config_.broadcast_instance_tfs is false. Called from
+  // publishStablePositions() (same header/instances, one call site).
+  void broadcastInstanceTfs(const std_msgs::msg::Header & header);
+
   DepthPerceptionConfig config_;
+
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
+  tf2_ros::TransformBroadcaster instance_tf_broadcaster_;
 
   // One rolling window per physical instance seen so far (cup_holder;
   // hole_1..hole_4) — see TrackedInstanceKey/RollingWindow's own doc
