@@ -10,6 +10,15 @@ bool success
 string message
 float64 max_spread_deg
 float64 mean_spread_deg
+# Soft, informational confidence signal (2026-07-29) — true if the
+# POST-outlier-rejection max_spread_deg/max position spread are both
+# within position_spread_tolerance_cm/orientation_spread_tolerance_deg.
+# Does NOT affect `success` above — a low-confidence result is still a
+# real, broadcast, usable calibration; this field exists purely so a
+# caller (web UI) can show a warning rather than silently trusting a
+# result that may be less accurate than usual, without blocking the
+# workflow on it.
+bool is_high_confidence
 ---
 # Feedback: published after each accepted sample.
 uint32 samples_collected

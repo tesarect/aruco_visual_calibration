@@ -18,6 +18,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetStandoffPose.srv"
   "srv/GetPresetPose.srv"
   "srv/MoveToPreset.srv"
+  "srv/MoveToInstance.srv"
   "srv/SetDetectorMode.srv"
   "action/Calibrate.action"
   "action/AutoCalibrate.action"

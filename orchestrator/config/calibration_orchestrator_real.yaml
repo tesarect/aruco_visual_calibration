@@ -110,3 +110,9 @@ calibration_orchestrator_node:
     # width/height (for the image's center point) — must match
     # aruco_detector_real.yaml's camera_info_topic.
     camera_info_topic: "/D415/color/camera_info"
+
+    # Preset (from preset_poses_real.yaml) the arm auto-moves to right
+    # after a ~/auto_calibrate run SUCCEEDS (2026-07-29) — see
+    # CalibrationOrchestratorNode::executeAutoCalibrate's post-success
+    # block. Empty string disables the auto-move.
+    post_calibrate_preset_name: "home"

@@ -92,3 +92,10 @@ calibration_broadcaster_node:
     # sorts out any disagreement between them. Set to 1 to restore the
     # original one-sample-per-waypoint behavior.
     samples_per_waypoint: 2
+
+    # --- Clustering-based position averaging (2026-07-29) ---
+    # See calibration_broadcaster_real.yaml's own comment for the full
+    # rationale — motivated by a real-robot observation, default false
+    # (unchanged behavior) on both envs until explicitly tried.
+    use_clustering_average: false
+    clustering_bucket_size_cm: 2.0

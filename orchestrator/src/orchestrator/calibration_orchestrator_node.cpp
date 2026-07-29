@@ -625,9 +625,41 @@ void CalibrationOrchestratorNode::executeAutoCalibrate(
   result->max_spread_deg = calibrate_result->max_spread_deg;
   result->mean_spread_deg = calibrate_result->mean_spread_deg;
   result->failed_stage = calibrate_result->success ? "" : "calibrate";
+  result->is_high_confidence = calibrate_result->is_high_confidence;
 
   if (calibrate_result->success) {
     goal_handle->succeed(result);
+
+    // Auto-move to config_.post_calibrate_preset_name (2026-07-29) —
+    // parameterized (default "home") rather than hardcoded, per explicit
+    // request, so the destination can be changed later without a code
+    // change. Fire-and-forget from this thread's perspective: this thread
+    // is about to return/end regardless, and a failed move here shouldn't
+    // retroactively turn an already-succeeded calibration into a failure —
+    // logged, not surfaced through the action result.
+    if (!config_.post_calibrate_preset_name.empty()) {
+      auto preset_request = std::make_shared<visual_calibration_msgs::srv::MoveToPreset::Request>();
+      preset_request->name = config_.post_calibrate_preset_name;
+      if (move_to_preset_client_->wait_for_service(std::chrono::seconds(5))) {
+        auto preset_future = move_to_preset_client_->async_send_request(preset_request);
+        const auto preset_response = preset_future.get();
+        if (!preset_response->success) {
+          RCLCPP_WARN(
+            get_logger(), "Post-calibration move to preset '%s' failed: %s (calibration itself "
+            "already succeeded — this does not affect that result)",
+            config_.post_calibrate_preset_name.c_str(), preset_response->message.c_str());
+        } else {
+          RCLCPP_INFO(
+            get_logger(), "Moved to preset '%s' after successful calibration.",
+            config_.post_calibrate_preset_name.c_str());
+        }
+      } else {
+        RCLCPP_WARN(
+          get_logger(), "Post-calibration move to preset '%s' skipped: "
+          "~/move_to_preset service not available",
+          config_.post_calibrate_preset_name.c_str());
+      }
+    }
   } else {
     goal_handle->abort(result);
     RCLCPP_ERROR(get_logger(), "%s", result->message.c_str());
@@ -1401,6 +1433,7 @@ OrchestratorConfig CalibrationOrchestratorNode::loadConfigFromParams() const
     get_parameter("centering_visibility_timeout_sec").as_double();
   config.centering_max_jump_m = get_parameter("centering_max_jump_m").as_double();
   config.camera_info_topic = get_parameter("camera_info_topic").as_string();
+  config.post_calibrate_preset_name = get_parameter("post_calibrate_preset_name").as_string();
 
   return config;
 }

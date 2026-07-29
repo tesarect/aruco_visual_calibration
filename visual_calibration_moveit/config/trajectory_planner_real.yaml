@@ -46,7 +46,10 @@ trajectory_planner:
     # Keep radius_m small relative to max_reach_m above. PLACEHOLDER — not
     # re-tuned for the real cell yet, see file header.
     polygon_num_corners: 4
-    polygon_radius_m: 0.05
+    # Tightened 0.05 -> 0.03 (2026-07-29, live-validated on real) — set via
+    # ros2 param set during testing, now persisted here so it survives a
+    # node restart.
+    polygon_radius_m: 0.03
     # Default planning strategy for ~/trace_polygon (a plain Trigger, no
     # per-call field). ~/trace_path takes planning_mode explicitly per
     # call instead — see TracePath.srv. "cartesian" = straight-line

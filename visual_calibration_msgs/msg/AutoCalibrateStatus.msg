@@ -36,3 +36,7 @@ string message
 float64 max_spread_deg
 float64 mean_spread_deg
 string failed_stage
+# Relayed from AutoCalibrate.action's own is_high_confidence result field
+# (2026-07-29) — see Calibrate.action's is_high_confidence doc comment for
+# the full rationale.
+bool is_high_confidence

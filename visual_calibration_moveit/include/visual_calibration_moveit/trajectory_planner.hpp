@@ -21,6 +21,7 @@
 #include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
 #include <visual_calibration_msgs/srv/get_preset_pose.hpp>
 #include <visual_calibration_msgs/srv/get_standoff_pose.hpp>
+#include <visual_calibration_msgs/srv/move_to_instance.hpp>
 #include <visual_calibration_msgs/srv/move_to_preset.hpp>
 #include <visual_calibration_msgs/srv/trace_path.hpp>
 
@@ -398,6 +399,19 @@ private:
     const std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Request> request,
     std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Response> response);
 
+  /// Handles a MoveToInstance service request (2026-07-29) — looks up
+  /// move_group_interface_.getPlanningFrame() (base_link) ->
+  /// request->instance_name via tf_buffer_ (fresh every call, same
+  /// lookup-then-tracePath pattern polygonWaypointsAroundStandoff already
+  /// uses for its own TF lookup), then calls tracePath() with the single
+  /// resulting pose — moves the arm. Fails with a clear message
+  /// (response->success = false) if the TF lookup fails, e.g. no
+  /// ~/calibrate run has completed yet or depth_perception_node hasn't
+  /// detected this instance — see MoveToInstance.srv's own doc comment.
+  void handleMoveToInstance(
+    const std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Request> request,
+    std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Response> response);
+
   /// Reads camera_frame, end_effector_frame, standoff_m, max_reach_m, and
   /// facing_rpy_rad (a 3-element array) from this node's declared
   /// parameters and returns them as a StandoffConfig. Requires the node to
@@ -513,6 +527,8 @@ private:
     get_preset_pose_service_;
   rclcpp::Service<visual_calibration_msgs::srv::MoveToPreset>::SharedPtr
     move_to_preset_service_;
+  rclcpp::Service<visual_calibration_msgs::srv::MoveToInstance>::SharedPtr
+    move_to_instance_service_;
   /// transient_local: late subscribers get the last-published name
   /// immediately instead of waiting for the next state change. Event-driven
   /// (published only on transitions), not on a timer — does not add

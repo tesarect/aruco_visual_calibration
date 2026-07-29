@@ -158,6 +158,17 @@ struct OrchestratorConfig
   /// (see class doc comment). Must match aruco_detector_{sim,real}.yaml's
   /// camera_info_topic for the environment this node is running in.
   std::string camera_info_topic;
+
+  /// Preset name (from preset_poses_{sim,real}.yaml, resolved via
+  /// trajectory_planner's own ~/move_to_preset) the arm auto-moves to
+  /// right after a ~/auto_calibrate run SUCCEEDS (2026-07-29) — see
+  /// executeAutoCalibrate()'s post-success block. Parameterized rather
+  /// than hardcoded so the destination can be changed later without a
+  /// code change. Empty string disables the auto-move entirely. Read once
+  /// at construction like every other field in this struct — this is a
+  /// one-shot post-success action, not something that needs live-toggling
+  /// mid-run the way auto_center_enabled does.
+  std::string post_calibrate_preset_name = "home";
 };
 
 /// Orchestrates the full auto-calibrate sequence behind one action,

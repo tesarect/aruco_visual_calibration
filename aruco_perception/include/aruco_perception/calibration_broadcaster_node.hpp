@@ -157,6 +157,24 @@ struct CalibrationBroadcasterConfig
   /// agreement check) — outlier_rejection above is what sorts out any
   /// disagreement between them.
   int samples_per_waypoint = 2;
+
+  // --- Clustering-based position averaging (2026-07-29) ---
+  // clustering_bucket_size_cm is cached in config_ like every other field
+  // above (it's a tuning constant, fine to require a restart to change).
+  // use_clustering_average is DELIBERATELY NOT a field here — see
+  // finishCalibration()'s own comment for why it must be read live via
+  // get_parameter() at the point of use, not cached into this struct at
+  // construction (it's meant to be flippable from the web UI's DevSpace
+  // drawer switch without a node restart, unlike every field in this
+  // struct, which IS restart-only by convention).
+  //
+  // Bucket/offset tolerance (cm) for treating two samples' positions as
+  // "the same cluster" when use_clustering_average is true — see
+  // computeClusteredPosition()'s doc comment. Same default as
+  // position_spread_tolerance_cm/outlier_position_threshold_cm (2.0cm) for
+  // consistency, but an independently-tunable value, not a shared one —
+  // confirmed via explicit instruction, not assumed.
+  double clustering_bucket_size_cm = 2.0;
 };
 
 /// Orchestrates calibration: fetches waypoints AND their center pose from
@@ -438,16 +456,53 @@ private:
   /// returns every index unfiltered (a no-op pass-through).
   std::vector<size_t> rejectOutliers() const;
 
-  /// Averages collected_positions_/collected_orientations_ (arithmetic
-  /// mean / averaging_method_) — first passing them through
-  /// rejectOutliers() if config_.outlier_rejection_enabled — broadcasts
+  /// Clustering-based position average (2026-07-29) — an alternative to
+  /// the plain arithmetic mean, used when use_clustering_average is true
+  /// (read live via get_parameter(), NOT config_ — see
+  /// CalibrationBroadcasterConfig's own comment on why). Motivated by a
+  /// direct live observation: watching CalibratedCameraModel's in-progress
+  /// sample meshes during a run showed many samples visibly clustering/
+  /// overlapping near one location (with a small, consistent offset
+  /// between them — never EXACTLY the same point) while a handful of
+  /// outliers sat further away — a plain mean lets those outliers drag the
+  /// result off, while this method votes for the densest agreement
+  /// instead.
+  ///
+  /// Algorithm: pairwise-distance clustering (NOT a fixed grid/histogram —
+  /// a fixed grid has an arbitrary origin/alignment problem that would
+  /// split an otherwise-obvious cluster straddling a bucket boundary; the
+  /// observed offsets are described as "close but not exact," i.e. fuzzy
+  /// grouping, not points that will ever land in identical bins). Two
+  /// samples (from `indices`, typically rejectOutliers()'s surviving set)
+  /// are unioned into the same cluster if their straight-line distance is
+  /// <= clustering_bucket_size_cm. O(n^2) pairwise comparison — fine at
+  /// this data scale (dozens of samples, not thousands), no spatial index
+  /// needed. Returns the arithmetic mean of just the LARGEST cluster's
+  /// member positions (ties broken by whichever cluster was formed first).
+  /// Falls back to the plain mean of every index in `indices` if fewer
+  /// than 2 samples are given (clustering is meaningless there).
+  geometry_msgs::msg::Vector3 computeClusteredPosition(
+    const std::vector<size_t> & indices, double bucket_size_cm) const;
+
+  /// Averages collected_positions_/collected_orientations_ — first passing
+  /// them through rejectOutliers() if config_.outlier_rejection_enabled,
+  /// then computing the final position via EITHER the plain arithmetic
+  /// mean (default) OR computeClusteredPosition() if the LIVE (not
+  /// cached — see that field's own comment) use_clustering_average
+  /// parameter is true. Orientation always uses averaging_method_
+  /// (kSumNormalize today) regardless of which position method is
+  /// active — clustering is position-only for now. Broadcasts
   /// known_chain_frame -> the camera frame (from the most recent sample's
   /// header.frame_id) as a static TF, and completes goal_handle with the
-  /// result (see Calibrate.action). Logs both the pre-rejection and
-  /// post-rejection spread metrics when rejection actually discarded
-  /// something, so the operator can see how much it helped. Clears both
-  /// collected_ vectors AND resets stable_agreement_count_ for the next
-  /// run.
+  /// result (see Calibrate.action), including the new is_high_confidence
+  /// field (true if the POST-rejection spread is within
+  /// position_spread_tolerance_cm/orientation_spread_tolerance_deg — a
+  /// soft, informational signal only; success is ALWAYS true for a run
+  /// that got this far, low confidence does not block the broadcast).
+  /// Logs both the pre-rejection and post-rejection spread metrics when
+  /// rejection actually discarded something, so the operator can see how
+  /// much it helped. Clears both collected_ vectors AND resets
+  /// stable_agreement_count_ for the next run.
   void finishCalibration(const std::shared_ptr<GoalHandleCalibrate> & goal_handle);
 
   CalibrationBroadcasterConfig config_;

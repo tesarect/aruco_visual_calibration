@@ -28,6 +28,10 @@ float64 mean_spread_deg
 # which stage of the sequence failed, for a caller (e.g. the web app) to
 # show a more specific error than the generic message string alone.
 string failed_stage
+# Relayed from Calibrate.action's own is_high_confidence result field
+# (2026-07-29) — see that field's doc comment. Meaningless/false on
+# failure (failed runs never reach the point where this is computed).
+bool is_high_confidence
 ---
 # Feedback: one line per stage transition, e.g. "Moving to cal_ready",
 # "Auto-centering on marker", "Calibrating (sample 3/10)" — the last form

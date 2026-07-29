@@ -98,6 +98,13 @@ TrajectoryPlanner::TrajectoryPlanner(
       &TrajectoryPlanner::handleMoveToPreset, this, std::placeholders::_1,
       std::placeholders::_2));
 
+  move_to_instance_service_ =
+    node_->create_service<visual_calibration_msgs::srv::MoveToInstance>(
+    "~/move_to_instance",
+    std::bind(
+      &TrajectoryPlanner::handleMoveToInstance, this, std::placeholders::_1,
+      std::placeholders::_2));
+
   // transient_local + depth 1: a late subscriber (e.g. the web bridge
   // reconnecting) immediately receives the last-published name instead of
   // waiting for the next state change. Published only on transitions, not
@@ -700,6 +707,52 @@ void TrajectoryPlanner::handleMoveToPreset(
   response->message = response->success ?
     "Moved to preset '" + request->name + "'" :
     "Failed to move to preset '" + request->name + "' (see log for the error)";
+}
+
+void TrajectoryPlanner::handleMoveToInstance(
+  const std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Request> request,
+  std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Response> response)
+{
+  // Fresh lookup every call, no caching — depth_perception_node republishes
+  // this instance's TF continuously (a live, non-static broadcast), so the
+  // most recent detection is always what this moves to. Same
+  // planning-frame lookup pattern polygonWaypointsAroundStandoff already
+  // uses for its own TF read (getPlanningFrame(), not a hardcoded
+  // "base_link" string — resolves to whatever MoveIt's planning group is
+  // actually configured with).
+  const std::string & planning_frame = move_group_interface_.getPlanningFrame();
+
+  geometry_msgs::msg::TransformStamped instance_tf;
+  try {
+    instance_tf = tf_buffer_.lookupTransform(
+      planning_frame, request->instance_name, tf2::TimePointZero,
+      tf2::durationFromSec(1.0));
+  } catch (const tf2::TransformException & ex) {
+    response->success = false;
+    response->message = "Could not look up '" + request->instance_name + "' in planning frame '" +
+      planning_frame + "': " + ex.what() +
+      " — has a ~/calibrate run completed and has depth_perception_node detected this "
+      "instance yet?";
+    RCLCPP_ERROR(node_->get_logger(), "%s", response->message.c_str());
+    return;
+  }
+
+  geometry_msgs::msg::Pose target_pose;
+  target_pose.position.x = instance_tf.transform.translation.x;
+  target_pose.position.y = instance_tf.transform.translation.y;
+  target_pose.position.z = instance_tf.transform.translation.z;
+  // instance_tf's rotation is the identity quaternion (depth_perception_node
+  // publishes position-only TFs — see broadcastInstanceTfs()'s own doc
+  // comment, no orientation estimate exists for cup_holder/hole) — using
+  // it as-is here means the arm keeps whatever orientation the planner
+  // finds convenient for reaching this position, same as any other
+  // position-only goal.
+  target_pose.orientation = instance_tf.transform.rotation;
+
+  response->success = tracePath({target_pose}, polygon_config_.default_planning_mode);
+  response->message = response->success ?
+    "Moved to '" + request->instance_name + "'" :
+    "Failed to move to '" + request->instance_name + "' (see log for the error)";
 }
 
 StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const

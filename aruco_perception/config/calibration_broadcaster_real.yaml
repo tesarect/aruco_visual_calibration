@@ -76,10 +76,14 @@ calibration_broadcaster_node:
     # randomized X/Y/Z offsets from the same center pose — see
     # calibration_broadcaster_node.hpp's class doc comment and
     # CalibrationBroadcasterNode::runRandomPhase.
-    random_phase_samples: 8
+    # Raised 8 -> 10 (2026-07-29, live-validated on real) — set via
+    # ros2 param set during testing, now persisted here so it survives a
+    # node restart.
+    random_phase_samples: 10
     # Maximum straight-line distance (m) a random candidate may be from
-    # the center pose — checked before moving there.
-    random_phase_max_offset_m: 0.10
+    # the center pose — checked before moving there. Tightened 0.10 -> 0.06
+    # (2026-07-29, live-validated on real) — same reasoning as above.
+    random_phase_max_offset_m: 0.06
     # Safety bound: how many consecutive invisible-marker random
     # candidates are tolerated before giving up on the whole calibration
     # run. Not expected to be hit in normal operation.
@@ -141,3 +145,27 @@ calibration_broadcaster_node:
     # sorts out any disagreement between them. Set to 1 to restore the
     # original one-sample-per-waypoint behavior.
     samples_per_waypoint: 2
+
+    # --- Clustering-based position averaging (2026-07-29) ---
+    # When true, finishCalibration() computes the final broadcast POSITION
+    # by bucketing samples (pairwise distance <= clustering_bucket_size_cm
+    # counts as "same cluster") and averaging only the largest cluster,
+    # instead of the plain arithmetic mean of every kept sample — see
+    # CalibrationBroadcasterNode::computeClusteredPosition's doc comment.
+    # Motivated by a direct live observation: many in-progress sample
+    # meshes (CalibratedCameraModel.tsx, web UI) visibly clustered/
+    # overlapped near one location while a few outliers sat further away —
+    # a plain mean lets those outliers drag the result off; this votes for
+    # the densest agreement instead. Orientation is UNAFFECTED either way
+    # (always uses the existing quaternion averaging). Read LIVE via
+    # get_parameter() at the point of use, NOT cached — flip this via the
+    # web UI's DevSpace drawer switch (Mean vs Clustering) and it takes
+    # effect on the very next ~/calibrate run, no node restart needed.
+    # Default false: preserves today's exact behavior until explicitly
+    # tried.
+    use_clustering_average: false
+    # Offset tolerance (cm) for treating two samples as the same cluster.
+    # Independently tunable from position_spread_tolerance_cm/
+    # outlier_position_threshold_cm above (same 2.0cm starting value, not a
+    # shared parameter) — only used when use_clustering_average is true.
+    clustering_bucket_size_cm: 2.0

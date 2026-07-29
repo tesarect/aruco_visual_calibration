@@ -4,6 +4,8 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <functional>
+#include <map>
 #include <stdexcept>
 #include <thread>
 #include <tuple>
@@ -897,28 +899,136 @@ std::vector<size_t> CalibrationBroadcasterNode::rejectOutliers() const
   return kept_indices;
 }
 
+geometry_msgs::msg::Vector3 CalibrationBroadcasterNode::computeClusteredPosition(
+  const std::vector<size_t> & indices, double bucket_size_cm) const
+{
+  auto plainMean = [this](const std::vector<size_t> & idx) {
+      geometry_msgs::msg::Vector3 mean;
+      for (const size_t i : idx) {
+        mean.x += collected_positions_[i].x;
+        mean.y += collected_positions_[i].y;
+        mean.z += collected_positions_[i].z;
+      }
+      const double n = static_cast<double>(idx.size());
+      mean.x /= n;
+      mean.y /= n;
+      mean.z /= n;
+      return mean;
+    };
+
+  if (indices.size() < 2) {
+    return plainMean(indices);
+  }
+
+  // Union-find over `indices` (not the raw 0..collected_positions_.size()
+  // range — indices may already be a filtered subset from rejectOutliers()).
+  // parent[k] indexes into `indices` itself (local indices 0..indices.size()-1),
+  // not into collected_positions_ directly.
+  std::vector<size_t> parent(indices.size());
+  for (size_t k = 0; k < indices.size(); ++k) {
+    parent[k] = k;
+  }
+
+  std::function<size_t(size_t)> find = [&](size_t k) {
+      while (parent[k] != k) {
+        parent[k] = parent[parent[k]];  // path compression
+        k = parent[k];
+      }
+      return k;
+    };
+
+  const double bucket_size_m = bucket_size_cm / 100.0;
+  for (size_t a = 0; a < indices.size(); ++a) {
+    for (size_t b = a + 1; b < indices.size(); ++b) {
+      const geometry_msgs::msg::Vector3 & pa = collected_positions_[indices[a]];
+      const geometry_msgs::msg::Vector3 & pb = collected_positions_[indices[b]];
+      const double dx = pa.x - pb.x;
+      const double dy = pa.y - pb.y;
+      const double dz = pa.z - pb.z;
+      if (std::sqrt(dx * dx + dy * dy + dz * dz) <= bucket_size_m) {
+        const size_t root_a = find(a);
+        const size_t root_b = find(b);
+        if (root_a != root_b) {
+          parent[root_a] = root_b;
+        }
+      }
+    }
+  }
+
+  // Group local indices by cluster root, find the largest cluster.
+  std::map<size_t, std::vector<size_t>> clusters;
+  for (size_t k = 0; k < indices.size(); ++k) {
+    clusters[find(k)].push_back(indices[k]);
+  }
+
+  const auto largest_cluster_it = std::max_element(
+    clusters.begin(), clusters.end(),
+    [](const auto & a, const auto & b) {return a.second.size() < b.second.size();});
+
+  RCLCPP_INFO(
+    get_logger(), "Clustering: largest cluster has %zu of %zu samples (bucket size %.2fcm)",
+    largest_cluster_it->second.size(), indices.size(), bucket_size_cm);
+
+  return plainMean(largest_cluster_it->second);
+}
+
 void CalibrationBroadcasterNode::finishCalibration(
   const std::shared_ptr<GoalHandleCalibrate> & goal_handle)
 {
   const std::vector<size_t> kept_indices = rejectOutliers();
   const bool rejection_changed_anything = kept_indices.size() != collected_positions_.size();
 
+  // use_clustering_average is READ LIVE here, not cached in config_ —
+  // deliberately, so the web UI's DevSpace drawer switch takes effect on
+  // the very next ~/calibrate run without a node restart, unlike every
+  // other field in CalibrationBroadcasterConfig (see that struct's own
+  // comment on this field).
+  const bool use_clustering = get_parameter("use_clustering_average").as_bool();
+
   geometry_msgs::msg::Vector3 average_position;
+  if (use_clustering) {
+    average_position = computeClusteredPosition(kept_indices, config_.clustering_bucket_size_cm);
+  } else {
+    for (const size_t i : kept_indices) {
+      average_position.x += collected_positions_[i].x;
+      average_position.y += collected_positions_[i].y;
+      average_position.z += collected_positions_[i].z;
+    }
+    const double count = static_cast<double>(kept_indices.size());
+    average_position.x /= count;
+    average_position.y /= count;
+    average_position.z /= count;
+  }
+
   std::vector<tf2::Quaternion> kept_orientations;
   kept_orientations.reserve(kept_indices.size());
   for (const size_t i : kept_indices) {
-    average_position.x += collected_positions_[i].x;
-    average_position.y += collected_positions_[i].y;
-    average_position.z += collected_positions_[i].z;
     kept_orientations.push_back(collected_orientations_[i]);
   }
-  const double count = static_cast<double>(kept_indices.size());
-  average_position.x /= count;
-  average_position.y /= count;
-  average_position.z /= count;
 
   const OrientationAveragingResult orientation_result =
     averageQuaternions(kept_orientations, averaging_method_);
+
+  // Post-rejection (and post-clustering, if active) position spread — the
+  // max distance of any KEPT sample from the FINAL average_position used
+  // for the broadcast, needed for is_high_confidence below. Deliberately
+  // computed against average_position (whichever method produced it), not
+  // a separate unfiltered mean — this is meant to answer "how much does
+  // the position we're ACTUALLY broadcasting disagree with the samples
+  // that went into it," not a general spread statistic.
+  double max_position_spread_cm = 0.0;
+  for (const size_t i : kept_indices) {
+    const geometry_msgs::msg::Vector3 & position = collected_positions_[i];
+    const double dx = position.x - average_position.x;
+    const double dy = position.y - average_position.y;
+    const double dz = position.z - average_position.z;
+    max_position_spread_cm =
+      std::max(max_position_spread_cm, std::sqrt(dx * dx + dy * dy + dz * dz) * 100.0);
+  }
+
+  const bool is_high_confidence =
+    max_position_spread_cm <= config_.position_spread_tolerance_cm &&
+    orientation_result.max_spread_deg <= config_.orientation_spread_tolerance_deg;
 
   geometry_msgs::msg::TransformStamped broadcast_tf;
   broadcast_tf.header.stamp = get_clock()->now();
@@ -950,11 +1060,12 @@ void CalibrationBroadcasterNode::finishCalibration(
 
   RCLCPP_INFO(
     get_logger(), "Calibration complete: broadcasting static TF '%s' -> '%s' "
-    "(position + orientation averaged over %zu samples; orientation spread: "
-    "max %.3f deg, mean %.3f deg)",
+    "(position via %s over %zu samples, max position spread %.2fcm; orientation spread: "
+    "max %.3f deg, mean %.3f deg; %s)",
     config_.known_chain_frame.c_str(), broadcast_tf.child_frame_id.c_str(),
-    kept_indices.size(), orientation_result.max_spread_deg,
-    orientation_result.mean_spread_deg);
+    use_clustering ? "clustering" : "mean", kept_indices.size(), max_position_spread_cm,
+    orientation_result.max_spread_deg, orientation_result.mean_spread_deg,
+    is_high_confidence ? "HIGH CONFIDENCE" : "LOW CONFIDENCE (spread exceeds tolerance)");
 
   auto result = std::make_shared<Calibrate::Result>();
   result->success = true;
@@ -962,6 +1073,7 @@ void CalibrationBroadcasterNode::finishCalibration(
     broadcast_tf.child_frame_id + "'";
   result->max_spread_deg = orientation_result.max_spread_deg;
   result->mean_spread_deg = orientation_result.mean_spread_deg;
+  result->is_high_confidence = is_high_confidence;
   goal_handle->succeed(result);
 
   collected_positions_.clear();
@@ -1020,6 +1132,13 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
 
   config.samples_per_waypoint =
     static_cast<int>(get_parameter("samples_per_waypoint").as_int());
+
+  config.clustering_bucket_size_cm =
+    get_parameter("clustering_bucket_size_cm").as_double();
+  // use_clustering_average is intentionally NOT read here — see
+  // CalibrationBroadcasterConfig's own comment on why it must stay a live
+  // get_parameter() call at the point of use in finishCalibration(),
+  // never cached into this struct.
 
   return config;
 }
