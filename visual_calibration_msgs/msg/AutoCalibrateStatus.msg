@@ -23,6 +23,11 @@ uint8 phase
 string stage
 uint32 samples_collected
 uint32 samples_total
+# Relayed from AutoCalibrate.action's own latest_sample_pose feedback field
+# (2026-07-29) — see Calibrate.action's latest_sample_pose doc comment for
+# the full rationale. Zero-valued (default Pose) for every non-
+# "Calibrating" stage feedback.
+geometry_msgs/Pose latest_sample_pose
 
 # Result fields — meaningful once phase != PHASE_RUNNING (zero-valued
 # while running). Mirrors AutoCalibrate.action's Result exactly.

@@ -194,6 +194,7 @@ void CalibrationOrchestratorNode::publishStatusFeedback(const AutoCalibrate::Fee
   status.stage = feedback.stage;
   status.samples_collected = feedback.samples_collected;
   status.samples_total = feedback.samples_total;
+  status.latest_sample_pose = feedback.latest_sample_pose;
   auto_calibrate_status_pub_->publish(status);
 }
 
@@ -1346,6 +1347,7 @@ CalibrationOrchestratorNode::runCalibrate(
       relayed->stage = "Calibrating";
       relayed->samples_collected = feedback->samples_collected;
       relayed->samples_total = feedback->samples_total;
+      relayed->latest_sample_pose = feedback->latest_sample_pose;
       goal_handle->publish_feedback(relayed);
     };
 

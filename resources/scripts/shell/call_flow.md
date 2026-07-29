@@ -44,9 +44,19 @@ source ~/ros2_ws/install/setup.bash && ros2 launch orchestrator calibration_orch
 bash ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/resources/scripts/shell/start_inference_server.sh sim
 ```
 
-10. `startyolomarkerbridge` (requires step 9 already running) :
+10. `startyolomarkerbridge` (requires step 9 already running — NOTE: sim's actual `detections_2d` publisher is step 10b below, `cup_holder_detector_node`, NOT this. This step is kept running in sim only for the classical/hybrid `~/set_detector_mode` switch, same as the tmux sessions — see `sim_tmux_cupholder.sh`'s header for why sim needs its own classical detector instead of relying on YOLO) :
 ```
 source ~/ros2_ws/install/setup.bash && ros2 run aruco_perception_yolo_bridge yolo_marker_bridge_node.py --ros-args --params-file ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/config/yolo_marker_bridge_sim.yaml
+```
+
+10b. (no alias — `sim_tmux_cupholder.sh`, SIM ONLY, no real-robot equivalent) `cup_holder_detector_node` — classical OpenCV threshold+contour cup_holder/hole detector; sim's CPU-only rosject can't run the YOLO inference server fast enough for usable detection, so this is sim's drop-in alternative publisher on the exact same `/aruco_perception/detections_2d` topic step 10 uses on real :
+```
+source ~/ros2_ws/install/setup.bash && ros2 launch aruco_perception cup_holder_detector.launch.py env:=sim
+```
+
+10c. (no alias) `depth_perception_node` — turns step 10b's (sim) or step 10's (real) 2D cup_holder/hole detections into stable 3D positions by sampling the depth image at each detection's centroid :
+```
+source ~/ros2_ws/install/setup.bash && ros2 launch depth_perception depth_perception.launch.py env:=sim
 ```
 
 11. `startrosbridge` :
@@ -86,7 +96,9 @@ ros2 run swri_console swri_console
 - **6** (Aruco Detector) only needs **2** — parallel-safe with **5**.
 - **7** (Calibration Broadcaster) needs **5** + **6**.
 - **8** (Calibration Orchestrator) needs **5** + **7** — last in the trajcal chain.
-- **9** (Inference Server) has no ROS dependency, can start any time; **10** (Yolo Marker Bridge) needs **9** + **2**.
+- **9** (Inference Server) has no ROS dependency, can start any time; **10** (Yolo Marker Bridge) needs **9** + **2** — kept running in sim for the classical/hybrid switch, but is NOT what feeds depth perception in sim.
+- **10b** (Cup Holder Detector, SIM ONLY) only needs **2** — parallel-safe with **5**/**6**/**10**. This is sim's actual `detections_2d` publisher.
+- **10c** (Depth Perception) needs **2** + **10b** (sim) — the real-robot equivalent needs **2** + **10** instead (see real section below).
 - **11** (ROS Bridge) and **12** (web dashboard) are independent of everything else — start any time, parallel-safe with each other.
 - **13**–**16** (debug/visual-aid tools) all just need **2** at minimum to be useful; none block anything else and can be skipped entirely.
 
@@ -136,9 +148,14 @@ source ~/ros2_ws/install/setup.bash && ros2 launch orchestrator calibration_orch
 bash ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/resources/scripts/shell/start_inference_server.sh real
 ```
 
-10. `startyolomarkerbridge real` (requires step 9 already running) :
+10. `startyolomarkerbridge real` (requires step 9 already running — real's actual `detections_2d` publisher; unlike sim there is no classical-detector alternative, see `sim_tmux_cupholder.sh`'s header) :
 ```
 source ~/ros2_ws/install/setup.bash && ros2 run aruco_perception_yolo_bridge yolo_marker_bridge_node.py --ros-args --params-file ~/ros2_ws/src/visual_calibration/aruco_perception_yolo_bridge/config/yolo_marker_bridge_real.yaml
+```
+
+10b. (no alias) `depth_perception_node` — turns step 10's 2D cup_holder/hole detections into stable 3D positions by sampling the depth image at each detection's centroid :
+```
+source ~/ros2_ws/install/setup.bash && ros2 launch depth_perception depth_perception.launch.py env:=real
 ```
 
 11. `startrosbridge` :
@@ -179,6 +196,7 @@ ros2 run swri_console swri_console
 - **6** (Aruco Detector) needs **1** (camera topics) — parallel-safe with **5**.
 - **7** (Calibration Broadcaster) needs **5** + **6**.
 - **8** (Calibration Orchestrator) needs **5** + **7** — last in the trajcal chain.
-- **9** (Inference Server) has no ROS dependency, can start any time; **10** (Yolo Marker Bridge) needs **9** + **2**.
+- **9** (Inference Server) has no ROS dependency, can start any time; **10** (Yolo Marker Bridge) needs **9** + **2** — real's actual `detections_2d` publisher (no classical-detector alternative on real, unlike sim's step 10b).
+- **10b** (Depth Perception) needs **2** + **10**.
 - **11** (ROS Bridge) and **12** (web dashboard) are independent of everything else.
 - **13**–**16** (debug/visual-aid tools) all just need **2** at minimum to be useful; none block anything else and can be skipped entirely.

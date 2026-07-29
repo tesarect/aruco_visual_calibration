@@ -18,6 +18,7 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <tf2_ros/static_transform_broadcaster.h>
+#include <tf2_ros/transform_broadcaster.h>
 #include <visual_calibration_msgs/action/calibrate.hpp>
 #include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
 #include <visual_calibration_msgs/srv/trace_path.hpp>
@@ -335,6 +336,22 @@ private:
     const geometry_msgs::msg::Pose & cal_ready_pose,
     int samples_already_collected);
 
+  /// Builds a geometry_msgs::msg::Pose from collected_positions_.back()/
+  /// collected_orientations_.back() (2026-07-29) — the just-recorded
+  /// sample, for populating Calibrate::Feedback::latest_sample_pose. Also
+  /// broadcasts the SAME pose as a transient (non-static) TF frame,
+  /// known_chain_frame -> "camera_calibration_sample" (a single frame that
+  /// gets REPLACED every call, not accumulated — see sampleTfBroadcaster_'s
+  /// doc comment for why a plain TransformBroadcaster, not
+  /// StaticTransformBroadcaster, is used here), so RViz shows the live
+  /// in-progress candidate pose updating sample by sample with zero
+  /// frontend/message work required — this is the primary, always-on
+  /// visualization; the web app's latest_sample_pose feedback field is an
+  /// additional path for browser-side visualization, not a replacement.
+  /// Must be called immediately after every recordSample() success, before
+  /// building/publishing that sample's feedback message.
+  geometry_msgs::msg::Pose broadcastLatestSamplePose();
+
   /// Builds a pose offset from `base_pose` by a pure rotation (pitch or
   /// roll) around `base_pose`'s own local axis, position unchanged — same
   /// tf2::Transform (base * offset) composition pattern as randomPoseNear,
@@ -437,6 +454,17 @@ private:
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
   tf2_ros::StaticTransformBroadcaster static_broadcaster_;
+  /// Broadcasts each in-progress sample's candidate camera pose (2026-07-29,
+  /// see broadcastLatestSamplePose()) as known_chain_frame ->
+  /// "camera_calibration_sample" — a plain (non-static) TransformBroadcaster
+  /// deliberately, NOT static_broadcaster_ above: a static broadcast is
+  /// meant to latch/persist as a fixed truth (correct for the FINAL
+  /// calibrated TF in finishCalibration()), but each sample here is a
+  /// transient, superseded-by-the-next-one candidate — republishing it as
+  /// a plain (non-latched) TF means it simply stops updating once
+  /// collection ends, rather than permanently overwriting the real
+  /// calibrated frame with whatever the last sample happened to be.
+  tf2_ros::TransformBroadcaster sample_tf_broadcaster_;
   /// Selected once at construction from config_'s priorities — see
   /// selectAveragingMethod.
   OrientationAveragingMethod averaging_method_;

@@ -99,7 +99,6 @@ customkill() {
         [depthperceptiontmux]='tmux kill-session -t depth_percep_term'
         [depthperceptionrealtmux]='tmux kill-session -t depth_percep_real_term'
         [perceptmux]='tmux kill-session -t percep_term'
-        [cupholdertmux]='tmux kill-session -t cupholder_term'
         [webstacktmux]='tmux kill-session -t webstack_term'
         [webstackrealtmux]='tmux kill-session -t webstack_real_term'
         [debugtmux]='tmux kill-session -t debug_term'
@@ -186,18 +185,6 @@ tmuxyolosim() {
     bash ./sim_tmux_yolo.sh "$@"
 }
 
-# cup_holder_detector_node session, sim ONLY — classical OpenCV
-# cup_holder/hole detector (aruco_perception package), sim's drop-in
-# alternative to tmuxyolosim's YOLO path for cup_holder/hole (still
-# publishes onto the same /aruco_perception/detections_2d topic). No real
-# equivalent exists — this node has no real-robot role. Run `tmuxbasesim`
-# first (needs move_group).
-# `tmuxcupholdersim cup_holder_detector=on`
-tmuxcupholdersim() {
-    cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
-    bash ./sim_tmux_cupholder.sh "$@"
-}
-
 # Real robot equivalent of tmuxtrajcalsim — trajectory_planner,
 # aruco_detector_node, calibration_broadcaster_node, calibration_
 # orchestrator_node. Run `tmuxbasereal` first — this session's panes poll
@@ -223,24 +210,24 @@ tmuxyoloreal() {
     bash ./real_tmux_yolo.sh "$@"
 }
 
-# Depth-perception session, sim — depth_perception_node, turning
-# cup_holder_detector_node's 2D cup_holder/hole detections into stable 3D
-# positions. Run `tmuxbasesim` AND `tmuxcupholdersim` first (needs
-# move_group and cup_holder_detector_node, sim's actual publisher of
-# /aruco_perception/detections_2d — sim uses the classical OpenCV detector
-# instead of tmuxyolosim's YOLO path, see sim_tmux_cupholder.sh). Single-
-# node session — one loggable pane, so `depth_perception=on` and
-# `essential_logs=on` do the same thing here.
-# `tmuxdepthperceptionsim depth_perception=on`
+# Depth-perception session, sim — TWO panes: cup_holder_detector_node
+# (top, sim's classical-OpenCV drop-in for cup_holder/hole detection,
+# since sim's CPU-only rosject can't run YOLO fast enough) + bottom pane
+# depth_perception_node (turns those 2D detections into stable 3D
+# positions). Merged into one session 2026-07-29 — previously two separate
+# sessions. Run `tmuxbasesim` first (needs move_group). Two loggable
+# panes — pass cup_holder_detector=on and/or depth_perception=on, or
+# essential_logs=on for both at once.
+# `tmuxdepthperceptionsim essential_logs=on`
 tmuxdepthperceptionsim() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/
     bash ./sim_tmux_depth_perception.sh "$@"
 }
 
-# Real robot equivalent of tmuxdepthperceptionsim. Run `tmuxbasereal` AND
+# Real robot equivalent of tmuxdepthperceptionsim — single pane only (real
+# has no cup_holder_detector_node equivalent). Run `tmuxbasereal` AND
 # `tmuxyoloreal` first — real still uses yolo_marker_bridge_node as its
-# detections_2d publisher (no real-robot cupholder-detector equivalent
-# exists, see sim_tmux_cupholder.sh's header).
+# detections_2d publisher.
 # `tmuxdepthperceptionreal depth_perception=on`
 tmuxdepthperceptionreal() {
     cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/

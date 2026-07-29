@@ -31,11 +31,18 @@ calibration_broadcaster_node:
     # passively collecting on a timer — see calibration_broadcaster_node.hpp.
     # How long to wait for a fresh marker_pose after each move before
     # aborting that sample (and the whole run) — e.g. marker out of view.
-    # Longer than sim's 5.0s: real's detection pipeline (Zenoh bridge, see
-    # CLAUDE.md's Real Robot Camera Setup) may take longer to produce a
-    # fresh frame after the arm settles, on top of trajectory_planner's own
-    # waypoint_settle_seconds already giving it a head start.
-    sample_wait_timeout_sec: 8.0
+    # Lowered 8.0 -> 2.5 (2026-07-29): live logs (samples_per_waypoint's 2nd
+    # sample at each waypoint, dual-sampling fix confirmed working)
+    # consistently showed well under 1s between a settled move and a fresh
+    # detection arriving (observed gaps: 0.06s-0.87s across dozens of
+    # samples) — 8.0s was leftover conservatism from before that data
+    # existed, not a measured requirement. This does NOT affect calibration
+    # accuracy/spread (it's a failure-detection timeout, not an averaging
+    # parameter) — it only controls how fast a genuinely-stuck sample (e.g.
+    # marker actually out of view) gets reported instead of hanging. 2.5s
+    # is ~3x the largest observed real gap, comfortable headroom without
+    # the old 8s wait on a real failure.
+    sample_wait_timeout_sec: 2.5
     # Planning strategy requested on every ~/trace_path call this node
     # makes — "cartesian" (straight-line, can fail partway near
     # limits/obstacles) or "joint_space" (free-space, more robust, no

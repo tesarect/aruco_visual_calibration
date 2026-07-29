@@ -19,8 +19,22 @@ aruco_detector_node:
     # (2026-07-23: plain camera frame when the marker isn't found, marker
     # box+axes drawn when it is — see aruco_detector_node.hpp's class doc
     # comment for why this changed from "only published on detection").
+    #
+    # SIM ONLY (2026-07-29): rerouted to an intermediate, unpublished-to-web
+    # topic — cup_holder_detector_node subscribes here, draws cup_holder/
+    # hole on top, and republishes the COMBINED image as the sole publisher
+    # of /aruco_perception/overlay_image (the web app's actual topic — see
+    # CameraFeed.tsx's OVERLAY_IMAGE_TOPIC). This makes sim match real's
+    # existing "one node, one combined image, one publish" pattern
+    # (yolo_marker_bridge_node.py already draws marker+cup_holder+hole
+    # together before its own single publish there). real's
+    # aruco_detector_real.yaml is UNCHANGED — real's classical detector
+    # remains the sole/direct publisher of /aruco_perception/overlay_image,
+    # since cup_holder_detector_node never runs on real. See
+    # cup_holder_detector_node.hpp's class doc comment for the sim-side
+    # subscribe+republish logic this topic feeds.
     publish_overlay_image: true
-    overlay_image_topic: "/aruco_perception/overlay_image"
+    overlay_image_topic: "/aruco_perception/overlay_image_marker_only"
     overlay_border_color_bgr: [0, 255, 255]
 
     # Same topic yolo_marker_bridge_node.py already publishes cup_holder/

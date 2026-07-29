@@ -14,3 +14,14 @@ float64 mean_spread_deg
 # Feedback: published after each accepted sample.
 uint32 samples_collected
 uint32 samples_total
+# The just-recorded sample's known_chain_frame -> camera candidate pose
+# (2026-07-29) — the SAME per-sample transform recordSample() already
+# computes into collected_positions_/collected_orientations_ internally,
+# now also surfaced here so a caller (web app, RViz via
+# calibration_broadcaster_node's own transient per-sample TF broadcast) can
+# visualize how the calibrated camera pose estimate is converging sample by
+# sample, not just the final averaged result. Zero-valued (default Pose)
+# on any feedback that isn't accompanied by a fresh sample (there are none
+# today — every feedback publish in this node follows a recordSample()
+# call — but this comment holds for any future caller relying on it).
+geometry_msgs/Pose latest_sample_pose

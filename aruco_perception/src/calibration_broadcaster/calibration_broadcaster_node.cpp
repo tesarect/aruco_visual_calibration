@@ -23,6 +23,7 @@ CalibrationBroadcasterNode::CalibrationBroadcasterNode()
   tf_buffer_(get_clock()),
   tf_listener_(tf_buffer_),
   static_broadcaster_(this),
+  sample_tf_broadcaster_(this),
   averaging_method_(
     selectAveragingMethod(
       config_.orientation_sum_normalize_priority, config_.orientation_markley_priority))
@@ -166,6 +167,7 @@ void CalibrationBroadcasterNode::executeCalibration(
     auto feedback = std::make_shared<Calibrate::Feedback>();
     feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
     feedback->samples_total = static_cast<uint32_t>(total_samples);
+    feedback->latest_sample_pose = broadcastLatestSamplePose();
     goal_handle->publish_feedback(feedback);
   }
 
@@ -260,16 +262,24 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
     // collected_ pool as every other sample — no same-waypoint agreement
     // check, rejectOutliers() sorts out any disagreement between them
     // later.
+    //
+    // sample_boundary tracks the freshness cutoff for THIS waypoint's next
+    // wait — starts at before_move (s==0, same as before this loop
+    // existed), then advances to "now" after each successful wait. Fixed
+    // 2026-07-29: originally every s reused the same before_move boundary
+    // unconditionally, which meant s==1 (and beyond) could — and reliably
+    // did, live — pass the ">before_move" check against the SAME still-
+    // cached message s==0 already consumed, since nothing in that
+    // condition required the message to be NEW relative to the previous
+    // sample, only new relative to before_move. Confirmed live: every
+    // waypoint's 2 samples showed byte-identical deviation, meaning both
+    // were the same underlying detection counted twice, not 2 independent
+    // measurements — silently doubling every sample's weight (good or
+    // bad) rather than adding real new information.
+    rclcpp::Time sample_boundary = before_move;
     for (int s = 0; s < config_.samples_per_waypoint; ++s) {
-      // The trace_path response only arrives once the arm has settled at
-      // target (see TrajectoryPlanner::tracePath/planAndExecute[Cartesian])
-      // — that's the settle signal for s==0. Still wait for a marker_pose
-      // published after before_move (not "after the previous sample"), the
-      // same boundary for every sample at this waypoint, rather than
-      // trusting whatever was last cached, so no sample here can reflect a
-      // frame captured before the move began.
       const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
-        waitForFreshMarkerPose(before_move);
+        waitForFreshMarkerPose(sample_boundary);
 
       if (!marker_pose.has_value()) {
         out_result = std::make_shared<Calibrate::Result>();
@@ -278,6 +288,15 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
           std::to_string(i + 1) + " (is the marker still in view?)";
         return false;
       }
+
+      // Advance the boundary to now (receipt-time domain, matching
+      // latest_marker_pose_stamp_'s own get_clock()->now() assignment in
+      // markerPoseCallback — NOT marker_pose->header.stamp, which is the
+      // sensor's own publish time, a different clock/value) — the NEXT
+      // sample at this waypoint (if any) must wait for a message that
+      // arrives after THIS one was consumed, not just after the move
+      // settled.
+      sample_boundary = get_clock()->now();
 
       if (!recordSample(*marker_pose)) {
         out_result = std::make_shared<Calibrate::Result>();
@@ -294,6 +313,7 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
       auto feedback = std::make_shared<Calibrate::Feedback>();
       feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
       feedback->samples_total = static_cast<uint32_t>(total_samples);
+      feedback->latest_sample_pose = broadcastLatestSamplePose();
       goal_handle->publish_feedback(feedback);
 
       if (stableAgreementReached()) {
@@ -396,10 +416,15 @@ bool CalibrationBroadcasterNode::runRandomPhase(
     // Take config_.samples_per_waypoint samples at this SAME visible
     // candidate pose (2026-07-29 — no additional move between them, same
     // reasoning as runPolygonPhase's identical change) before moving to
-    // the next random candidate.
+    // the next random candidate. sample_boundary advances after each
+    // successful wait — see runPolygonPhase's identical variable/fix for
+    // why reusing before_move unconditionally across all samples_per_
+    // waypoint iterations was a bug (every sample after the first could
+    // return the SAME still-cached message, confirmed live).
+    rclcpp::Time sample_boundary = before_move;
     for (int s = 0; s < config_.samples_per_waypoint; ++s) {
       const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
-        waitForFreshMarkerPose(before_move);
+        waitForFreshMarkerPose(sample_boundary);
       if (!marker_pose.has_value()) {
         out_result = std::make_shared<Calibrate::Result>();
         out_result->success = false;
@@ -408,6 +433,7 @@ bool CalibrationBroadcasterNode::runRandomPhase(
           std::to_string(samples_already_collected + i + 1);
         return false;
       }
+      sample_boundary = get_clock()->now();
 
       if (!recordSample(*marker_pose)) {
         out_result = std::make_shared<Calibrate::Result>();
@@ -424,6 +450,7 @@ bool CalibrationBroadcasterNode::runRandomPhase(
       auto feedback = std::make_shared<Calibrate::Feedback>();
       feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
       feedback->samples_total = static_cast<uint32_t>(total_samples);
+      feedback->latest_sample_pose = broadcastLatestSamplePose();
       goal_handle->publish_feedback(feedback);
 
       if (stableAgreementReached()) {
@@ -513,6 +540,7 @@ void CalibrationBroadcasterNode::runOrientationSweepPhase(
     auto feedback = std::make_shared<Calibrate::Feedback>();
     feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
     feedback->samples_total = static_cast<uint32_t>(total_samples);
+    feedback->latest_sample_pose = broadcastLatestSamplePose();
     goal_handle->publish_feedback(feedback);
   }
 
@@ -689,6 +717,29 @@ bool CalibrationBroadcasterNode::recordSample(
   last_sample_.pose.orientation = tf2::toMsg(known_to_camera.getRotation());
 
   return true;
+}
+
+geometry_msgs::msg::Pose CalibrationBroadcasterNode::broadcastLatestSamplePose()
+{
+  // last_sample_.pose already holds exactly the sample recordSample() just
+  // computed (position + orientation) — no need to re-derive it from
+  // collected_positions_.back()/collected_orientations_.back().
+  geometry_msgs::msg::TransformStamped sample_tf;
+  sample_tf.header.stamp = get_clock()->now();
+  sample_tf.header.frame_id = config_.known_chain_frame;
+  // Fixed name, not per-sample-numbered — this frame is meant to be
+  // watched live in RViz as ONE thing that updates, not accumulate one
+  // frame per sample (that's what the web app's per-sample pose array,
+  // fed by latest_sample_pose, is for instead).
+  sample_tf.child_frame_id = "camera_calibration_sample";
+  sample_tf.transform.translation.x = last_sample_.pose.position.x;
+  sample_tf.transform.translation.y = last_sample_.pose.position.y;
+  sample_tf.transform.translation.z = last_sample_.pose.position.z;
+  sample_tf.transform.rotation = last_sample_.pose.orientation;
+
+  sample_tf_broadcaster_.sendTransform(sample_tf);
+
+  return last_sample_.pose;
 }
 
 int CalibrationBroadcasterNode::totalSamplesTarget() const

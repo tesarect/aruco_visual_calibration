@@ -7,6 +7,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
 #include <image_transport/image_transport.hpp>
+#include <cv_bridge/cv_bridge.h>
 #include <opencv2/core.hpp>
 #include <visual_calibration_msgs/msg/detection2_d_array.hpp>
 
@@ -33,6 +34,16 @@ struct CupHolderDetectorConfig
   /// verification via rqt_image_view while tuning thresholds live. Off by
   /// default — a debugging aid, not something downstream nodes consume.
   bool publish_overlay_image = false;
+  /// Input: aruco_detector_node's marker-only overlay (sim's
+  /// aruco_detector_sim.yaml reroutes its overlay_image_topic here instead
+  /// of publishing /aruco_perception/overlay_image directly — see that
+  /// file's comment). This node draws cup_holder/hole on top of whatever
+  /// arrives here and republishes the combined image — see class doc
+  /// comment for why (matching real's "one node, one combined image, one
+  /// publish" pattern).
+  std::string overlay_image_input_topic;
+  /// Output: the actual, web-app-facing /aruco_perception/overlay_image —
+  /// this node is the SOLE publisher of it on sim (see class doc comment).
   std::string overlay_image_topic;
 
   /// Grayscale threshold [0,255]: pixels >= this are considered part of
@@ -116,6 +127,24 @@ struct CupHolderDetectorConfig
 /// consistent across every pose sim's arm actually reaches. Treat
 /// hole_number as provisional until checked live against a real scan
 /// sweep.
+///
+/// Overlay unification (2026-07-29): sim's aruco_detector_node no longer
+/// publishes /aruco_perception/overlay_image directly — its
+/// aruco_detector_sim.yaml reroutes overlay_image_topic to
+/// overlay_image_input_topic here instead (see that file's comment). This
+/// node subscribes to that marker-only overlay, caches the LATEST received
+/// frame (latest_marker_overlay_), and — every time its OWN detection pass
+/// completes — draws cup_holder/hole circles on top of that cached frame
+/// and publishes the combined image as the sole publisher of
+/// /aruco_perception/overlay_image. No strict frame-pairing/sync between
+/// the two subscriptions: same "latest cached frame, degrades gracefully
+/// if the other publisher is down" pattern yolo_marker_bridge_node.py
+/// already uses for overlaying depth_perception_node's stable-position
+/// markers (see that node's own doc comment) — if aruco_detector_node
+/// isn't running/hasn't published yet, latest_marker_overlay_ is empty and
+/// this node falls back to drawing directly on its own raw camera frame
+/// (still a valid, if marker-less, overlay) rather than publishing
+/// nothing.
 class CupHolderDetectorNode : public rclcpp::Node
 {
 public:
@@ -125,6 +154,9 @@ private:
   CupHolderDetectorConfig loadConfigFromParams() const;
 
   void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
+  /// Caches msg as latest_marker_overlay_ — see class doc comment. Does
+  /// no detection work itself.
+  void markerOverlayCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
 
   /// One accepted circular contour, in pixel space — the common shape
   /// both the cup_holder pass and the hole pass reduce a cv::findContours
@@ -155,7 +187,20 @@ private:
 
   image_transport::Subscriber image_sub_;
   rclcpp::Publisher<visual_calibration_msgs::msg::Detection2DArray>::SharedPtr detections_2d_pub_;
+  /// Subscribed only when config_.publish_overlay_image is true — see
+  /// markerOverlayCallback.
+  image_transport::Subscriber marker_overlay_sub_;
+  /// The combined (marker + cup_holder/hole) overlay — see class doc
+  /// comment. Same topic name real's aruco_detector_node/
+  /// yolo_marker_bridge_node publish directly; here this node is the sole
+  /// publisher.
   image_transport::Publisher overlay_image_pub_;
+
+  /// Latest frame received on overlay_image_input_topic, cached (not
+  /// re-published as-is) — see class doc comment. cv_bridge::CvImageConstPtr
+  /// so it's a cheap shared_ptr copy per callback, not a deep image copy.
+  /// nullptr until aruco_detector_node's first overlay frame arrives.
+  cv_bridge::CvImageConstPtr latest_marker_overlay_;
 };
 
 }  // namespace aruco_perception

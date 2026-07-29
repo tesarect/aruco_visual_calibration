@@ -15,11 +15,19 @@ cup_holder_detector_node:
     # publish Detection2DArray on — see class doc comment.
     detections_2d_topic: "/aruco_perception/detections_2d"
 
-    # Overlay — off by default like aruco_detector_node's; turn on while
-    # tuning thresholds live, draws the accepted cup_holder circle (yellow)
-    # and each accepted hole circle + hole_number label (red/white).
+    # Overlay unification (2026-07-29): this node subscribes to
+    # aruco_detector_node's marker-only overlay (aruco_detector_sim.yaml's
+    # overlay_image_topic is rerouted to this exact name), draws cup_holder/
+    # hole circles on top, and republishes the COMBINED image as the SOLE
+    # publisher of overlay_image_topic below — the actual web-app-facing
+    # /aruco_perception/overlay_image (see CupHolderDetectorNode's class doc
+    # comment and CameraFeed.tsx's OVERLAY_IMAGE_TOPIC). Both topic names
+    # must stay in sync with aruco_detector_sim.yaml's own
+    # overlay_image_topic value — if that ever changes, update
+    # overlay_image_input_topic here to match.
     publish_overlay_image: true
-    overlay_image_topic: "/aruco_perception/cup_holder_overlay_image"
+    overlay_image_input_topic: "/aruco_perception/overlay_image_marker_only"
+    overlay_image_topic: "/aruco_perception/overlay_image"
 
     active: true
 

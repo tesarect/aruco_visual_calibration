@@ -25,6 +25,10 @@ CupHolderDetectorNode::CupHolderDetectorNode()
 
   if (config_.publish_overlay_image) {
     overlay_image_pub_ = image_transport::create_publisher(this, config_.overlay_image_topic);
+    marker_overlay_sub_ = image_transport::create_subscription(
+      this, config_.overlay_image_input_topic,
+      std::bind(&CupHolderDetectorNode::markerOverlayCallback, this, std::placeholders::_1),
+      "raw");
   }
 
   RCLCPP_INFO(get_logger(), "cup_holder_detector_node ready (sim-only classical CV detector).");
@@ -115,6 +119,22 @@ void CupHolderDetectorNode::assignHoleQuadrants(
     } else {
       hole.hole_number = 4;
     }
+  }
+}
+
+void CupHolderDetectorNode::markerOverlayCallback(
+  const sensor_msgs::msg::Image::ConstSharedPtr & msg)
+{
+  // Cache only — see class doc comment. Conversion failures here must not
+  // crash detection; just skip this frame's cache update and keep whatever
+  // was cached before (or nullptr, falling back to the raw-frame path in
+  // imageCallback).
+  try {
+    latest_marker_overlay_ = cv_bridge::toCvCopy(msg, "bgr8");
+  } catch (const cv_bridge::Exception & e) {
+    RCLCPP_ERROR_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "cv_bridge conversion failed for marker overlay input: %s", e.what());
   }
 }
 
@@ -235,12 +255,23 @@ void CupHolderDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSh
 
   if (config_.publish_overlay_image) {
     cv_bridge::CvImagePtr overlay_ptr;
-    try {
-      overlay_ptr = cv_bridge::toCvCopy(msg, "bgr8");
-    } catch (const cv_bridge::Exception & e) {
-      RCLCPP_ERROR_THROTTLE(
-        get_logger(), *get_clock(), 5000, "cv_bridge overlay conversion failed: %s", e.what());
-      return;
+    // Draw on top of aruco_detector_node's latest cached marker-only
+    // overlay when available (see class doc comment) — falls back to this
+    // node's own raw frame if aruco_detector_node isn't running/hasn't
+    // published yet, so the combined overlay still comes out (marker-less,
+    // but not silently missing).
+    if (latest_marker_overlay_) {
+      overlay_ptr = std::make_shared<cv_bridge::CvImage>(
+        latest_marker_overlay_->header, latest_marker_overlay_->encoding,
+        latest_marker_overlay_->image.clone());
+    } else {
+      try {
+        overlay_ptr = cv_bridge::toCvCopy(msg, "bgr8");
+      } catch (const cv_bridge::Exception & e) {
+        RCLCPP_ERROR_THROTTLE(
+          get_logger(), *get_clock(), 5000, "cv_bridge overlay conversion failed: %s", e.what());
+        return;
+      }
     }
 
     if (cup_holder_found) {
@@ -269,6 +300,7 @@ CupHolderDetectorConfig CupHolderDetectorNode::loadConfigFromParams() const
   config.image_topic = get_parameter("image_topic").as_string();
   config.detections_2d_topic = get_parameter("detections_2d_topic").as_string();
   config.publish_overlay_image = get_parameter("publish_overlay_image").as_bool();
+  config.overlay_image_input_topic = get_parameter("overlay_image_input_topic").as_string();
   config.overlay_image_topic = get_parameter("overlay_image_topic").as_string();
 
   config.cup_holder_thresh = static_cast<int>(get_parameter("cup_holder_thresh").as_int());
