@@ -1,0 +1,47 @@
+# Simulation-only classical CV cup_holder/hole detector. No _real.yaml
+# counterpart exists — this node is never launched on real (see
+# cup_holder_detector_node.hpp's class doc comment). All thresholds below
+# are a first-pass estimate from the reference cup_holder image (bright
+# white/grey disc, ~4 dark reddish holes) — expect to retune live via
+# `ros2 param set /cup_holder_detector_node <name> <value>` against the
+# actual running sim feed (viewcam alias / rqt_image_view on
+# /wrist_rgbd_depth_sensor/image_raw, or this node's own overlay_image_topic
+# once publish_overlay_image is turned on).
+cup_holder_detector_node:
+  ros__parameters:
+    image_topic: "/wrist_rgbd_depth_sensor/image_raw"
+
+    # Same topic aruco_detector_node/yolo_marker_bridge_node already
+    # publish Detection2DArray on — see class doc comment.
+    detections_2d_topic: "/aruco_perception/detections_2d"
+
+    # Overlay — off by default like aruco_detector_node's; turn on while
+    # tuning thresholds live, draws the accepted cup_holder circle (yellow)
+    # and each accepted hole circle + hole_number label (red/white).
+    publish_overlay_image: true
+    overlay_image_topic: "/aruco_perception/cup_holder_overlay_image"
+
+    active: true
+
+    # Pass 1 — cup_holder disc. THRESH_BINARY: grayscale pixels >=
+    # cup_holder_thresh are considered part of the disc. The disc reads as
+    # a bright, near-white/light-grey surface against a darker background
+    # in the reference image — 180 is a starting guess, verify against a
+    # live histogram/pixel-probe if the disc isn't being picked up cleanly.
+    cup_holder_thresh: 180
+    cup_holder_min_circularity: 0.7
+    cup_holder_min_area_px: 400.0
+
+    # Pass 2 — holes. THRESH_BINARY_INV, applied only within a square ROI
+    # around the found cup_holder: grayscale pixels <= hole_thresh are
+    # considered part of a hole cavity. The reference image shows the 4
+    # holes as noticeably darker/reddish relative to the white disc
+    # surface — 90 is a starting guess. hole_min_radius_px/
+    # hole_max_radius_px are the floor/ceiling used to separate the 4 real
+    # holes from small decorative screw-holes also visible near the disc's
+    # rim in the reference image — verify actual pixel radii live before
+    # trusting these.
+    hole_thresh: 90
+    hole_min_circularity: 0.6
+    hole_min_radius_px: 4.0
+    hole_max_radius_px: 40.0

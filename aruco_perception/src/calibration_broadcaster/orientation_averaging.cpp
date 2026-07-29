@@ -55,16 +55,14 @@ tf2::Quaternion sumNormalize(const std::vector<tf2::Quaternion> & samples)
   return sum;
 }
 
-/// Angular deviation (degrees) between two quaternions, accounting for the
-/// q/-q double-cover of SO(3) (the shorter of the two equivalent angles).
+}  // namespace
+
 double angularDeviationDeg(const tf2::Quaternion & a, const tf2::Quaternion & b)
 {
   double dot = std::abs(a.dot(b));
   dot = std::min(1.0, std::max(-1.0, dot));  // guard acos domain against fp drift
   return 2.0 * std::acos(dot) * 180.0 / M_PI;
 }
-
-}  // namespace
 
 OrientationAveragingResult averageQuaternions(
   const std::vector<tf2::Quaternion> & samples,

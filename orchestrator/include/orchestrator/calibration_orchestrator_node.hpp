@@ -295,6 +295,22 @@ private:
   /// self_action_client_'s result callback.
   void publishStatusResult(const AutoCalibrate::Result & result);
 
+  /// Sends `signal` (SIGSTOP or SIGCONT) to every running
+  /// "python3 inference_server.py" process, found by scanning /proc
+  /// directly (NOT std::system()/popen() — fork()ing from this
+  /// multithreaded rclcpp node risks the child inheriting a locked mutex
+  /// with no thread alive to release it, confirmed live 2026-07-29: an
+  /// earlier std::system("pkill ...") call at the top of
+  /// executeAutoCalibrate() silently hung the entire calibration thread
+  /// before it ever reached moveToCalReady(), no error/log at all). Used
+  /// to pause/resume inference_server.py's YOLO model around the
+  /// calibration sequence (see executeAutoCalibrate()/publishStatusResult())
+  /// without killing/restarting it (avoids paying the model-reload cost on
+  /// every calibration run). No-ops harmlessly (returns without error) if
+  /// no matching process is found — same "fine if it's not running"
+  /// convention as start_inference_server.sh's own pkill call.
+  void signalInferenceServer(int signal);
+
   rclcpp_action::GoalResponse handleGoal(
     const rclcpp_action::GoalUUID & uuid,
     std::shared_ptr<const AutoCalibrate::Goal> goal);

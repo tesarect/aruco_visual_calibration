@@ -58,3 +58,37 @@ calibration_broadcaster_node:
     # within tolerance before calibration stops collecting early instead
     # of running the full polygon+random count.
     stable_agreement_count: 2
+
+    # --- Orientation sweep phase (2026-07-29) ---
+    # Runs once after polygon/random sampling is otherwise done (early-stop
+    # or full count) — returns to cal_ready, then probes pitch down/up and
+    # roll left/right, one extra sample each, before finishCalibration. See
+    # CalibrationBroadcasterNode::runOrientationSweepPhase. Disabled in sim:
+    # motivated by a real-robot run with poor orientation spread (37deg
+    # max/14.9deg mean) — sim's ground-truth camera TF makes this extra
+    # probing largely redundant, and it costs real simulated motion time.
+    orientation_sweep_enabled: false
+    # Pitch/roll offset (degrees) for all 4 sweep probes. Only used if
+    # orientation_sweep_enabled is true.
+    orientation_sweep_angle_deg: 5.0
+
+    # --- Outlier rejection (2026-07-29) ---
+    # In finishCalibration, discards any collected sample whose position OR
+    # orientation deviation from the (unfiltered) mean exceeds the
+    # corresponding threshold below, before computing the final average —
+    # see CalibrationBroadcasterNode::rejectOutliers. Threshold-based: a
+    # clean run (every sample already within both thresholds) discards
+    # nothing.
+    outlier_rejection_enabled: true
+    outlier_position_threshold_cm: 2.0
+    outlier_orientation_threshold_deg: 5.0
+
+    # --- Dual-sampling per waypoint (2026-07-29) ---
+    # Number of samples taken at each polygon/random-phase waypoint (no
+    # additional move between them) before advancing — mitigates a single
+    # bad/missed detection being that waypoint's only data point. Samples
+    # from the same waypoint are pooled with every other sample; no
+    # separate same-waypoint agreement check — outlier_rejection above
+    # sorts out any disagreement between them. Set to 1 to restore the
+    # original one-sample-per-waypoint behavior.
+    samples_per_waypoint: 2

@@ -52,6 +52,16 @@ OrientationAveragingResult averageQuaternions(
   const std::vector<tf2::Quaternion> & samples,
   OrientationAveragingMethod method);
 
+/// Angular deviation (degrees) between two quaternions, accounting for the
+/// q/-q double-cover of SO(3) (returns the shorter of the two equivalent
+/// angles). Exposed (2026-07-29, for CalibrationBroadcasterNode::
+/// rejectOutliers' per-sample deviation check) — the exact same formula
+/// averageQuaternions() already uses internally to compute max_spread_deg/
+/// mean_spread_deg, so a caller needing a single sample-vs-reference
+/// deviation doesn't have to reimplement/duplicate the acos(dot(...))
+/// formula.
+double angularDeviationDeg(const tf2::Quaternion & a, const tf2::Quaternion & b);
+
 }  // namespace aruco_perception
 
 #endif  // ARUCO_PERCEPTION__ORIENTATION_AVERAGING_HPP_

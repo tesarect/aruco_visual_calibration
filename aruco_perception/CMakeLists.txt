@@ -51,6 +51,22 @@ ament_target_dependencies(aruco_detector_node
 )
 target_link_libraries(aruco_detector_node ${OpenCV_LIBS})
 
+add_executable(cup_holder_detector_node
+  src/cup_holder_detector/cup_holder_detector_node.cpp
+  src/cup_holder_detector/main.cpp
+)
+target_include_directories(cup_holder_detector_node PRIVATE
+  include
+)
+ament_target_dependencies(cup_holder_detector_node
+  rclcpp
+  sensor_msgs
+  visual_calibration_msgs
+  cv_bridge
+  image_transport
+)
+target_link_libraries(cup_holder_detector_node ${OpenCV_LIBS})
+
 add_executable(calibration_broadcaster_node
   src/calibration_broadcaster/calibration_broadcaster_node.cpp
   src/calibration_broadcaster/orientation_averaging.cpp
@@ -72,6 +88,7 @@ ament_target_dependencies(calibration_broadcaster_node
 install(TARGETS
   image_subscriber_node
   aruco_detector_node
+  cup_holder_detector_node
   calibration_broadcaster_node
   DESTINATION lib/${PROJECT_NAME}
 )

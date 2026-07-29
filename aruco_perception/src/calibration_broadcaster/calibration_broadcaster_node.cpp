@@ -1,10 +1,13 @@
 #include "aruco_perception/calibration_broadcaster_node.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <stdexcept>
 #include <thread>
+#include <tuple>
+#include <vector>
 
 #include <tf2/LinearMath/Transform.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
@@ -157,7 +160,7 @@ void CalibrationBroadcasterNode::executeCalibration(
       return;
     }
 
-    const int total_samples = 1 + config_.num_samples + config_.random_phase_samples;
+    const int total_samples = totalSamplesTarget();
     RCLCPP_INFO(get_logger(), "Collected sample 1/%d (center pose)", total_samples);
 
     auto feedback = std::make_shared<Calibrate::Feedback>();
@@ -192,6 +195,21 @@ void CalibrationBroadcasterNode::executeCalibration(
     }
   }
 
+  // Orientation sweep phase (2026-07-29): runs once here, regardless of
+  // WHICH prior phase last ran or whether it stopped early or ran to
+  // completion — neither polygon nor random phase varies orientation at
+  // all (randomPoseNear only offsets X/Y/Z, see its own doc comment), so
+  // this is the only source of orientation-diverse samples. Gated by
+  // config_.orientation_sweep_enabled (default off in sim, on in real —
+  // see CalibrationBroadcasterConfig's doc comment). Soft-fails per probe
+  // (skips, doesn't abort the run) — see runOrientationSweepPhase's own
+  // doc comment — so no phase_result/goal_handle->abort branch is needed
+  // here the way the two phases above need one.
+  if (config_.orientation_sweep_enabled) {
+    runOrientationSweepPhase(
+      goal_handle, center_pose, static_cast<int>(collected_positions_.size()));
+  }
+
   finishCalibration(goal_handle);
 }
 
@@ -202,7 +220,7 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
   bool & stopped_early)
 {
   stopped_early = false;
-  const int total_samples = 1 + config_.num_samples + config_.random_phase_samples;
+  const int total_samples = totalSamplesTarget();
 
   for (int i = 0; i < config_.num_samples; ++i) {
     if (goal_handle->is_canceling()) {
@@ -235,45 +253,56 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
       return false;
     }
 
-    // The trace_path response only arrives once the arm has settled at
-    // target (see TrajectoryPlanner::tracePath/planAndExecute[Cartesian])
-    // — that's the settle signal. Still wait for a marker_pose published
-    // after before_move, rather than trusting whatever was last cached,
-    // so the sample can't reflect a frame captured before the move began.
-    const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
-      waitForFreshMarkerPose(before_move);
+    // Take config_.samples_per_waypoint samples at this SAME settled pose
+    // (2026-07-29 — no additional move between them) before advancing to
+    // the next waypoint, mitigating a single bad/missed detection being
+    // this waypoint's only data point. Both/all go into the same
+    // collected_ pool as every other sample — no same-waypoint agreement
+    // check, rejectOutliers() sorts out any disagreement between them
+    // later.
+    for (int s = 0; s < config_.samples_per_waypoint; ++s) {
+      // The trace_path response only arrives once the arm has settled at
+      // target (see TrajectoryPlanner::tracePath/planAndExecute[Cartesian])
+      // — that's the settle signal for s==0. Still wait for a marker_pose
+      // published after before_move (not "after the previous sample"), the
+      // same boundary for every sample at this waypoint, rather than
+      // trusting whatever was last cached, so no sample here can reflect a
+      // frame captured before the move began.
+      const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
+        waitForFreshMarkerPose(before_move);
 
-    if (!marker_pose.has_value()) {
-      out_result = std::make_shared<Calibrate::Result>();
-      out_result->success = false;
-      out_result->message = "Timed out waiting for a fresh marker_pose for sample " +
-        std::to_string(i + 1) + " (is the marker still in view?)";
-      return false;
-    }
+      if (!marker_pose.has_value()) {
+        out_result = std::make_shared<Calibrate::Result>();
+        out_result->success = false;
+        out_result->message = "Timed out waiting for a fresh marker_pose for sample " +
+          std::to_string(i + 1) + " (is the marker still in view?)";
+        return false;
+      }
 
-    if (!recordSample(*marker_pose)) {
-      out_result = std::make_shared<Calibrate::Result>();
-      out_result->success = false;
-      out_result->message = "Could not record sample " + std::to_string(i + 1) +
-        " (TF lookup failed, see log)";
-      return false;
-    }
+      if (!recordSample(*marker_pose)) {
+        out_result = std::make_shared<Calibrate::Result>();
+        out_result->success = false;
+        out_result->message = "Could not record sample " + std::to_string(i + 1) +
+          " (TF lookup failed, see log)";
+        return false;
+      }
 
-    RCLCPP_INFO(
-      get_logger(), "Collected sample %zu/%d (polygon phase)", collected_positions_.size(),
-      total_samples);
-
-    auto feedback = std::make_shared<Calibrate::Feedback>();
-    feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
-    feedback->samples_total = static_cast<uint32_t>(total_samples);
-    goal_handle->publish_feedback(feedback);
-
-    if (stableAgreementReached()) {
       RCLCPP_INFO(
-        get_logger(), "Early-stop: agreement reached after %zu samples (polygon phase)",
-        collected_positions_.size());
-      stopped_early = true;
-      return true;
+        get_logger(), "Collected sample %zu/%d (polygon phase)", collected_positions_.size(),
+        total_samples);
+
+      auto feedback = std::make_shared<Calibrate::Feedback>();
+      feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
+      feedback->samples_total = static_cast<uint32_t>(total_samples);
+      goal_handle->publish_feedback(feedback);
+
+      if (stableAgreementReached()) {
+        RCLCPP_INFO(
+          get_logger(), "Early-stop: agreement reached after %zu samples (polygon phase)",
+          collected_positions_.size());
+        stopped_early = true;
+        return true;
+      }
     }
   }
 
@@ -288,7 +317,7 @@ bool CalibrationBroadcasterNode::runRandomPhase(
   bool & stopped_early)
 {
   stopped_early = false;
-  const int total_samples = 1 + config_.num_samples + config_.random_phase_samples;
+  const int total_samples = totalSamplesTarget();
   int consecutive_failures = 0;
 
   for (int i = 0; i < config_.random_phase_samples; ) {
@@ -364,44 +393,142 @@ bool CalibrationBroadcasterNode::runRandomPhase(
 
     consecutive_failures = 0;
 
-    const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
-      waitForFreshMarkerPose(before_move);
-    if (!marker_pose.has_value()) {
-      out_result = std::make_shared<Calibrate::Result>();
-      out_result->success = false;
-      out_result->message = "Timed out waiting for a fresh marker_pose for random-phase sample " +
-        std::to_string(samples_already_collected + i + 1);
-      return false;
-    }
+    // Take config_.samples_per_waypoint samples at this SAME visible
+    // candidate pose (2026-07-29 — no additional move between them, same
+    // reasoning as runPolygonPhase's identical change) before moving to
+    // the next random candidate.
+    for (int s = 0; s < config_.samples_per_waypoint; ++s) {
+      const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
+        waitForFreshMarkerPose(before_move);
+      if (!marker_pose.has_value()) {
+        out_result = std::make_shared<Calibrate::Result>();
+        out_result->success = false;
+        out_result->message =
+          "Timed out waiting for a fresh marker_pose for random-phase sample " +
+          std::to_string(samples_already_collected + i + 1);
+        return false;
+      }
 
-    if (!recordSample(*marker_pose)) {
-      out_result = std::make_shared<Calibrate::Result>();
-      out_result->success = false;
-      out_result->message = "Could not record random-phase sample " +
-        std::to_string(samples_already_collected + i + 1) + " (TF lookup failed, see log)";
-      return false;
+      if (!recordSample(*marker_pose)) {
+        out_result = std::make_shared<Calibrate::Result>();
+        out_result->success = false;
+        out_result->message = "Could not record random-phase sample " +
+          std::to_string(samples_already_collected + i + 1) + " (TF lookup failed, see log)";
+        return false;
+      }
+
+      RCLCPP_INFO(
+        get_logger(), "Collected sample %zu/%d (random phase)", collected_positions_.size(),
+        total_samples);
+
+      auto feedback = std::make_shared<Calibrate::Feedback>();
+      feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
+      feedback->samples_total = static_cast<uint32_t>(total_samples);
+      goal_handle->publish_feedback(feedback);
+
+      if (stableAgreementReached()) {
+        RCLCPP_INFO(
+          get_logger(), "Early-stop: agreement reached after %zu samples (random phase)",
+          collected_positions_.size());
+        stopped_early = true;
+        return true;
+      }
     }
 
     ++i;
+  }
+
+  return true;
+}
+
+void CalibrationBroadcasterNode::runOrientationSweepPhase(
+  const std::shared_ptr<GoalHandleCalibrate> & goal_handle,
+  const geometry_msgs::msg::Pose & cal_ready_pose,
+  int samples_already_collected)
+{
+  const int total_samples = totalSamplesTarget();
+  int samples_collected_this_phase = 0;
+
+  // (angle sign, is_pitch, label) for the 4 probes — each independently
+  // offset from cal_ready_pose's own orientation (not cumulative from the
+  // previous probe), matching runOrientationSweepPhase's doc comment.
+  const std::array<std::tuple<double, bool, const char *>, 4> probes = {{
+      {-config_.orientation_sweep_angle_deg, true, "pitch down"},
+      {config_.orientation_sweep_angle_deg, true, "pitch up"},
+      {-config_.orientation_sweep_angle_deg, false, "roll left"},
+      {config_.orientation_sweep_angle_deg, false, "roll right"},
+    }};
+
+  for (const auto & [angle_deg, is_pitch, label] : probes) {
+    if (goal_handle->is_canceling()) {
+      // Mid-sweep cancellation: leave sample collection where it is —
+      // executeCalibration's caller (finishCalibration) will run on
+      // whatever was collected so far, same as the polygon/random phases'
+      // own cancellation handling elsewhere aborts the goal outright, but
+      // this phase is explicitly best-effort/soft-fail (see this method's
+      // header doc comment), so a cancellation here just stops taking
+      // further sweep samples rather than discarding the run.
+      RCLCPP_INFO(get_logger(), "Orientation sweep phase: cancellation requested, stopping early");
+      return;
+    }
+
+    const geometry_msgs::msg::Pose target = rotatedPoseNear(cal_ready_pose, angle_deg, is_pitch);
+
+    const rclcpp::Time before_move = get_clock()->now();
+    if (!tracePathBlocking(target)) {
+      RCLCPP_INFO(
+        get_logger(), "Orientation sweep: '%s' probe move failed — skipping this probe "
+        "(not a hard failure, see runOrientationSweepPhase's doc comment)", label);
+      continue;
+    }
+
+    if (!isMarkerVisibleNow(before_move)) {
+      RCLCPP_INFO(
+        get_logger(), "Orientation sweep: marker not visible at '%s' probe — skipping this "
+        "probe", label);
+      continue;
+    }
+
+    const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
+      waitForFreshMarkerPose(before_move);
+    if (!marker_pose.has_value()) {
+      RCLCPP_INFO(
+        get_logger(), "Orientation sweep: timed out waiting for a fresh marker_pose at '%s' "
+        "probe — skipping this probe", label);
+      continue;
+    }
+
+    if (!recordSample(*marker_pose)) {
+      RCLCPP_WARN(
+        get_logger(), "Orientation sweep: could not record '%s' probe's sample (TF lookup "
+        "failed, see log) — skipping this probe", label);
+      continue;
+    }
+
+    ++samples_collected_this_phase;
     RCLCPP_INFO(
-      get_logger(), "Collected sample %zu/%d (random phase)", collected_positions_.size(),
-      total_samples);
+      get_logger(), "Collected sample %zu/%d (orientation sweep, '%s')",
+      collected_positions_.size(), total_samples, label);
 
     auto feedback = std::make_shared<Calibrate::Feedback>();
     feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
     feedback->samples_total = static_cast<uint32_t>(total_samples);
     goal_handle->publish_feedback(feedback);
-
-    if (stableAgreementReached()) {
-      RCLCPP_INFO(
-        get_logger(), "Early-stop: agreement reached after %zu samples (random phase)",
-        collected_positions_.size());
-      stopped_early = true;
-      return true;
-    }
   }
 
-  return true;
+  // Return to cal_ready regardless of how many probes succeeded, leaving
+  // the arm in a known pose before finishCalibration() — a soft-fail here
+  // (logged, not fatal) since the calibration itself has already collected
+  // everything it needs; only the arm's final resting pose is at stake.
+  if (!tracePathBlocking(cal_ready_pose)) {
+    RCLCPP_WARN(
+      get_logger(), "Orientation sweep phase: failed to return to cal_ready after sweeping "
+      "(non-fatal — calibration will still finish and broadcast normally)");
+  }
+
+  RCLCPP_INFO(
+    get_logger(), "Orientation sweep phase complete: %d/4 probes collected (samples_already_"
+    "collected was %d)", samples_collected_this_phase, samples_already_collected);
 }
 
 geometry_msgs::msg::Pose CalibrationBroadcasterNode::randomPoseNear(
@@ -426,6 +553,43 @@ geometry_msgs::msg::Pose CalibrationBroadcasterNode::randomPoseNear(
   tf2::fromMsg(center_pose, center);
   const tf2::Transform offset(tf2::Quaternion::getIdentity(), tf2::Vector3(dx, dy, dz));
   const tf2::Transform result = center * offset;
+
+  geometry_msgs::msg::Pose result_pose;
+  result_pose.position.x = result.getOrigin().x();
+  result_pose.position.y = result.getOrigin().y();
+  result_pose.position.z = result.getOrigin().z();
+  result_pose.orientation = tf2::toMsg(result.getRotation());
+  return result_pose;
+}
+
+geometry_msgs::msg::Pose CalibrationBroadcasterNode::rotatedPoseNear(
+  const geometry_msgs::msg::Pose & base_pose, double angle_deg, bool is_pitch) const
+{
+  // Same tf2::Transform (base * offset) composition pattern as
+  // randomPoseNear, but offset here is rotation-only (translation zero)
+  // around base_pose's own LOCAL axis, applied on the right so it's
+  // expressed in base_pose's frame, not world frame — position stays
+  // exactly at base_pose's origin (a pure orientation probe, not a
+  // combined position+orientation move).
+  //
+  // Axis convention: is_pitch rotates around the local Y axis (tf2::Vector3(0,1,0)),
+  // roll around the local X axis (tf2::Vector3(1,0,0)) — the standard
+  // aerospace/robotics convention (pitch = rotation about Y, roll =
+  // rotation about X, when Z is the forward/approach axis). NOT verified
+  // against config_.end_effector_frame's ("robotiq_85_base_link") actual
+  // URDF-defined joint axis orientation — that would require walking the
+  // full parent-joint <origin rpy=...> chain, not done here. If the first
+  // live sweep-phase test moves the wrist in the direction labeled "roll"
+  // when you expected "pitch" (or vice versa), swap is_pitch's axis
+  // mapping below (X<->Y) — this is the one thing about this function
+  // that's a documented assumption, not a confirmed fact.
+  const tf2::Vector3 axis = is_pitch ? tf2::Vector3(0, 1, 0) : tf2::Vector3(1, 0, 0);
+  const tf2::Quaternion offset_rotation(axis, angle_deg * M_PI / 180.0);
+
+  tf2::Transform base;
+  tf2::fromMsg(base_pose, base);
+  const tf2::Transform offset(offset_rotation, tf2::Vector3(0, 0, 0));
+  const tf2::Transform result = base * offset;
 
   geometry_msgs::msg::Pose result_pose;
   result_pose.position.x = result.getOrigin().x();
@@ -527,6 +691,14 @@ bool CalibrationBroadcasterNode::recordSample(
   return true;
 }
 
+int CalibrationBroadcasterNode::totalSamplesTarget() const
+{
+  const int polygon_and_random =
+    (config_.num_samples + config_.random_phase_samples) * config_.samples_per_waypoint;
+  const int sweep = config_.orientation_sweep_enabled ? 4 : 0;
+  return 1 + polygon_and_random + sweep;
+}
+
 bool CalibrationBroadcasterNode::stableAgreementReached()
 {
   const size_t count = collected_positions_.size();
@@ -575,22 +747,93 @@ bool CalibrationBroadcasterNode::stableAgreementReached()
   return stable_agreement_count_ >= config_.stable_agreement_count;
 }
 
+std::vector<size_t> CalibrationBroadcasterNode::rejectOutliers() const
+{
+  const size_t count = collected_positions_.size();
+  std::vector<size_t> all_indices(count);
+  for (size_t i = 0; i < count; ++i) {
+    all_indices[i] = i;
+  }
+
+  if (!config_.outlier_rejection_enabled || count < 3) {
+    // Rejecting anything from fewer than 3 samples risks discarding half
+    // (or all) the data over noise that can't be distinguished from a
+    // genuinely valid 2-sample disagreement — not attempted.
+    return all_indices;
+  }
+
+  geometry_msgs::msg::Vector3 mean_position;
+  for (const geometry_msgs::msg::Vector3 & position : collected_positions_) {
+    mean_position.x += position.x;
+    mean_position.y += position.y;
+    mean_position.z += position.z;
+  }
+  mean_position.x /= static_cast<double>(count);
+  mean_position.y /= static_cast<double>(count);
+  mean_position.z /= static_cast<double>(count);
+
+  const OrientationAveragingResult unfiltered_orientation =
+    averageQuaternions(collected_orientations_, averaging_method_);
+
+  std::vector<size_t> kept_indices;
+  for (size_t i = 0; i < count; ++i) {
+    const geometry_msgs::msg::Vector3 & position = collected_positions_[i];
+    const double dx = position.x - mean_position.x;
+    const double dy = position.y - mean_position.y;
+    const double dz = position.z - mean_position.z;
+    const double position_deviation_cm = std::sqrt(dx * dx + dy * dy + dz * dz) * 100.0;
+
+    const double orientation_deviation_deg =
+      angularDeviationDeg(collected_orientations_[i], unfiltered_orientation.averaged);
+
+    const bool is_outlier =
+      position_deviation_cm > config_.outlier_position_threshold_cm ||
+      orientation_deviation_deg > config_.outlier_orientation_threshold_deg;
+
+    if (is_outlier) {
+      RCLCPP_INFO(
+        get_logger(), "Outlier rejection: discarding sample %zu (position deviation %.2fcm, "
+        "orientation deviation %.2fdeg)", i, position_deviation_cm, orientation_deviation_deg);
+    } else {
+      kept_indices.push_back(i);
+    }
+  }
+
+  if (kept_indices.size() < 2) {
+    // Rejecting down to 0/1 samples would make the final average
+    // meaningless (or leave nothing to average at all) — safer to keep
+    // everything than to broadcast a TF derived from a single sample.
+    RCLCPP_WARN(
+      get_logger(), "Outlier rejection would leave only %zu sample(s) — keeping all %zu "
+      "samples instead (rejection skipped this run)", kept_indices.size(), count);
+    return all_indices;
+  }
+
+  return kept_indices;
+}
+
 void CalibrationBroadcasterNode::finishCalibration(
   const std::shared_ptr<GoalHandleCalibrate> & goal_handle)
 {
+  const std::vector<size_t> kept_indices = rejectOutliers();
+  const bool rejection_changed_anything = kept_indices.size() != collected_positions_.size();
+
   geometry_msgs::msg::Vector3 average_position;
-  for (const geometry_msgs::msg::Vector3 & position : collected_positions_) {
-    average_position.x += position.x;
-    average_position.y += position.y;
-    average_position.z += position.z;
+  std::vector<tf2::Quaternion> kept_orientations;
+  kept_orientations.reserve(kept_indices.size());
+  for (const size_t i : kept_indices) {
+    average_position.x += collected_positions_[i].x;
+    average_position.y += collected_positions_[i].y;
+    average_position.z += collected_positions_[i].z;
+    kept_orientations.push_back(collected_orientations_[i]);
   }
-  const double count = static_cast<double>(collected_positions_.size());
+  const double count = static_cast<double>(kept_indices.size());
   average_position.x /= count;
   average_position.y /= count;
   average_position.z /= count;
 
   const OrientationAveragingResult orientation_result =
-    averageQuaternions(collected_orientations_, averaging_method_);
+    averageQuaternions(kept_orientations, averaging_method_);
 
   geometry_msgs::msg::TransformStamped broadcast_tf;
   broadcast_tf.header.stamp = get_clock()->now();
@@ -606,12 +849,26 @@ void CalibrationBroadcasterNode::finishCalibration(
 
   static_broadcaster_.sendTransform(broadcast_tf);
 
+  if (rejection_changed_anything) {
+    // Only meaningful to compute/log the pre-rejection spread when
+    // rejection actually discarded something — otherwise it's identical to
+    // orientation_result and would just be a confusing duplicate log line.
+    const OrientationAveragingResult unfiltered_orientation_result =
+      averageQuaternions(collected_orientations_, averaging_method_);
+    RCLCPP_INFO(
+      get_logger(), "Outlier rejection discarded %zu of %zu samples — orientation spread "
+      "improved from max %.3f/mean %.3f deg to max %.3f/mean %.3f deg",
+      collected_positions_.size() - kept_indices.size(), collected_positions_.size(),
+      unfiltered_orientation_result.max_spread_deg, unfiltered_orientation_result.mean_spread_deg,
+      orientation_result.max_spread_deg, orientation_result.mean_spread_deg);
+  }
+
   RCLCPP_INFO(
     get_logger(), "Calibration complete: broadcasting static TF '%s' -> '%s' "
     "(position + orientation averaged over %zu samples; orientation spread: "
     "max %.3f deg, mean %.3f deg)",
     config_.known_chain_frame.c_str(), broadcast_tf.child_frame_id.c_str(),
-    collected_positions_.size(), orientation_result.max_spread_deg,
+    kept_indices.size(), orientation_result.max_spread_deg,
     orientation_result.mean_spread_deg);
 
   auto result = std::make_shared<Calibrate::Result>();
@@ -665,6 +922,19 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
     get_parameter("orientation_spread_tolerance_deg").as_double();
   config.stable_agreement_count =
     static_cast<int>(get_parameter("stable_agreement_count").as_int());
+
+  config.orientation_sweep_enabled = get_parameter("orientation_sweep_enabled").as_bool();
+  config.orientation_sweep_angle_deg =
+    get_parameter("orientation_sweep_angle_deg").as_double();
+
+  config.outlier_rejection_enabled = get_parameter("outlier_rejection_enabled").as_bool();
+  config.outlier_position_threshold_cm =
+    get_parameter("outlier_position_threshold_cm").as_double();
+  config.outlier_orientation_threshold_deg =
+    get_parameter("outlier_orientation_threshold_deg").as_double();
+
+  config.samples_per_waypoint =
+    static_cast<int>(get_parameter("samples_per_waypoint").as_int());
 
   return config;
 }

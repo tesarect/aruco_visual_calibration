@@ -90,7 +90,7 @@ tmux send-keys -t "$PANE0" \
 # move_group starts relying on it.
 PANE1=$(tmux split-window -t "$PANE0" -h -P -F "#{pane_id}")
 tmux send-keys -t "$PANE1" \
-"source ~/ros2_ws/install/setup.bash && $SHELL_DIR/ensure_controller_active.sh /controller_manager scaled_joint_trajectory_controller; $(wrap_log "$SESSION" move_group "ros2 launch real_ur3e_moveit_config move_group.launch.py")" C-m
+"source ~/ros2_ws/install/setup.bash && $SHELL_DIR/ensure_controller_active.sh /controller_manager scaled_joint_trajectory_controller && $(wrap_log "$SESSION" move_group "ros2 launch real_ur3e_moveit_config move_group.launch.py")" C-m
 
 # Pane 2 — rviz. Polls for move_group before launching.
 PANE2=$(tmux split-window -t "$PANE1" -h -P -F "#{pane_id}")

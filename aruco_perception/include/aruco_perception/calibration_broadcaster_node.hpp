@@ -119,6 +119,43 @@ struct CalibrationBroadcasterConfig
   /// stops collecting early and proceeds straight to finishCalibration().
   /// Tunable up if real-world noise causes false-early stops.
   int stable_agreement_count = 2;
+
+  // --- Orientation sweep phase (2026-07-29) ---
+  /// When true, runs runOrientationSweepPhase() once after the polygon/
+  /// random sampling is otherwise done (whether it stopped early or ran to
+  /// completion), before finishCalibration(). Default true on real (the
+  /// 37deg/14.9deg spread run that motivated this had zero orientation
+  /// diversity beyond the polygon/random phases' position-only offsets —
+  /// see randomPoseNear, which never varies orientation). Default false on
+  /// sim (sim's ground-truth camera TF makes this extra probing largely
+  /// redundant, and it costs real time/motion).
+  bool orientation_sweep_enabled = false;
+  /// Pitch/roll offset magnitude (degrees) used for all 4 sweep probes
+  /// (pitch down, pitch up, roll left, roll right) — see
+  /// runOrientationSweepPhase.
+  double orientation_sweep_angle_deg = 5.0;
+
+  // --- Outlier rejection (2026-07-29) ---
+  /// When true, finishCalibration() discards any collected sample whose
+  /// position or orientation deviation from the (unfiltered) mean exceeds
+  /// outlier_position_threshold_cm / outlier_orientation_threshold_deg,
+  /// before computing the final average. A sample is discarded if EITHER
+  /// threshold is exceeded. Threshold-based (not fixed-worst-N): a clean
+  /// run where every sample is already within both thresholds discards
+  /// nothing.
+  bool outlier_rejection_enabled = true;
+  double outlier_position_threshold_cm = 2.0;
+  double outlier_orientation_threshold_deg = 5.0;
+
+  // --- Dual-sampling per waypoint (2026-07-29) ---
+  /// Number of samples taken at each polygon/random-phase waypoint before
+  /// moving to the next one (no additional move between them — same
+  /// settled pose). Default 2: mitigates a single bad/missed detection
+  /// being that waypoint's only data point. Samples from the same waypoint
+  /// are pooled with every other sample (no separate same-waypoint
+  /// agreement check) — outlier_rejection above is what sorts out any
+  /// disagreement between them.
+  int samples_per_waypoint = 2;
 };
 
 /// Orchestrates calibration: fetches waypoints AND their center pose from
@@ -178,6 +215,17 @@ public:
 private:
   CalibrationBroadcasterConfig loadConfigFromParams() const;
 
+  /// Total sample count a full (non-early-stopped) run will collect, used
+  /// for feedback's samples_total field — 1 (center) +
+  /// config_.num_samples * config_.samples_per_waypoint (polygon) +
+  /// config_.random_phase_samples * config_.samples_per_waypoint (random)
+  /// + (4 if config_.orientation_sweep_enabled, else 0). A single helper
+  /// so this formula (2026-07-29: now scales with samples_per_waypoint and
+  /// the sweep phase, not just "1 + num_samples + random_phase_samples")
+  /// isn't duplicated at every call site that previously computed it
+  /// inline.
+  int totalSamplesTarget() const;
+
   /// Caches the latest message (with its receipt time) and notifies
   /// sample_cv_ — see requestSampleAfterSettling.
   void markerPoseCallback(const geometry_msgs::msg::PoseStamped::ConstSharedPtr & msg);
@@ -224,7 +272,12 @@ private:
   /// samples — fewer if the early-stop condition triggers first (see
   /// stableAgreementReached, checked after every recorded sample). Shares
   /// the same trace_path + waitForFreshMarkerPose + recordSample sequence
-  /// the original design used per-waypoint. Returns false (and sets
+  /// the original design used per-waypoint, but takes
+  /// config_.samples_per_waypoint samples per settled pose (2026-07-29,
+  /// default 2 — no additional move between them) rather than exactly
+  /// one, before advancing to the next waypoint; early-stop is still
+  /// checked after every individual sample, not just once per waypoint, so
+  /// it can still trigger mid-waypoint on the first of the 2. Returns false (and sets
   /// *out_result with a failure Calibrate::Result, goal_handle NOT yet
   /// aborted — the caller does that) on the first hard failure
   /// (trace_path, sample-wait timeout, TF lookup) or cancellation; true
@@ -248,14 +301,52 @@ private:
   /// arm moves back to center_pose immediately (no point probing further
   /// out when not visible at all), and a new candidate is generated —
   /// bounded by config_.random_phase_max_consecutive_failures consecutive
-  /// discards before giving up as a hard failure. Same out_result/
-  /// stopped_early/return-value contract as runPolygonPhase.
+  /// discards before giving up as a hard failure. Like runPolygonPhase,
+  /// takes config_.samples_per_waypoint samples per successfully-visible
+  /// candidate (2026-07-29, default 2) before moving to the next
+  /// candidate. Same out_result/stopped_early/return-value contract as
+  /// runPolygonPhase.
   bool runRandomPhase(
     const std::shared_ptr<GoalHandleCalibrate> & goal_handle,
     const geometry_msgs::msg::Pose & center_pose,
     int samples_already_collected,
     std::shared_ptr<Calibrate::Result> & out_result,
     bool & stopped_early);
+
+  /// Orientation sweep phase (2026-07-29): runs once, after the polygon/
+  /// random sampling is otherwise done (early-stop or full count, either
+  /// way), only when config_.orientation_sweep_enabled is true. Returns to
+  /// cal_ready_pose, then probes 4 rotational offsets from its orientation
+  /// — pitch down, pitch up, roll left, roll right, each
+  /// config_.orientation_sweep_angle_deg degrees, each independently
+  /// (not cumulative — always offset from cal_ready_pose's own
+  /// orientation, not the previous probe's) — taking one sample per probe
+  /// that successfully lands with the marker visible. A probe whose move
+  /// fails or whose marker isn't visible is skipped (logged, not counted,
+  /// not a hard failure) — same "a rotational extreme may lose the marker,
+  /// that's expected" reasoning as runRandomPhase's invisible-marker
+  /// handling, not a reason to abort an otherwise-successful run. Returns
+  /// to cal_ready_pose again at the end, leaving the arm in a known pose
+  /// before finishCalibration(). Samples are appended to the same
+  /// collected_positions_/collected_orientations_ pool as every other
+  /// sample — no separate pool or agreement check.
+  void runOrientationSweepPhase(
+    const std::shared_ptr<GoalHandleCalibrate> & goal_handle,
+    const geometry_msgs::msg::Pose & cal_ready_pose,
+    int samples_already_collected);
+
+  /// Builds a pose offset from `base_pose` by a pure rotation (pitch or
+  /// roll) around `base_pose`'s own local axis, position unchanged — same
+  /// tf2::Transform (base * offset) composition pattern as randomPoseNear,
+  /// but offset here is rotation-only (translation zero) instead of
+  /// randomPoseNear's translation-only offset. is_pitch selects which
+  /// local axis the angle is applied around (pitch vs roll) — see
+  /// runOrientationSweepPhase's call sites and this method's .cpp doc
+  /// comment for which local axis maps to which, confirmed against
+  /// trajectory_planner's end_effector_frame convention rather than
+  /// assumed.
+  geometry_msgs::msg::Pose rotatedPoseNear(
+    const geometry_msgs::msg::Pose & base_pose, double angle_deg, bool is_pitch) const;
 
   /// Generates a uniformly-random offset pose from center_pose, varying
   /// X/Y/Z independently within +-config_.random_phase_max_offset_m
@@ -319,13 +410,27 @@ private:
   /// meaningless with only 1 sample).
   bool stableAgreementReached();
 
-  /// Averages collected_positions_ (arithmetic mean) and
-  /// collected_orientations_ (via averaging_method_), broadcasts
+  /// If config_.outlier_rejection_enabled: computes each collected
+  /// sample's position deviation (cm, from the unfiltered arithmetic mean)
+  /// and orientation deviation (degrees, from the unfiltered averaged
+  /// quaternion), discards any sample exceeding EITHER
+  /// config_.outlier_position_threshold_cm or
+  /// config_.outlier_orientation_threshold_deg, and returns the surviving
+  /// indices. A clean run (nothing exceeds either threshold) discards
+  /// nothing. Logs how many samples were discarded, if any. When disabled,
+  /// returns every index unfiltered (a no-op pass-through).
+  std::vector<size_t> rejectOutliers() const;
+
+  /// Averages collected_positions_/collected_orientations_ (arithmetic
+  /// mean / averaging_method_) — first passing them through
+  /// rejectOutliers() if config_.outlier_rejection_enabled — broadcasts
   /// known_chain_frame -> the camera frame (from the most recent sample's
   /// header.frame_id) as a static TF, and completes goal_handle with the
-  /// result (see Calibrate.action). Logs the orientation spread metrics.
-  /// Clears both collected_ vectors AND resets stable_agreement_count_ for
-  /// the next run.
+  /// result (see Calibrate.action). Logs both the pre-rejection and
+  /// post-rejection spread metrics when rejection actually discarded
+  /// something, so the operator can see how much it helped. Clears both
+  /// collected_ vectors AND resets stable_agreement_count_ for the next
+  /// run.
   void finishCalibration(const std::shared_ptr<GoalHandleCalibrate> & goal_handle);
 
   CalibrationBroadcasterConfig config_;

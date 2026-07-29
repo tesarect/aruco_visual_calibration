@@ -4,8 +4,13 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <csignal>
+#include <cstdlib>
+#include <dirent.h>
+#include <fstream>
 #include <stdexcept>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 
 #include <tf2/LinearMath/Quaternion.h>
@@ -194,6 +199,12 @@ void CalibrationOrchestratorNode::publishStatusFeedback(const AutoCalibrate::Fee
 
 void CalibrationOrchestratorNode::publishStatusResult(const AutoCalibrate::Result & result)
 {
+  // Resume inference_server.py — this is the single site that already
+  // handles both PHASE_SUCCEEDED and PHASE_FAILED terminal transitions, so
+  // calibration ending for any reason (success or failure) resumes YOLO.
+  // See the matching SIGSTOP call/comment at the top of executeAutoCalibrate().
+  signalInferenceServer(SIGCONT);
+
   auto status = visual_calibration_msgs::msg::AutoCalibrateStatus();
   status.phase = result.success ?
     visual_calibration_msgs::msg::AutoCalibrateStatus::PHASE_SUCCEEDED :
@@ -204,6 +215,72 @@ void CalibrationOrchestratorNode::publishStatusResult(const AutoCalibrate::Resul
   status.mean_spread_deg = result.mean_spread_deg;
   status.failed_stage = result.failed_stage;
   auto_calibrate_status_pub_->publish(status);
+}
+
+void CalibrationOrchestratorNode::signalInferenceServer(int signal)
+{
+  // Finds every process whose /proc/<pid>/cmdline matches
+  // "python3 inference_server.py" by scanning /proc directly — NOT
+  // std::system("pkill ...")/popen(), which fork()s a child process.
+  // fork()ing from a multithreaded process (this node runs many rclcpp/DDS
+  // internal threads) only carries the CALLING thread into the child; any
+  // mutex held by a different thread at the moment of fork() stays locked
+  // forever in the child with no thread left alive to unlock it. Confirmed
+  // live 2026-07-29: an earlier std::system("pkill ...") call here hung the
+  // entire executeAutoCalibrate() thread silently before it ever reached
+  // moveToCalReady() — no crash, no error, no log line, just permanent
+  // silence (the goal sat at PHASE_RUNNING until manually cancelled). This
+  // implementation never calls fork()/system()/popen() — kill() is a
+  // direct syscall, safe to call from any thread of a multithreaded process.
+  DIR * proc_dir = opendir("/proc");
+  if (!proc_dir) {
+    RCLCPP_WARN(get_logger(), "signalInferenceServer: could not open /proc");
+    return;
+  }
+
+  bool matched_any = false;
+  struct dirent * entry;
+  while ((entry = readdir(proc_dir)) != nullptr) {
+    // Only interested in numeric entries (PIDs) — /proc also contains
+    // non-PID entries (self, cpuinfo, etc.) that strtol below would
+    // silently reject anyway (pid stays 0), but skip them explicitly for
+    // clarity.
+    const std::string name = entry->d_name;
+    if (name.empty() || !std::all_of(name.begin(), name.end(), ::isdigit)) {
+      continue;
+    }
+
+    std::ifstream cmdline_file("/proc/" + name + "/cmdline");
+    if (!cmdline_file.is_open()) {
+      // Process may have exited between readdir() and open() — expected,
+      // not an error.
+      continue;
+    }
+    std::string cmdline(
+      (std::istreambuf_iterator<char>(cmdline_file)),
+      std::istreambuf_iterator<char>());
+    // /proc/<pid>/cmdline separates argv entries with '\0', not spaces —
+    // replace with spaces so a simple substring search below sees
+    // "python3 inference_server.py" as expected, matching pkill -f's own
+    // "match anywhere in the full command line" semantics.
+    std::replace(cmdline.begin(), cmdline.end(), '\0', ' ');
+
+    if (cmdline.find("python3 inference_server.py") != std::string::npos) {
+      pid_t pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
+      if (pid > 0) {
+        kill(pid, signal);
+        matched_any = true;
+      }
+    }
+  }
+  closedir(proc_dir);
+
+  if (!matched_any) {
+    // Fine if it's not running (e.g. sim-only testing) — same "no-op if no
+    // matching process" convention as start_inference_server.sh's own
+    // pkill call.
+    RCLCPP_DEBUG(get_logger(), "signalInferenceServer: no matching inference_server.py process found");
+  }
 }
 
 void CalibrationOrchestratorNode::handleStartAutoCalibrate(
@@ -427,6 +504,18 @@ void CalibrationOrchestratorNode::handleAccepted(
 void CalibrationOrchestratorNode::executeAutoCalibrate(
   const std::shared_ptr<GoalHandleAutoCalibrate> goal_handle)
 {
+  // Pause inference_server.py (YOLO-pipeline) for the whole calibration
+  // sequence, cal_ready move included — real's CPU has nothing to spare for
+  // YOLO's cup_holder/hole inference while the arm is actively moving
+  // through waypoints. SIGSTOP freezes the process (confirmed live: 0% CPU,
+  // loaded model stays resident) rather than killing it, so resuming via
+  // SIGCONT in publishStatusResult() below is instant, no model reload. A
+  // request that straddles this window simply times out client-side in
+  // yolo_marker_bridge_node.py (existing request_timeout_sec handling) —
+  // confirmed live, no crash/hang. See signalInferenceServer()'s doc
+  // comment for why this is a direct kill(), not std::system("pkill ...").
+  signalInferenceServer(SIGSTOP);
+
   auto publish_stage = [this, &goal_handle](const std::string & stage) {
       auto feedback = std::make_shared<AutoCalibrate::Feedback>();
       feedback->stage = stage;
