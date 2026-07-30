@@ -304,6 +304,16 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
   const bool cup_holder_valid =
     cup_holder_it != rolling_windows_.end() && cup_holder_it->second.last_stable.valid;
 
+  // Read LIVE every call (not cached in config_), specifically so it can
+  // be tuned via `ros2 param set` with no node restart — see this
+  // param's own doc comment on DepthPerceptionConfig for why, and its
+  // "does not actually change reachability" caveat. get_parameter_or
+  // since it's optional/absent from sim's own yaml (real-only) —
+  // automatically_declare_parameters_from_overrides(true) means an
+  // undeclared key would otherwise throw via get_parameter().
+  double instance_tf_z_offset_m = 0.0;
+  get_parameter_or("instance_tf_z_offset_m", instance_tf_z_offset_m, 0.0);
+
   if (cup_holder_valid) {
     const auto & cup_holder_point = cup_holder_it->second.last_stable;
     tf2::Transform camera_to_cup_holder(
@@ -317,7 +327,14 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     cup_holder_tf.child_frame_id = "cup_holder";
     cup_holder_tf.transform.translation.x = known_to_cup_holder.getOrigin().x();
     cup_holder_tf.transform.translation.y = known_to_cup_holder.getOrigin().y();
-    cup_holder_tf.transform.translation.z = known_to_cup_holder.getOrigin().z();
+    // instance_tf_z_offset_m (2026-07-30, default 0.0, live-read above) —
+    // does NOT reduce cup_holder's actual distance from known_chain_frame,
+    // only the reported/broadcast Z. hole_1..hole_4 inherit this
+    // automatically since they're parented to cup_holder, not
+    // known_chain_frame, directly (see this function's own comment on
+    // that re-anchoring) — no separate offset needed for them.
+    cup_holder_tf.transform.translation.z =
+      known_to_cup_holder.getOrigin().z() + instance_tf_z_offset_m;
     cup_holder_tf.transform.rotation.w = 1.0;
     instance_tf_broadcaster_.sendTransform(cup_holder_tf);
   }

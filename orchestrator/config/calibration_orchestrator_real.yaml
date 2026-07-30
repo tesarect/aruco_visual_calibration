@@ -115,4 +115,9 @@ calibration_orchestrator_node:
     # after a ~/auto_calibrate run SUCCEEDS (2026-07-29) — see
     # CalibrationOrchestratorNode::executeAutoCalibrate's post-success
     # block. Empty string disables the auto-move.
-    post_calibrate_preset_name: "home"
+    # Disabled (2026-07-30, explicit request) — the arm should stay right
+    # where calibration left it and wait for the next command (a Holder/
+    # Hole N move via ~/move_to_instance) instead of auto-moving to "home"
+    # first. Re-enable by setting this back to a preset name if the
+    # auto-move-to-home behavior is wanted again later.
+    post_calibrate_preset_name: ""

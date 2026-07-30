@@ -44,7 +44,7 @@
 # directly off the trajectory_planner node.
 trajectory_planner:
   ros__parameters:
-    preset_names: ["standoff", "home", "cal_ready", "cal_ready_alt", "cal_ready_alt2", "standby", "baristastandby", "baristastandby2" ]
+    preset_names: ["standoff", "home", "cal_ready", "cal_ready_alt", "cal_ready_alt2", "standby", "baristastandby" ]
 
     standoff.position: [-0.4213, -0.0698, -0.0740]
     standoff.orientation: [0.1434, 0.1269, -0.6786, 0.7091]  # x, y, z, w — same as cal_ready
@@ -116,28 +116,19 @@ trajectory_planner:
     baristastandby.position: [-0.4346, -0.0744, 0.3522]
     baristastandby.orientation: [0.5098, 0.5147, -0.4693, 0.5048]  # x, y, z, w
 
-    # baristastandby2 (2026-07-30) — captured live via `python3
-    # pose_capture.py record --env real` while manually jogging the arm to
-    # test a cal_ready -> baristastandby2 -> holder-hover-offset sequence,
-    # as an alternative intermediate pose to try instead of identity
-    # orientation for ~/move_to_instance's hover leg (which was failing to
-    # find a joint-space plan — see trajectory_planner_real.yaml's
-    # instance_hover_offset_m comment). REPLACED once already (2026-07-30,
-    # same day) with a second capture at a different jogged pose — joint
-    # values added this time (read back from /joint_states, reordered into
-    # PresetPoses's [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2,
-    # wrist_3] convention — /joint_states itself does NOT list joints in
-    # this order, see cal_ready_alt's own comment for the same reordering
-    # requirement) so this preset is reached via setJointValueTarget()
-    # (pins the exact IK branch), same as cal_ready — getJointValues() is
-    # checked first by planAndExecuteToPreset, so these joint values are
-    # what's actually used; position/orientation below is kept as a
-    # reference/cross-check only, not the active path. NOT yet verified as
-    # a good intermediate waypoint — this is a capture to test against,
-    # not a confirmed-working preset like cal_ready/home/standby above.
-    # Resulting Cartesian pose (base_link -> robotiq_85_base_link, via
-    # pose_capture.py record): xyz=(-0.5003, 0.0076, 0.1240)
-    # quat=(0.4043, 0.5956, -0.4551, 0.5241) rpy_rad=(-1.8700, 1.4467, 3.1039).
-    baristastandby2.joint_values: [2.8555219173431396, -0.6451444786838074, -2.1429025135436, 1.0972979704486292, 4.743481636047363, -2.1158207098590296]
-    baristastandby2.position: [-0.5003, 0.0076, 0.1240]
-    baristastandby2.orientation: [0.4043, 0.5956, -0.4551, 0.5241]  # x, y, z, w
+    # baristastandby2 REMOVED (2026-07-30) — the captured joint values
+    # ([2.8555219173431396, -0.6451444786838074, -2.1429025135436,
+    # 1.0972979704486292, 4.743481636047363, -2.1158207098590296]) put the
+    # arm in a SELF-COLLIDING configuration: move_group's own log showed
+    # "Found a contact between 'robotiq_85_base_link' (type 'Robot link')
+    # and 'upper_arm_link' (type 'Robot link')" at this exact goal (every
+    # joint matched its target within tolerance — this is the goal state
+    # itself colliding, not a mid-path collision), which is why every
+    # ~/move_to_preset("baristastandby2") attempt failed regardless of
+    # planning_time_retry_multipliers' escalating budget (3s/9s/15s all
+    # exhausted — OMPL correctly refuses to plan TO an already-colliding
+    # goal, no amount of search time fixes that). The capture was taken
+    # from a live jog that happened to land the gripper against the upper
+    # arm — re-capture from a different, RViz-collision-display-confirmed
+    # pose (see this file's corner-jog workflow convention) before
+    # re-adding this preset.

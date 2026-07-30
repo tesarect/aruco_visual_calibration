@@ -76,3 +76,19 @@ depth_perception_node:
     # broadcastInstanceTfs()'s doc comment. No-op (throttled log only)
     # until a ~/calibrate run has completed at least once this session.
     broadcast_instance_tfs: true
+
+    # Added straight to cup_holder's broadcast translation.z (2026-07-30,
+    # real-only — no entry in depth_perception_sim.yaml). Read LIVE every
+    # broadcastInstanceTfs() call, tunable via
+    # `ros2 param set /depth_perception_node instance_tf_z_offset_m <value>`
+    # with NO node restart needed. hole_1..hole_4 inherit this
+    # automatically (parented to cup_holder, not base_link, directly).
+    # DOES NOT reduce cup_holder's actual distance from base_link, only
+    # the reported/broadcast Z — measured live 2026-07-30, cup_holder's
+    # HORIZONTAL (X/Y) distance from base_link alone is already ~0.64m,
+    # past the UR3e's ~0.5m datasheet max_reach_m (see
+    # trajectory_planner_real.yaml's own max_reach_m), so no amount of
+    # Z-only offset makes the position actually reachable — this is a
+    # fast, explicitly-requested, fully reversible thing to try (set back
+    # to 0.0 to undo), not a fix for the underlying reach limitation.
+    instance_tf_z_offset_m: 0.5

@@ -150,6 +150,28 @@ struct DepthPerceptionConfig
   bool broadcast_instance_tfs = true;
 };
 
+// instance_tf_z_offset_m (2026-07-30) is deliberately NOT a field on
+// DepthPerceptionConfig above, unlike every other setting in this struct —
+// read LIVE via get_parameter() at the top of broadcastInstanceTfs() every
+// call instead, so it can be tuned via `ros2 param set` with no node
+// restart (explicit request, under time pressure). Same "live, not
+// cached" convention calibration_broadcaster_node's use_clustering_average
+// already established for exactly this reason — see that node's own
+// comments contrasting live vs. cached params. Added straight to
+// cup_holder's broadcast translation.z; hole_1..hole_4 inherit it
+// automatically since they're parented to cup_holder, not
+// known_chain_frame, directly (see broadcastInstanceTfs's own comment on
+// that re-anchoring). Default 0.0 = no change from the real measured
+// position. THIS DOES NOT MAKE THE HOLDER ACTUALLY CLOSER TO base_link —
+// it only changes the reported/broadcast Z coordinate, which the arm will
+// then try to reach; measured on the real cell 2026-07-30, cup_holder's
+// HORIZONTAL (X/Y) distance from base_link alone is already ~0.64m, past
+// the UR3e's ~0.5m datasheet reach, so no amount of Z-only offset makes
+// the actual position reachable (distance is dominated by the horizontal
+// leg, which this offset never touches). Added anyway per explicit
+// request as a fast, reversible thing to try — set to 0.0 (or leave
+// undeclared) to fully undo.
+
 /*
  * One detection's computed 3D position, expressed in the camera's own
  * optical frame (the same frame convention aruco_detector_node's
