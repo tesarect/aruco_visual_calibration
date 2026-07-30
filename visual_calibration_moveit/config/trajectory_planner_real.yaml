@@ -88,6 +88,19 @@ trajectory_planner:
     planning_time_s: 3.0
     num_planning_attempts: 8
 
+    # Escalating-retry budget (2026-07-30) — if a plan fails at
+    # planning_time_s above, retry with planning_time_s * each multiplier
+    # here in turn (3.0s base -> 9.0s, then 15.0s) before giving up
+    # entirely, instead of a single fixed-budget attempt. Motivated by a
+    # live ~/move_to_instance hover-pose failure where OMPL's own log
+    # showed "Unable to find solution... in 3.03 seconds" — a genuine
+    # search timeout, not a hard reachability/collision error — so a
+    # longer budget is a legitimate next thing to try before concluding
+    # a target is unreachable. Empty list = no retries (single attempt,
+    # same as before this existed) — see
+    # PlannerConfig::planning_time_retry_multipliers's doc comment.
+    planning_time_retry_multipliers: [3.0, 5.0]
+
     # Minimum achieved fraction of a straight-line Cartesian path required
     # to execute it at all (planAndExecuteCartesian's min_fraction) — was
     # hardcoded 0.95 until 2026-07-22, made configurable after real-robot
@@ -128,10 +141,22 @@ trajectory_planner:
     # request to make hole_1..hole_4 approaches consistent and predictable
     # (always from directly above the holder) rather than each hole being
     # reached by whatever path free-space planning happens to find from
-    # wherever the arm currently is. PLACEHOLDER — same starting values as
-    # sim, not yet re-tuned/verified against the real cell's actual
-    # reachable envelope above the holder.
-    instance_hover_offset_m: 0.20
+    # wherever the arm currently is.
+    # Raised 0.20 -> 0.40 (2026-07-30) — sim's default left the hover Z
+    # deep below base_link's own origin on real (confirmed live via
+    # `tf2_echo base_link cup_holder`: z=-0.476m; +0.20m hover offset only
+    # reaches z=-0.276m, still well below base_link's Z=0 plane), which
+    # correlates with a live joint-space planning failure
+    # ("Planning request aborted") on the hover leg of ~/move_to_instance
+    # for both "Holder" and "Hole 1". Real's D415 is wall/ceiling-mounted
+    # looking down at a countertop BELOW the arm's own base — unlike sim,
+    # where base_link's origin sits near the tabletop already — so a hover
+    # offset tuned only against sim's geometry doesn't carry over. 0.40m
+    # is a first real-cell attempt, not a measured value — re-tune via
+    # `ros2 param set /trajectory_planner instance_hover_offset_m <value>`
+    # (live, no restart needed) if planning still fails or still can't
+    # clear the table/mount.
+    instance_hover_offset_m: 0.40
     instance_descend_offset_m: 0.15
 
     # Sequenced-goal stay/lift/standby timing (see ArmState /

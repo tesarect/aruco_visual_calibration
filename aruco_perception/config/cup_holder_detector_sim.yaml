@@ -59,14 +59,24 @@ cup_holder_detector_node:
 
     # Pass 2 — holes. THRESH_BINARY_INV, applied only within a square ROI
     # around the found cup_holder: grayscale pixels <= hole_thresh are
-    # considered part of a hole cavity. The reference image shows the 4
-    # holes as noticeably darker/reddish relative to the white disc
-    # surface — 90 is a starting guess. hole_min_radius_px/
+    # considered part of a hole cavity. hole_min_radius_px/
     # hole_max_radius_px are the floor/ceiling used to separate the 4 real
     # holes from small decorative screw-holes also visible near the disc's
     # rim in the reference image — verify actual pixel radii live before
     # trusting these.
-    hole_thresh: 90
+    #
+    # hole_thresh CORRECTED 2026-07-30 (was 90, an unverified guess): a
+    # direct pixel probe of a saved live sim frame confirmed the 4 real
+    # holes sample at grayscale value 111 — ABOVE the old cutoff of 90, so
+    # THRESH_BINARY_INV (keep pixels <= hole_thresh) was silently excluding
+    # every real hole pixel, every frame (confirmed live: depth_perception_
+    # node's detections_2d back-projection log showed cup_holder every
+    # frame but 0 hole entries ever, across an entire session). 120 gives
+    # comfortable margin above the measured 111 while staying well below
+    # the disc's white surface (~210+) and its antialiased edge —
+    # re-verify against a fresh pixel probe if lighting/exposure ever
+    # changes.
+    hole_thresh: 120
     hole_min_circularity: 0.6
     hole_min_radius_px: 4.0
     hole_max_radius_px: 40.0

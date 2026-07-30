@@ -146,6 +146,27 @@ struct PlannerConfig
   /// this if you've deliberately decided that tradeoff is acceptable for
   /// your use case/environment.
   double cartesian_min_fraction = 0.95;
+  /// Escalating-retry budget for joint-space planning (2026-07-30) — see
+  /// planWithEscalatingTime's doc comment. Each retry multiplies
+  /// planning_time_s by planning_time_retry_multiplier (e.g. 3.0s base x
+  /// [1, 3, 5] = 3s, 9s, 15s attempts) up to
+  /// max_planning_time_retries additional tries after the first,
+  /// num_planning_attempts unchanged across all of them. Motivated by a
+  /// live real-robot failure: OMPL's own log showed "Unable to find
+  /// solution by any of the threads in 3.03 seconds" (a genuine search
+  /// timeout, not a hard reachability/collision error) for
+  /// ~/move_to_instance's hover-pose leg — a longer budget is a
+  /// legitimate next thing to try for a target near the edge of what
+  /// RRTstar can solve quickly, before concluding the target is
+  /// genuinely unreachable. Sequence of multipliers rather than a single
+  /// escalation, since guessing the right timeout upfront isn't
+  /// possible — this tries progressively harder instead of picking one
+  /// fixed larger value that might still be too short (or unnecessarily
+  /// long for an easy target that just needed 2 tries). Default 0 empty
+  /// multipliers vector (see loadPlannerConfigFromParams) = no retries,
+  /// today's exact single-attempt behavior preserved unless explicitly
+  /// configured otherwise.
+  std::vector<double> planning_time_retry_multipliers;
 };
 
 /// Tuning for ~/move_to_instance's two-stage hover-then-descend approach
@@ -376,6 +397,22 @@ public:
   bool planAndExecuteToPreset(const std::string & name);
 
 private:
+  /// Shared retry loop for planAndExecute(Pose)/planAndExecute(joint_values)
+  /// (2026-07-30) — both overloads set an identical target-independent
+  /// MoveGroupInterface plan() call, just with a pose vs. joint-value
+  /// goal already applied via setPoseTarget()/setJointValueTarget()
+  /// before calling this. Tries plan() once at planner_config_.planning_time_s,
+  /// then once more per entry in planner_config_.planning_time_retry_multipliers
+  /// (multiplying the base planning_time_s each time, e.g. [3.0, 5.0] with a
+  /// 3s base tries 3s, then 9s, then 15s) — num_planning_attempts stays
+  /// fixed across every try. Stops and returns true on the first
+  /// successful plan; returns false only if every attempt (base +
+  /// all retries) fails. Logs each retry so a real escalation is visible
+  /// in the node's own log, not just MoveGroupInterface's. Does NOT touch
+  /// execute() — the caller (planAndExecute) still owns plan+execute
+  /// sequencing, this only owns the plan() retry loop itself.
+  bool planWithEscalatingTime(moveit::planning_interface::MoveGroupInterface::Plan & plan);
+
   /// Computes polygon_config_.num_corners waypoints forming a regular
   /// polygon of radius polygon_config_.radius_m, in the arm's own current
   /// pose's local X/Y plane, centered on that current pose (NOT the

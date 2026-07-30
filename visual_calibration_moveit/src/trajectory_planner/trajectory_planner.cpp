@@ -196,21 +196,9 @@ void TrajectoryPlanner::runStartupSequence()
   publishCurrentPoseName("home");
 }
 
-bool TrajectoryPlanner::planAndExecute(const geometry_msgs::msg::Pose & target_pose)
+bool TrajectoryPlanner::planWithEscalatingTime(
+  moveit::planning_interface::MoveGroupInterface::Plan & plan)
 {
-  move_group_interface_.setPoseTarget(target_pose);
-
-  // Without these, MoveGroupInterface falls back to whatever the OMPL
-  // pipeline config's default_planner_config is with 1 attempt (see
-  // {sim,real}_ur3e_moveit_config/config/ompl_planning.yaml) — pinning
-  // them here from planner_config_ (see trajectory_planner_sim.yaml/_real.yaml)
-  // keeps planning behavior correct/auditable even if that yaml's default
-  // ever changes, and num_planning_attempts > 1 lets MoveGroupInterface
-  // automatically keep the shortest-path plan among several tries within
-  // the time budget, rather than settling for whichever is found first —
-  // this is what fixes the twisted/tangled real-robot paths that MoveIt's
-  // previous, entirely unconfigured defaults (RRTConnect, ~5s, 1 attempt,
-  // no optimization) produced.
   // Pinned explicitly (not just left to move_group's default pipeline)
   // since move_group.launch.py's .planning_pipelines(pipelines=["ompl"])
   // is what actually keeps CHOMP out of the loaded pipeline list — this
@@ -222,11 +210,63 @@ bool TrajectoryPlanner::planAndExecute(const geometry_msgs::msg::Pose & target_p
   // must stay "ompl" — the only pipeline actually configured/loaded.
   move_group_interface_.setPlanningPipelineId(planner_config_.planning_pipeline_id);
   move_group_interface_.setPlannerId(planner_config_.planner_id);
-  move_group_interface_.setPlanningTime(planner_config_.planning_time_s);
+  // num_planning_attempts > 1 lets MoveGroupInterface automatically keep
+  // the shortest-path plan among several tries within EACH time budget
+  // below, rather than settling for whichever is found first — this is
+  // what fixes the twisted/tangled real-robot paths that MoveIt's
+  // previous, entirely unconfigured defaults (RRTConnect, ~5s, 1 attempt,
+  // no optimization) produced. Stays fixed across every escalating-time
+  // try below — only planning_time_s itself grows.
   move_group_interface_.setNumPlanningAttempts(planner_config_.num_planning_attempts);
 
+  // See PlannerConfig::planning_time_retry_multipliers's doc comment —
+  // base attempt first (multiplier effectively 1x), then one retry per
+  // configured multiplier, each a longer time budget than the last.
+  // Empty multipliers vector (the default) means exactly one attempt,
+  // identical to this function's pre-2026-07-30 behavior.
+  for (size_t attempt = 0; attempt <= planner_config_.planning_time_retry_multipliers.size();
+    ++attempt)
+  {
+    const double time_budget_s = attempt == 0 ?
+      planner_config_.planning_time_s :
+      planner_config_.planning_time_s *
+      planner_config_.planning_time_retry_multipliers[attempt - 1];
+
+    move_group_interface_.setPlanningTime(time_budget_s);
+
+    if (attempt > 0) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Planning attempt %zu/%zu failed — retrying with a longer planning_time_s (%.1fs)",
+        attempt, planner_config_.planning_time_retry_multipliers.size() + 1, time_budget_s);
+      // Web UI hook (2026-07-30) — CalibrationPanel shows "Planning
+      // failed, retrying" while a retry is in flight, so this isn't
+      // silent to the operator. Reuses the existing ~/planning_failure
+      // topic/message rather than adding a new one; "planning_retry" is a
+      // distinct context string from every OTHER publishPlanningFailure
+      // call site (e.g. "startup_home", "lift", "standby") specifically
+      // so the frontend can tell "still retrying, not a final failure"
+      // apart from a real terminal failure.
+      publishPlanningFailure(
+        "planning_retry",
+        "Planning failed, retrying with a longer time budget (" +
+        std::to_string(time_budget_s) + "s)");
+    }
+
+    if (static_cast<bool>(move_group_interface_.plan(plan))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool TrajectoryPlanner::planAndExecute(const geometry_msgs::msg::Pose & target_pose)
+{
+  move_group_interface_.setPoseTarget(target_pose);
+
   moveit::planning_interface::MoveGroupInterface::Plan plan;
-  const bool planned = static_cast<bool>(move_group_interface_.plan(plan));
+  const bool planned = planWithEscalatingTime(plan);
 
   if (!planned) {
     RCLCPP_ERROR(node_->get_logger(), "Planning failed for the given target pose");
@@ -261,21 +301,16 @@ bool TrajectoryPlanner::planAndExecute(const std::vector<double> & joint_values)
 
   move_group_interface_.setJointValueTarget(joint_values);
 
-  // Same OMPL tuning as planAndExecute(Pose) — see that overload's
-  // comment for why each of these is set explicitly. Applies here too:
-  // setJointValueTarget() still goes through the same OMPL pipeline/
-  // planner, just with a joint-space goal instead of a pose goal that
-  // needs IK resolved first (so no IK-branch ambiguity for THIS move —
-  // see this overload's header comment — though the plan from wherever
-  // the arm currently is TO these joint values still goes through normal
-  // RRTstar planning, same as any other joint-space move).
-  move_group_interface_.setPlanningPipelineId(planner_config_.planning_pipeline_id);
-  move_group_interface_.setPlannerId(planner_config_.planner_id);
-  move_group_interface_.setPlanningTime(planner_config_.planning_time_s);
-  move_group_interface_.setNumPlanningAttempts(planner_config_.num_planning_attempts);
-
+  // Same escalating-time retry loop as planAndExecute(Pose) — see
+  // planWithEscalatingTime's doc comment. setJointValueTarget() still
+  // goes through the same OMPL pipeline/planner, just with a joint-space
+  // goal instead of a pose goal that needs IK resolved first (so no
+  // IK-branch ambiguity for THIS move — see this overload's header
+  // comment — though the plan from wherever the arm currently is TO
+  // these joint values still goes through normal RRTstar planning, same
+  // as any other joint-space move).
   moveit::planning_interface::MoveGroupInterface::Plan plan;
-  const bool planned = static_cast<bool>(move_group_interface_.plan(plan));
+  const bool planned = planWithEscalatingTime(plan);
 
   if (!planned) {
     RCLCPP_ERROR(node_->get_logger(), "Planning failed for the given joint target");
@@ -834,6 +869,14 @@ PlannerConfig TrajectoryPlanner::loadPlannerConfigFromParams() const
   config.num_planning_attempts =
     static_cast<int>(node_->get_parameter("num_planning_attempts").as_int());
   config.cartesian_min_fraction = node_->get_parameter("cartesian_min_fraction").as_double();
+  // get_parameter_or (not get_parameter) — this param is optional and
+  // absent from both trajectory_planner_sim.yaml/_real.yaml today; an
+  // empty default preserves the exact pre-2026-07-30 single-attempt
+  // behavior for any deployment that hasn't opted in yet. See
+  // PlannerConfig::planning_time_retry_multipliers's doc comment.
+  node_->get_parameter_or(
+    "planning_time_retry_multipliers", config.planning_time_retry_multipliers,
+    std::vector<double>{});
   return config;
 }
 
