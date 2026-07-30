@@ -46,19 +46,40 @@ struct CupHolderDetectorConfig
   /// this node is the SOLE publisher of it on sim (see class doc comment).
   std::string overlay_image_topic;
 
-  /// Grayscale threshold [0,255]: pixels >= this are considered part of
-  /// the light/white cup_holder disc (cv::threshold, THRESH_BINARY). The
-  /// disc is the brightest large object in frame, so a single global
-  /// threshold (not adaptive) is the starting point — see class doc
-  /// comment for why adaptive thresholding (aruco_detector_node's
-  /// approach) isn't reused here.
-  int cup_holder_thresh = 180;
+  /// cv::Canny low/high threshold pair, run on a blurred grayscale image
+  /// (see cup_holder_blur_kernel_px) to find the cup_holder disc's rim.
+  /// REPLACES an earlier flat cv::threshold(THRESH_BINARY) approach
+  /// (2026-07-30) — live-tested and confirmed via
+  /// cup_holder_pipeline_debug.py that the disc has almost no brightness
+  /// separation from the background wall in sim's actual lighting (the
+  /// wall and the white disc surface are nearly the same grayscale value),
+  /// so no single global brightness cutoff can isolate it — Canny finds
+  /// the disc via its edge/rim instead, which IS distinct regardless of
+  /// the flat-region brightness similarity. OpenCV's own docs recommend a
+  /// high:low ratio of roughly 2:1 to 3:1.
+  int cup_holder_canny_low = 80;
+  int cup_holder_canny_high = 200;
+  /// Square Gaussian blur kernel size (must be odd) applied before Canny —
+  /// reduces per-pixel noise that would otherwise fragment the edge map
+  /// into small broken segments.
+  int cup_holder_blur_kernel_px = 5;
+  /// Square dilation kernel size (pixels) applied to the raw Canny edge
+  /// map before findContours — Canny edges are 1px wide and often have
+  /// small gaps, so a rim that's a closed loop in reality won't close
+  /// into one clean contour without this. Confirmed via
+  /// cup_holder_pipeline_debug.py that a small dilate is sufficient (the
+  /// rim closes cleanly at kernel=3) — keep this small; too large starts
+  /// merging the disc's rim contour with nearby hole rims.
+  int cup_holder_dilate_kernel_px = 3;
 
   /// Minimum circularity (4*pi*area/perimeter^2, 1.0 = perfect circle) for
   /// a contour to be accepted as the cup_holder disc. Filters out
-  /// non-circular bright blobs (specular highlights, background clutter).
-  double cup_holder_min_circularity = 0.7;
-  /// Minimum contour area in pixels^2 — filters out small bright specks
+  /// non-circular edges — confirmed live (2026-07-30) that this alone
+  /// cleanly rejects a long diagonal background/wall-corner edge line
+  /// (circularity ~0.01-0.11) while accepting the disc's own rim
+  /// (circularity ~0.78-0.87 in the same test frame).
+  double cup_holder_min_circularity = 0.6;
+  /// Minimum contour area in pixels^2 — filters out small edge fragments
   /// before circularity is even computed (cheap first-pass rejection).
   double cup_holder_min_area_px = 400.0;
 
@@ -90,10 +111,9 @@ struct CupHolderDetectorConfig
 
 /// Vision-only node, SIMULATION ONLY: detects the cup_holder disc (1
 /// white/light circular object) and its up to 4 holes via classical
-/// OpenCV (threshold + contour + circularity), publishing
-/// visual_calibration_msgs/Detection2DArray on the exact same topic
-/// aruco_detector_node/yolo_marker_bridge_node already publish on. 2D
-/// pixel space only — no depth, no TF, no 3D pose (see
+/// OpenCV, publishing visual_calibration_msgs/Detection2DArray on the
+/// exact same topic aruco_detector_node/yolo_marker_bridge_node already
+/// publish on. 2D pixel space only — no depth, no TF, no 3D pose (see
 /// depth_perception_node for the consumer that does that).
 ///
 /// Why this node exists, and why it is sim-only: real's cup_holder/hole
@@ -109,13 +129,23 @@ struct CupHolderDetectorConfig
 /// references it) — that absence, not any runtime gate, is what keeps it
 /// off the real robot.
 ///
-/// Adaptive thresholding (aruco_detector_node's approach, tuned for
-/// uneven real-world lighting) is deliberately NOT used here: sim
-/// lighting is controlled/consistent, and the cup_holder disc's
-/// brightness relative to its background is the whole signal this node
-/// depends on — a single tunable global threshold is simpler to reason
-/// about and tune live via `ros2 param set`, and is the right complexity
-/// level for a controlled sim environment specifically.
+/// Detection approach differs between the disc and the holes, by design:
+/// the 4 holes are reliably darker than everything else in frame, so a
+/// flat grayscale threshold (cv::threshold, THRESH_BINARY_INV) isolates
+/// them cleanly (see hole_thresh). The cup_holder DISC, however, was
+/// live-tested (2026-07-30) to have almost no brightness separation from
+/// the background wall in sim's actual lighting — no single global
+/// cv::threshold cutoff could isolate it at any value tried — so the disc
+/// is instead found via its RIM: cv::Canny edge detection (on a blurred
+/// grayscale image) + a small dilate to close small gaps in the 1px edge
+/// line + findContours/circularity, same as the holes' final
+/// contour/circularity step but fed an edge map instead of a brightness
+/// mask. Confirmed via a standalone debug tool
+/// (resources/scripts/python/cup_holder_pipeline_debug.py) against a live
+/// sim frame that this cleanly isolates the disc's rim as a closed loop
+/// (circularity ~0.78-0.87) while correctly rejecting a nearby diagonal
+/// wall-corner edge (circularity ~0.01-0.11) via the same circularity
+/// filter already used for holes.
 ///
 /// Hole quadrant numbering: ported from yolo_marker_bridge_node.py's
 /// assign_hole_quadrants() (1=top-left, 2=top-right, 3=bottom-left,

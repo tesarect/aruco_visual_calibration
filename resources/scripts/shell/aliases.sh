@@ -16,6 +16,8 @@
 
 # alias srcrc="source ~/.bashrc"
 alias vcdir="cd ~/ros2_ws/src/visual_calibration/"
+alias wbdir="cd ~/webpage_ws/"
+alias yodir="cd ~/YOLO-pipeline/"
 alias shdir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/shell/"
 alias tmuxdir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/tmux/"
 alias pydir="cd ~/ros2_ws/src/visual_calibration/resources/scripts/python/"

@@ -55,6 +55,54 @@ stage number so `ls` sorts them in pipeline order:
                                        whichever single mask (from the stages above)
                                        looks most promising by eye — see --contour-stage
 
+    --- Added 2026-07-30: the cup_holder DISC itself turned out to have
+    almost no brightness separation from the background wall in the actual
+    sim frame (live-tested: holes threshold perfectly at gray~120-135, but
+    no single global cutoff isolates the disc from the wall — they're
+    nearly the same brightness, only the disc's thin rim/edge differs).
+    These stages try edge/contrast-based approaches instead of a flat
+    brightness cutoff:
+    12_canny_<lo>_<hi>.png          — cv2.Canny edge detection, a few threshold pairs.
+                                       Should show the disc's rim as a thin closed loop
+                                       even where flat-region brightness doesn't separate.
+    13_canny_dilated_<lo>_<hi>.png  — same Canny result + a small dilate — Canny edges
+                                       are 1px and often have small gaps; findContours
+                                       on a broken loop won't close into one clean
+                                       circular contour. Dilating bridges small gaps so
+                                       the rim becomes one continuous closed shape.
+    14_adaptive_thresh_<blocksize>_<C>.png — cv2.adaptiveThreshold (Gaussian), a local
+                                       (per-neighborhood) threshold instead of one global
+                                       cutoff — should pick up the disc/wall boundary
+                                       even if their ABSOLUTE brightness is similar, as
+                                       long as there's a local edge between them.
+    15_morph_close_on_<source>.png  — cv2.morphologyEx MORPH_CLOSE on whichever binary
+                                       mask looks most promising — fills small gaps/holes
+                                       inside a candidate disc blob (e.g. the 4 dark holes
+                                       poking through a bright-disc mask) without changing
+                                       its outer boundary, so the disc reads as one solid
+                                       blob for contour/circularity fitting. See
+                                       --morph-close-stage.
+    16_contours_on_<source>.png     — same as stage 11 but for the edge/adaptive stages,
+                                       see --contour-stage-2.
+
+    --- Added 2026-07-30 (round 2): 13_canny_dilated_80_200 and
+    14_adaptive_thresh_25_5 both came back clean (disc rim as one closed
+    loop, all 4 holes visible) — confirms edge/local-contrast detection
+    works where flat-brightness thresholding didn't. Given a clean edge
+    map, cv2.HoughCircles is a more direct alternative to
+    findContours+minEnclosingCircle+circularity-filter — it searches for
+    circular shapes directly via gradient voting and returns (x, y,
+    radius) with no separate circularity scoring step needed. Added here
+    to compare against the contour path on the SAME image.
+    17_hough_circles_<source>.png   — cv2.HoughCircles run on `source` (grayscale
+                                       input, NOT a binary mask — Hough uses its own
+                                       internal Canny + accumulator, so this can take
+                                       02_grayscale_blurred directly), every detected
+                                       circle drawn + labeled with radius. See
+                                       --hough-source and --hough-param2 (accumulator
+                                       threshold — LOWER finds more circles, including
+                                       false positives; HIGHER is stricter).
+
 Nothing here is wired into cup_holder_detector_node.cpp automatically —
 this is a visual comparison tool only. Once a stage/cutoff is confirmed
 by eye to cleanly isolate the 4 holes, that number gets hand-copied into
@@ -85,6 +133,20 @@ HSV_NAMED_CANDIDATES = {
     "reddish_brown_narrow": ((0, 60, 30), (15, 255, 120)),
 }
 
+# (low, high) threshold pairs for cv2.Canny — OpenCV's own docs recommend a
+# high:low ratio of roughly 2:1 to 3:1; a small sweep around that, not a
+# single guess.
+CANNY_CANDIDATES = [(30, 90), (50, 150), (80, 200)]
+
+# (blockSize, C) pairs for cv2.adaptiveThreshold — blockSize must be odd
+# and larger than the feature you're trying to separate (the disc's rim is
+# a thin line, but blockSize also needs to span enough of the disc/wall
+# transition to compute a meaningful local mean — too small picks up noise,
+# too large approaches a global threshold and loses the local-contrast
+# advantage). C is subtracted from the local mean before the cutoff —
+# higher C = stricter (fewer pixels pass).
+ADAPTIVE_THRESH_CANDIDATES = [(11, 2), (25, 5), (51, 5), (75, 8)]
+
 
 def save(out_dir, filename, image):
     path = os.path.join(out_dir, filename)
@@ -101,6 +163,49 @@ def main():
         default="08_gray_thresh_inv_90",
         help="Which stage filename (without extension/prefix path) to run findContours on for stage 11 "
         "— pick this AFTER looking at the other stages, re-run with this flag once you know which mask looks cleanest",
+    )
+    parser.add_argument(
+        "--morph-close-stage",
+        default=None,
+        help="Which stage filename (without extension) to run MORPH_CLOSE on for stage 15 "
+        "— e.g. one of the 14_adaptive_thresh_* outputs once you've picked one. Skipped if not set.",
+    )
+    parser.add_argument(
+        "--morph-close-kernel",
+        type=int,
+        default=9,
+        help="Square kernel size (pixels) for stage 15's MORPH_CLOSE — bigger closes larger gaps "
+        "(e.g. the 4 holes poking through a disc mask) but can also merge nearby unrelated blobs.",
+    )
+    parser.add_argument(
+        "--contour-stage-2",
+        default=None,
+        help="Which stage filename (without extension) to run findContours on for stage 16 "
+        "— pick this AFTER looking at the edge/adaptive/morph-close stages.",
+    )
+    parser.add_argument(
+        "--hough-source",
+        default="02_grayscale_blurred",
+        help="Which stage filename (without extension) to run cv2.HoughCircles on for stage 17 "
+        "— defaults to the blurred grayscale (Hough's normal input; it does its own internal "
+        "edge detection, so a pre-thresholded binary mask is NOT required/recommended here).",
+    )
+    parser.add_argument(
+        "--hough-param2",
+        type=int,
+        default=30,
+        help="cv2.HoughCircles accumulator threshold — lower finds MORE circles (more false "
+        "positives), higher is stricter (may miss the real one). Tune this after looking at "
+        "the first run's output.",
+    )
+    parser.add_argument(
+        "--hough-min-radius", type=int, default=10,
+        help="cv2.HoughCircles minRadius in pixels — set from eyeballing a hole's radius in "
+        "the 00_original.png / 11_contours_on_* images.",
+    )
+    parser.add_argument(
+        "--hough-max-radius", type=int, default=150,
+        help="cv2.HoughCircles maxRadius in pixels — set from eyeballing the disc's radius.",
     )
     args = parser.parse_args()
 
@@ -153,33 +258,88 @@ def main():
         save(out_dir, f"10_hsv_inrange_{name}.png", hsv_mask)
 
     # --- Stage 11: contours drawn on whichever stage looks best ---
-    contour_source_path = os.path.join(out_dir, args.contour_stage + ".png")
-    if os.path.exists(contour_source_path):
-        mask = cv2.imread(contour_source_path, cv2.IMREAD_GRAYSCALE)
-        contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        overlay = image.copy()
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < 10:  # skip single-pixel noise contours, not a real filter
-                continue
-            perimeter = cv2.arcLength(contour, True)
-            circularity = 0.0 if perimeter <= 0 else 4 * np.pi * area / (perimeter * perimeter)
-            (cx, cy), radius = cv2.minEnclosingCircle(contour)
-            color = (0, 255, 0) if circularity > 0.6 else (0, 0, 255)
-            cv2.circle(overlay, (int(cx), int(cy)), int(radius), color, 2)
-            cv2.putText(
-                overlay, f"a={int(area)} c={circularity:.2f}",
-                (int(cx) - 30, int(cy) - int(radius) - 5),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1,
+    run_contour_stage(out_dir, image, args.contour_stage, "11_contours_on")
+
+    # --- Stage 12-13: Canny edge detection, raw and dilated ---
+    for lo, hi in CANNY_CANDIDATES:
+        edges = cv2.Canny(gray_blurred, lo, hi)
+        save(out_dir, f"12_canny_{lo}_{hi}.png", edges)
+
+        # 3x3 dilate, 1 iteration: bridges small gaps in the 1px Canny line
+        # so a rim that's a closed loop in reality, but has a few broken
+        # pixels in the raw edge map, becomes one continuous closed contour
+        # for findContours to pick up as a single shape.
+        dilated = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+        save(out_dir, f"13_canny_dilated_{lo}_{hi}.png", dilated)
+
+    # --- Stage 14: adaptive threshold (local, not global, cutoff) ---
+    for block_size, c in ADAPTIVE_THRESH_CANDIDATES:
+        adaptive = cv2.adaptiveThreshold(
+            gray_blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY,
+            block_size, c)
+        save(out_dir, f"14_adaptive_thresh_{block_size}_{c}.png", adaptive)
+
+    # --- Stage 15: morphological close on a chosen stage (fills small gaps,
+    # e.g. the 4 dark holes poking through an otherwise-solid disc mask,
+    # without changing the outer boundary) ---
+    if args.morph_close_stage:
+        morph_source_path = os.path.join(out_dir, args.morph_close_stage + ".png")
+        if os.path.exists(morph_source_path):
+            mask = cv2.imread(morph_source_path, cv2.IMREAD_GRAYSCALE)
+            kernel = np.ones((args.morph_close_kernel, args.morph_close_kernel), np.uint8)
+            closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+            save(out_dir, f"15_morph_close_on_{args.morph_close_stage}.png", closed)
+        else:
+            print(
+                f"\n--morph-close-stage '{args.morph_close_stage}' not found at {morph_source_path} — skipping stage 15."
             )
-        save(out_dir, f"11_contours_on_{args.contour_stage}.png", overlay)
-        print(f"\nContour stage found {len(contours)} raw contours (area>=10) on {args.contour_stage}.png")
-        print("Green circle = circularity > 0.6 (would currently pass hole_min_circularity), red = would not.")
     else:
         print(
-            f"\n--contour-stage '{args.contour_stage}' not found at {contour_source_path} — "
-            "skipping stage 11. Look through the other stages first, then re-run with "
-            "--contour-stage set to whichever filename (no extension) looks cleanest."
+            "\nSkipping stage 15 (morph close) — pass --morph-close-stage <filename, no extension> "
+            "once you've picked a promising stage from 12/13/14 to close gaps on."
+        )
+
+    # --- Stage 16: contours on whichever edge/adaptive/morph-close stage
+    # looks best (same logic as stage 11, different candidate source) ---
+    if args.contour_stage_2:
+        run_contour_stage(out_dir, image, args.contour_stage_2, "16_contours_on")
+    else:
+        print(
+            "\nSkipping stage 16 (second contour pass) — pass --contour-stage-2 "
+            "<filename, no extension> once you've picked a promising edge/adaptive/morph-close stage."
+        )
+
+    # --- Stage 17: cv2.HoughCircles — direct circle detection, no
+    # findContours/circularity-filter step needed. Compares against the
+    # contour-based path on the same source image. ---
+    hough_source_path = os.path.join(out_dir, args.hough_source + ".png")
+    if os.path.exists(hough_source_path):
+        hough_input = cv2.imread(hough_source_path, cv2.IMREAD_GRAYSCALE)
+        circles = cv2.HoughCircles(
+            hough_input, cv2.HOUGH_GRADIENT, dp=1, minDist=30,
+            param1=100,  # internal Canny high threshold — Hough runs its own edge pass
+            param2=args.hough_param2,  # accumulator threshold — see --hough-param2 help
+            minRadius=args.hough_min_radius, maxRadius=args.hough_max_radius)
+
+        overlay = image.copy()
+        count = 0
+        if circles is not None:
+            for x, y, radius in np.round(circles[0]).astype(int):
+                count += 1
+                cv2.circle(overlay, (x, y), radius, (0, 255, 0), 2)
+                cv2.circle(overlay, (x, y), 2, (0, 0, 255), 3)
+                cv2.putText(
+                    overlay, f"r={radius}", (x - 20, y - radius - 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+        save(out_dir, f"17_hough_circles_{args.hough_source}.png", overlay)
+        print(f"\nHoughCircles on {args.hough_source}.png found {count} circle(s).")
+        print(
+            "Too many/noisy → raise --hough-param2. Missing the disc/holes → lower --hough-param2 "
+            "or check --hough-min-radius/--hough-max-radius bound the shapes you want."
+        )
+    else:
+        print(
+            f"\n--hough-source '{args.hough_source}' not found at {hough_source_path} — skipping stage 17."
         )
 
     print("\nDone. Pull the output directory back and look through stages in order:")
@@ -187,6 +347,52 @@ def main():
     print("  04/05 — do the holes show a clearly different hue/saturation than the disc and its shadow?")
     print("  07/08 — at which threshold N do the 4 holes appear as clean white blobs, with nothing else?")
     print("  09/10 — does a hue-only or full-HSV mask isolate the holes better than grayscale did?")
+    print("  12/13 — does Canny show the disc's rim as a clean (or dilate-closeable) closed loop?")
+    print("  14     — does adaptive threshold separate disc-from-wall better than a global cutoff did?")
+    print("  15     — after morph-close, does the disc read as ONE solid blob (holes filled in)?")
+    print("  16     — final check: does findContours on your best edge/adaptive stage fit a clean circle to the disc?")
+    print("  17     — does HoughCircles find the disc + 4 holes directly, with fewer false positives than contours?")
+
+
+def run_contour_stage(out_dir, original_image, source_stage_name, output_prefix):
+    """Loads <out_dir>/<source_stage_name>.png as a binary mask, runs
+    cv2.findContours, and draws every contour (area>=10) on a copy of
+    original_image with its area/circularity annotated — green if
+    circularity > 0.6 (would currently pass this project's
+    hole_min_circularity/cup_holder_min_circularity defaults), red
+    otherwise. Saves as <out_dir>/<output_prefix>_<source_stage_name>.png.
+    No-ops with a print if source_stage_name isn't found — this script is
+    meant to be re-run iteratively as you narrow down which stage to
+    inspect, not to fail hard on a not-yet-chosen stage.
+    """
+    source_path = os.path.join(out_dir, source_stage_name + ".png")
+    if not os.path.exists(source_path):
+        print(
+            f"\n'{source_stage_name}' not found at {source_path} — skipping {output_prefix} stage. "
+            "Look through the other stages first, then re-run pointing at whichever filename looks cleanest."
+        )
+        return
+
+    mask = cv2.imread(source_path, cv2.IMREAD_GRAYSCALE)
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    overlay = original_image.copy()
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < 10:  # skip single-pixel noise contours, not a real filter
+            continue
+        perimeter = cv2.arcLength(contour, True)
+        circularity = 0.0 if perimeter <= 0 else 4 * np.pi * area / (perimeter * perimeter)
+        (cx, cy), radius = cv2.minEnclosingCircle(contour)
+        color = (0, 255, 0) if circularity > 0.6 else (0, 0, 255)
+        cv2.circle(overlay, (int(cx), int(cy)), int(radius), color, 2)
+        cv2.putText(
+            overlay, f"a={int(area)} c={circularity:.2f}",
+            (int(cx) - 30, int(cy) - int(radius) - 5),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1,
+        )
+    save(out_dir, f"{output_prefix}_{source_stage_name}.png", overlay)
+    print(f"\n{output_prefix}: found {len(contours)} raw contours (area>=10) on {source_stage_name}.png")
+    print("Green circle = circularity > 0.6, red = would not currently pass this project's circularity filters.")
 
 
 if __name__ == "__main__":

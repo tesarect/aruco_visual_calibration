@@ -160,7 +160,13 @@ void CupHolderDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSh
   // Live re-read every tunable, every frame — see CupHolderDetectorConfig's
   // doc comment for why (iterative live tuning via `ros2 param set`, no
   // restart).
-  const int cup_holder_thresh = static_cast<int>(get_parameter("cup_holder_thresh").as_int());
+  const int cup_holder_canny_low = static_cast<int>(get_parameter("cup_holder_canny_low").as_int());
+  const int cup_holder_canny_high =
+    static_cast<int>(get_parameter("cup_holder_canny_high").as_int());
+  const int cup_holder_blur_kernel_px =
+    static_cast<int>(get_parameter("cup_holder_blur_kernel_px").as_int());
+  const int cup_holder_dilate_kernel_px =
+    static_cast<int>(get_parameter("cup_holder_dilate_kernel_px").as_int());
   const double cup_holder_min_circularity =
     get_parameter("cup_holder_min_circularity").as_double();
   const double cup_holder_min_area_px = get_parameter("cup_holder_min_area_px").as_double();
@@ -169,13 +175,34 @@ void CupHolderDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSh
   const double hole_min_radius_px = get_parameter("hole_min_radius_px").as_double();
   const double hole_max_radius_px = get_parameter("hole_max_radius_px").as_double();
 
-  // Pass 1 — cup_holder: the disc is the brightest large circular object
-  // in frame. THRESH_BINARY: pixels >= cup_holder_thresh -> 255.
-  cv::Mat cup_holder_binary;
-  cv::threshold(gray, cup_holder_binary, cup_holder_thresh, 255, cv::THRESH_BINARY);
-  const std::vector<CircleCandidate> cup_holder_candidates =
-    findCircularContours(cup_holder_binary, cup_holder_min_area_px, cup_holder_min_circularity);
+  // Pass 1 — cup_holder: found via its RIM (edge), not flat brightness.
+  // 2026-07-30: live-tested that the disc has almost no brightness
+  // separation from the background wall in sim's actual lighting — no
+  // single cv::threshold cutoff can isolate it — but Canny cleanly finds
+  // its rim as a closed loop (confirmed via cup_holder_pipeline_debug.py).
+  // Blur first to avoid fragmenting the edge on per-pixel noise, dilate
+  // after to bridge any small gaps in the 1px Canny line so
+  // findContours sees one continuous closed shape.
+  cv::Mat cup_holder_blurred;
+  const cv::Size blur_kernel(cup_holder_blur_kernel_px, cup_holder_blur_kernel_px);
+  cv::GaussianBlur(gray, cup_holder_blurred, blur_kernel, 0);
 
+  cv::Mat cup_holder_edges;
+  cv::Canny(cup_holder_blurred, cup_holder_edges, cup_holder_canny_low, cup_holder_canny_high);
+
+  cv::Mat cup_holder_edges_dilated;
+  const cv::Mat dilate_kernel = cv::Mat::ones(
+    cup_holder_dilate_kernel_px, cup_holder_dilate_kernel_px, CV_8U);
+  cv::dilate(cup_holder_edges, cup_holder_edges_dilated, dilate_kernel);
+
+  const std::vector<CircleCandidate> cup_holder_candidates = findCircularContours(
+    cup_holder_edges_dilated, cup_holder_min_area_px, cup_holder_min_circularity);
+
+  // Canny+dilate on a rim produces TWO concentric contours per real edge
+  // (the inner and outer boundary of the thickened line) — both pass the
+  // same area/circularity filters, so findCircularContours' largest-first
+  // sort naturally picks the outer one as front() without extra dedup
+  // logic; the inner duplicate is simply never used.
   const bool cup_holder_found = !cup_holder_candidates.empty();
   const CircleCandidate * cup_holder =
     cup_holder_found ? &cup_holder_candidates.front() : nullptr;
@@ -303,7 +330,12 @@ CupHolderDetectorConfig CupHolderDetectorNode::loadConfigFromParams() const
   config.overlay_image_input_topic = get_parameter("overlay_image_input_topic").as_string();
   config.overlay_image_topic = get_parameter("overlay_image_topic").as_string();
 
-  config.cup_holder_thresh = static_cast<int>(get_parameter("cup_holder_thresh").as_int());
+  config.cup_holder_canny_low = static_cast<int>(get_parameter("cup_holder_canny_low").as_int());
+  config.cup_holder_canny_high = static_cast<int>(get_parameter("cup_holder_canny_high").as_int());
+  config.cup_holder_blur_kernel_px =
+    static_cast<int>(get_parameter("cup_holder_blur_kernel_px").as_int());
+  config.cup_holder_dilate_kernel_px =
+    static_cast<int>(get_parameter("cup_holder_dilate_kernel_px").as_int());
   config.cup_holder_min_circularity = get_parameter("cup_holder_min_circularity").as_double();
   config.cup_holder_min_area_px = get_parameter("cup_holder_min_area_px").as_double();
 

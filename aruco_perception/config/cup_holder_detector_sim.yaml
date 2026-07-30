@@ -31,13 +31,20 @@ cup_holder_detector_node:
 
     active: true
 
-    # Pass 1 — cup_holder disc. THRESH_BINARY: grayscale pixels >=
-    # cup_holder_thresh are considered part of the disc. The disc reads as
-    # a bright, near-white/light-grey surface against a darker background
-    # in the reference image — 180 is a starting guess, verify against a
-    # live histogram/pixel-probe if the disc isn't being picked up cleanly.
-    cup_holder_thresh: 180
-    cup_holder_min_circularity: 0.7
+    # Pass 1 — cup_holder disc, found via its RIM (Canny edge + dilate +
+    # findContours), NOT flat brightness. 2026-07-30: live-tested that the
+    # disc has almost no brightness separation from the background wall in
+    # sim's actual lighting — cv::threshold could never isolate it at any
+    # cutoff — but Canny cleanly finds the rim as a closed loop (confirmed
+    # via cup_holder_pipeline_debug.py against a live sim frame:
+    # canny_low=80/canny_high=200 + a 3px dilate gave a clean single-loop
+    # rim, disc circularity ~0.78-0.87, correctly rejecting a nearby
+    # diagonal wall-corner edge at circularity ~0.01-0.11).
+    cup_holder_canny_low: 80
+    cup_holder_canny_high: 200
+    cup_holder_blur_kernel_px: 5
+    cup_holder_dilate_kernel_px: 3
+    cup_holder_min_circularity: 0.6
     cup_holder_min_area_px: 400.0
 
     # Pass 2 — holes. THRESH_BINARY_INV, applied only within a square ROI
