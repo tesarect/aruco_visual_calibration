@@ -18,6 +18,8 @@ std::string toParamPrefix(SceneObjectId id)
       return "wall";
     case SceneObjectId::Camera:
       return "camera";
+    case SceneObjectId::TableEdgeGuard:
+      return "table_edge_guard";
   }
   throw std::invalid_argument("Unknown SceneObjectId");
 }

@@ -39,6 +39,7 @@ const std::vector<SceneObjectId> PlanningSceneSetup::kKnownObjectIds = {
   SceneObjectId::Countertop,
   SceneObjectId::Wall,
   SceneObjectId::Camera,
+  SceneObjectId::TableEdgeGuard,
 };
 
 PlanningSceneSetup::PlanningSceneSetup()
@@ -147,6 +148,24 @@ void PlanningSceneSetup::declareParameters()
   declare_parameter("camera.box_names", std::vector<std::string>{"body"});
   declare_parameter("camera.boxes.body.size", std::vector<double>{0.2, 0.2, 0.2});
   declare_parameter("camera.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
+
+  // table_edge_guard (2026-07-30) — a long rectangular box laid along the
+  // countertop's longer edge closest to the arm's own base_link origin, on
+  // top of the table surface. Disabled by default (false) since it's a
+  // real-only physical addition (sim's Gazebo world has no matching
+  // object) — scene_objects_real.yaml enables and positions it explicitly;
+  // scene_objects_sim.yaml leaves it off rather than modeling something
+  // that doesn't exist in the simulated scene.
+  declare_parameter("table_edge_guard.enabled", false);
+  declare_parameter("table_edge_guard.shape_type", "box");
+  declare_parameter("table_edge_guard.pose.x", 0.0);
+  declare_parameter("table_edge_guard.pose.y", 0.0);
+  declare_parameter("table_edge_guard.pose.z", 0.0);
+  declare_parameter("table_edge_guard.pose.yaw", 0.0);
+  declare_parameter("table_edge_guard.box_names", std::vector<std::string>{"body"});
+  declare_parameter("table_edge_guard.boxes.body.size", std::vector<double>{1.0, 0.05, 0.05});
+  declare_parameter(
+    "table_edge_guard.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 }
 
 std::vector<SceneObjectConfig> PlanningSceneSetup::loadSceneObjects()

@@ -32,6 +32,7 @@ planning_scene_setup:
     countertop.enabled: true
     wall.enabled: true
     camera.enabled: true
+    table_edge_guard.enabled: true
 
     # Coffee machine — rough box, padded. Fill in real rough distances.
     coffee_machine.shape_type: "box"
@@ -96,3 +97,29 @@ planning_scene_setup:
     camera.box_names: ["body"]
     camera.boxes.body.size: [0.8, 0.3, 0.3]
     camera.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
+
+    # table_edge_guard (2026-07-30) — long rectangular box laid along the
+    # countertop's longer edge closest to the arm's own base_link origin,
+    # resting on top of the table surface. Derived from countertop's own
+    # geometry above (pose.x=0.42, pose.y=0.36, size=[1.0, 2.0, 1.2],
+    # yaw=0.0, no rotation): countertop's two long edges (parallel to X,
+    # since Y=2.0 is the longer dimension) sit at y=0.36-1.0=-0.64 and
+    # y=0.36+1.0=1.36 — the near-arm one (base_link's origin is y=0) is
+    # y=-0.64, distance 0.64 vs. the far edge's 1.36. Countertop's own top
+    # surface is at z=-0.601+1.2/2=-0.001; this box's pose.z is set so its
+    # OWN bottom face sits right at that surface (center z = tabletop_z +
+    # half this box's own height), i.e. resting ON the table, not floating
+    # or embedded in it. pose.x matches countertop's own x (0.42) so this
+    # box's full 1.0m X-length is centered the same as the table's own
+    # X-extent, running its full width along that edge. ROUGH ESTIMATE —
+    # not yet measured against the real table/object placed there; treat
+    # size/pose here the same as this file's other PLACEHOLDER objects
+    # (pad generously, verify visually in RViz before jogging near it).
+    table_edge_guard.shape_type: "box"
+    table_edge_guard.pose.x: 0.42
+    table_edge_guard.pose.y: -0.64
+    table_edge_guard.pose.z: 0.024
+    table_edge_guard.pose.yaw: 0.0
+    table_edge_guard.box_names: ["body"]
+    table_edge_guard.boxes.body.size: [1.0, 0.05, 0.05]
+    table_edge_guard.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]

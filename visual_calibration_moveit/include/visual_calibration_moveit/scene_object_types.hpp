@@ -14,6 +14,7 @@ enum class SceneObjectId
   Countertop,
   Wall,
   Camera,
+  TableEdgeGuard,
 };
 
 /// How a SceneObjectConfig's geometry should be interpreted:
