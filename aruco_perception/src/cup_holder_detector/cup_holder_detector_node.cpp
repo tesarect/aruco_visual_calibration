@@ -105,29 +105,145 @@ void CupHolderDetectorNode::refineCupHolderCircle(CircleCandidate & candidate)
 }
 
 void CupHolderDetectorNode::assignHoleQuadrants(
-  std::vector<visual_calibration_msgs::msg::Detection2D> & holes,
-  bool cup_holder_found, double cup_holder_cx, double cup_holder_cy)
+  std::vector<visual_calibration_msgs::msg::Detection2D> & holes)
 {
   if (holes.empty()) {
+    // Nothing to label this frame — also nothing worth remembering for
+    // next frame's identity match (an empty previous_holes_ next frame
+    // just means every hole falls back to the from-scratch quadrant
+    // split below, same as today's first-ever frame).
+    previous_holes_.clear();
     return;
   }
 
-  double ref_x = cup_holder_cx;
-  double ref_y = cup_holder_cy;
-  if (!cup_holder_found) {
-    // Fall back to the mean (cx, cy) of this frame's own hole detections —
-    // ported exactly from yolo_marker_bridge_node.py's
-    // assign_hole_quadrants(), see that function's doc comment.
-    double sum_x = 0.0, sum_y = 0.0;
-    for (const auto & hole : holes) {
-      sum_x += hole.cx;
-      sum_y += hole.cy;
+  // --- Label-flicker fix (2026-07-30) -------------------------------
+  // BUG (confirmed live + by code trace): the quadrant split below is a
+  // pure function of THIS frame's positions relative to THIS frame's own
+  // reference point, recomputed from scratch every frame with no memory
+  // of which physical hole previously held which number. A hole sitting
+  // near the ref_x or ref_y midline can have its top/left boolean flip
+  // from frame to frame on nothing more than a few pixels of detection
+  // jitter (contour noise, a slightly different Canny/threshold outcome,
+  // etc.) even though the physical hole hasn't meaningfully moved.
+  // depth_perception_node keys its rolling_windows_ map by
+  // TrackedInstanceKey{class_name, hole_number} — if hole_number flips,
+  // TWO DIFFERENT physical holes end up writing into the SAME rolling
+  // window across different frames, corrupting that one window's tracked
+  // position with data from two different objects, while holes far from
+  // any boundary (confidently classified every frame) stay stable. This
+  // matches the reported symptom exactly: hole_1/2/4 stable, hole_3
+  // (or whichever number sits at the boundary for this arrangement)
+  // intermittent/wrong.
+  //
+  // FIX: give each physical hole a persistent identity across frames
+  // instead of reclassifying from scratch. Match this frame's holes to
+  // previous_holes_ (last frame's output, already labeled) by nearest-
+  // centroid-distance, and inherit the matched previous hole's
+  // hole_number directly — no top/left recomputation at all for a
+  // matched hole, so jitter around the ref_x/ref_y midline can no longer
+  // flip its label (the label isn't even a function of the midline once
+  // a hole has an established identity). Only holes with NO confident
+  // previous-frame match (first sighting of a hole, or previous_holes_ is
+  // empty because last frame had 0 holes) fall back to the original
+  // quadrant-split logic to bootstrap an initial label.
+  //
+  // Why nearest-centroid matching (not just "add a deadband around the
+  // midline"): a deadband only prevents a flip for a hole oscillating
+  // right at the boundary within one frame's jitter — it does nothing
+  // for the case of a hole legitimately, slowly drifting across the
+  // midline over many frames (e.g. during a slow wrist-camera scan
+  // sweep), where jitter can still occur right at the crossing point.
+  // Persistent identity via nearest-centroid handles both cases
+  // uniformly: a hole's label only changes when it's unambiguously
+  // closer to a DIFFERENT previous hole than to its own previous
+  // position, which requires far more motion than one frame of jitter.
+  //
+  // Match gating (hole_reassign_max_dist_px, default = hole_max_radius_px,
+  // see its own doc comment for the scale justification): only accept a
+  // previous-frame match within this pixel distance. A greedy
+  // nearest-available match (holes processed in ascending distance order,
+  // each previous hole usable at most once) — 4 holes max, so an O(n^2)
+  // greedy pass is more than fast enough and there's no need for a full
+  // Hungarian assignment here.
+  const double max_dist_px = get_parameter("hole_reassign_max_dist_px").as_double();
+  const double max_dist_sq = max_dist_px * max_dist_px;
+
+  std::vector<bool> prev_used(previous_holes_.size(), false);
+  std::vector<bool> matched(holes.size(), false);
+
+  // Build all (candidate hole index, candidate previous index, dist_sq)
+  // triples within the gate, then greedily consume them in ascending
+  // distance order — this is what keeps the match a true nearest-
+  // neighbor pairing even when several holes are within the gate of each
+  // other (e.g. two holes both close to a third's previous position):
+  // the single closest pair overall is matched first and removed from
+  // further consideration, then the next-closest remaining pair, etc.
+  struct Candidate
+  {
+    double dist_sq;
+    size_t hole_idx;
+    size_t prev_idx;
+  };
+  std::vector<Candidate> candidates;
+  for (size_t i = 0; i < holes.size(); ++i) {
+    for (size_t j = 0; j < previous_holes_.size(); ++j) {
+      const double dx = holes[i].cx - previous_holes_[j].cx;
+      const double dy = holes[i].cy - previous_holes_[j].cy;
+      const double dist_sq = dx * dx + dy * dy;
+      if (dist_sq <= max_dist_sq) {
+        candidates.push_back(Candidate{dist_sq, i, j});
+      }
     }
-    ref_x = sum_x / static_cast<double>(holes.size());
-    ref_y = sum_y / static_cast<double>(holes.size());
+  }
+  std::sort(
+    candidates.begin(), candidates.end(),
+    [](const Candidate & a, const Candidate & b) { return a.dist_sq < b.dist_sq; });
+
+  for (const auto & c : candidates) {
+    if (matched[c.hole_idx] || prev_used[c.prev_idx]) {
+      continue;
+    }
+    holes[c.hole_idx].hole_number = previous_holes_[c.prev_idx].hole_number;
+    matched[c.hole_idx] = true;
+    prev_used[c.prev_idx] = true;
   }
 
-  for (auto & hole : holes) {
+  // Bootstrap path — original from-scratch quadrant split, applied ONLY
+  // to holes that found no acceptable previous-frame match above (new
+  // hole appearing for the first time, or previous_holes_ was empty).
+  // Reference point: ALWAYS the mean (cx, cy) of THIS frame's own hole
+  // detections — NOT the cup_holder's own fitted center. CHANGED
+  // 2026-07-30: live-tested that the disc's rim contour is genuinely
+  // elliptical from sim's wrist-camera angle (perspective foreshortening —
+  // confirmed axes ~220x226px, not an artifact of dilate kernel size,
+  // consistent across 2/3/5px dilate), which pulls a fitEllipse/moments-
+  // based disc center away from the true visual center of the 4-hole
+  // arrangement. The 4 holes themselves detect cleanly and accurately via
+  // simple thresholding (no equivalent distortion) — using their own
+  // centroid as the quadrant reference sidesteps the disc-fit distortion
+  // entirely, at the cost of needing at least 1 hole detected (never an
+  // issue in practice: quadrant assignment is meaningless with 0 holes
+  // anyway, see the empty check above). This diverges from
+  // yolo_marker_bridge_node.py's assign_hole_quadrants(), which prefers
+  // the cup_holder's bbox center and only falls back to the hole-centroid
+  // when no cup_holder was found that frame — real's camera doesn't
+  // appear to hit this same perspective-distortion problem (wall-mounted,
+  // different geometry), so that node's own preference order is left
+  // unchanged; this is a SIM-specific divergence, not a claim that real's
+  // logic needs the same fix.
+  double sum_x = 0.0, sum_y = 0.0;
+  for (const auto & hole : holes) {
+    sum_x += hole.cx;
+    sum_y += hole.cy;
+  }
+  const double ref_x = sum_x / static_cast<double>(holes.size());
+  const double ref_y = sum_y / static_cast<double>(holes.size());
+
+  for (size_t i = 0; i < holes.size(); ++i) {
+    if (matched[i]) {
+      continue;
+    }
+    auto & hole = holes[i];
     const bool top = hole.cy < ref_y;
     const bool left = hole.cx < ref_x;
     if (top && left) {
@@ -140,6 +256,10 @@ void CupHolderDetectorNode::assignHoleQuadrants(
       hole.hole_number = 4;
     }
   }
+
+  // Remember this frame's labeled output as next frame's identity
+  // reference — see previous_holes_'s own doc comment.
+  previous_holes_ = holes;
 }
 
 void CupHolderDetectorNode::markerOverlayCallback(
@@ -297,9 +417,7 @@ void CupHolderDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSh
     holes.push_back(detection);
   }
 
-  assignHoleQuadrants(
-    holes, cup_holder_found,
-    cup_holder_found ? cup_holder->cx : 0.0, cup_holder_found ? cup_holder->cy : 0.0);
+  assignHoleQuadrants(holes);
   for (auto & hole : holes) {
     detections_msg.detections.push_back(hole);
   }
@@ -407,6 +525,7 @@ CupHolderDetectorConfig CupHolderDetectorNode::loadConfigFromParams() const
   config.hole_min_circularity = get_parameter("hole_min_circularity").as_double();
   config.hole_min_radius_px = get_parameter("hole_min_radius_px").as_double();
   config.hole_max_radius_px = get_parameter("hole_max_radius_px").as_double();
+  config.hole_reassign_max_dist_px = get_parameter("hole_reassign_max_dist_px").as_double();
 
   config.active = get_parameter("active").as_bool();
   return config;

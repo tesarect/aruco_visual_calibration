@@ -112,6 +112,22 @@ struct CupHolderDetectorConfig
   double hole_min_radius_px = 4.0;
   double hole_max_radius_px = 40.0;
 
+  /// Max pixel distance between this frame's hole centroid and a
+  /// PREVIOUS frame's hole centroid for the two to be considered the same
+  /// physical hole (see assignHoleQuadrants' doc comment for the full
+  /// identity-tracking rationale). Anchored to hole_max_radius_px (the
+  /// codebase's existing pixel-scale convention for "how big a hole looks
+  /// on screen") rather than a made-up constant: two holes on the same
+  /// disc are never closer together than roughly one hole-diameter, so
+  /// gating a same-hole match at 1x hole_max_radius_px (a full radius, half
+  /// a diameter, of frame-to-frame centroid motion) is generous enough to
+  /// survive normal jitter/slow drift while still being far short of the
+  /// gap to a DIFFERENT hole — false-merging two distinct holes into one
+  /// identity would require the wrist camera to move enough in one frame
+  /// to close most of that gap, which does not happen at typical frame
+  /// rates during a scan. Live-tunable like every other threshold here.
+  double hole_reassign_max_dist_px = 40.0;
+
   /// Startup default for the "active" parameter — true = this node runs
   /// detection on every frame. Live re-read every frame (see
   /// imageCallback), same pattern as aruco_detector_node's "active", so
@@ -241,14 +257,27 @@ private:
   /// bulge observed), so minEnclosingCircle stays unchanged for them.
   static void refineCupHolderCircle(CircleCandidate & candidate);
 
-  /// Ported from yolo_marker_bridge_node.py's assign_hole_quadrants() —
-  /// see class doc comment for the sim-specific caveat on this algorithm.
+  /// Ported from yolo_marker_bridge_node.py's assign_hole_quadrants(), but
+  /// ALWAYS uses the mean (cx, cy) of `holes` itself as the quadrant
+  /// reference point — never the cup_holder's own fitted center (a
+  /// sim-specific divergence; see .cpp definition's doc comment for why).
   /// Mutates each element of `holes` in place, setting hole_number.
-  static void assignHoleQuadrants(
-    std::vector<visual_calibration_msgs::msg::Detection2D> & holes,
-    bool cup_holder_found, double cup_holder_cx, double cup_holder_cy);
+  ///
+  /// NOT static (unlike the rest of this pass's helpers) — see .cpp
+  /// definition's doc comment: fixing the label-flicker bug described there
+  /// requires remembering previous_holes_ (this node's own per-instance
+  /// state) across calls, so this method needs a `this`.
+  void assignHoleQuadrants(std::vector<visual_calibration_msgs::msg::Detection2D> & holes);
 
   CupHolderDetectorConfig config_;
+
+  /// Previous frame's `holes` output (post-assignHoleQuadrants, so
+  /// hole_number is already final), used ONLY to give assignHoleQuadrants a
+  /// persistent identity to match against — see that method's doc comment
+  /// for the full rationale. Empty on the first frame / whenever the
+  /// previous frame had zero holes; assignHoleQuadrants degrades gracefully
+  /// to the from-scratch quadrant split in that case (see its doc comment).
+  std::vector<visual_calibration_msgs::msg::Detection2D> previous_holes_;
 
   image_transport::Subscriber image_sub_;
   rclcpp::Publisher<visual_calibration_msgs::msg::Detection2DArray>::SharedPtr detections_2d_pub_;

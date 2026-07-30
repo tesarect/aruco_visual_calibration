@@ -70,3 +70,23 @@ cup_holder_detector_node:
     hole_min_circularity: 0.6
     hole_min_radius_px: 4.0
     hole_max_radius_px: 40.0
+
+    # Quadrant-label stability fix (2026-07-30): assignHoleQuadrants() used
+    # to reclassify every hole from scratch every frame purely from its
+    # instantaneous position relative to the frame's own reference point --
+    # a hole sitting near the ref_x/ref_y midline could flip top/bottom or
+    # left/right from one frame to the next on nothing more than a few
+    # pixels of detection jitter, corrupting depth_perception_node's
+    # rolling_windows_ entry for whichever hole_number sits at that
+    # boundary (two DIFFERENT physical holes writing into the same
+    # TrackedInstanceKey across different frames). Fix: match this frame's
+    # holes to the previous frame's by nearest-centroid-distance first, and
+    # only fall back to the raw quadrant split for holes with no confident
+    # previous-frame match (first sighting, or previous frame had 0 holes).
+    # See assignHoleQuadrants()'s doc comment in the .cpp for the full
+    # design. hole_reassign_max_dist_px gates how far (pixels) a centroid
+    # may move between frames and still count as "the same physical hole" --
+    # anchored to hole_max_radius_px above (same value here), see
+    # CupHolderDetectorConfig::hole_reassign_max_dist_px's doc comment for
+    # why that's the right scale to anchor to.
+    hole_reassign_max_dist_px: 40.0

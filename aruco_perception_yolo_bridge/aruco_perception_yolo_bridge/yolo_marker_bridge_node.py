@@ -116,9 +116,12 @@ a summary for readers of this file only):
   "hole" entries additionally get a hole_number (1-4, fixed image-space
   quadrant: top-left/top-right/bottom-left/bottom-right) on the PUBLISHED
   Detection2D -- NOT part of the inference_server.py response above, this
-  is computed client-side in publish_detections_2d()/assign_hole_quadrants()
-  since it only needs 2D pixel positions already in the response. See
-  Detection2D.msg's hole_number field comment for the full rule.
+  is computed client-side, once per frame in _process_image, via
+  YoloMarkerBridgeNode.assign_hole_quadrants() (a bound method, not a
+  module-level function, since 2026-07-30 -- it needs persistent per-node
+  state, self._prev_holes, to add cross-frame hysteresis; see its own doc
+  comment for the flicker bug this fixes and Detection2D.msg's
+  hole_number field comment for the base quadrant rule).
 
 Stabilized-overlay subscription (2026-07-27) -- a deliberate exception to
 this node's otherwise one-directional (image in, poses/detections out)
@@ -203,52 +206,13 @@ def rotation_matrix_to_quaternion(rotation_matrix):
     return (x, y, z, w)
 
 
-def assign_hole_quadrants(detections, result):
-    """Assigns each "hole" Detection2D in `detections` (mutated in place) a
-    fixed image-space quadrant label via hole_number:
-        1 = top-left, 2 = top-right, 3 = bottom-left, 4 = bottom-right.
-
-    Decided design (simpler than an angle-around-centroid sort): the camera
-    here is wall-fixed with at most pitch variation -- it never rolls or
-    views from a mirrored/opposite angle -- so a plain 2-axis image-space
-    split (above/below a horizontal line, left/right of a vertical line) is
-    robust, unlike on a moving wrist camera where it wouldn't be.
-
-    Reference point for the horizontal/vertical split: the cup_holder's own
-    detected bbox center, if "cup_holder" was present in this frame's
-    /detect response (most robust -- one physical object, detected
-    independently of how many holes happened to be visible). Falls back to
-    the centroid of this frame's own hole detections (mean cx, mean cy) if
-    no cup_holder was detected that frame -- still a reasonable reference
-    since holes are arranged around the cup_holder.
-    """
-    holes = [d for d in detections if d.class_name == "hole"]
-    if not holes:
-        return
-
-    if "cup_holder" in result:
-        bbox = result["cup_holder"][0].get("bbox") if result["cup_holder"] else None
-    else:
-        bbox = None
-
-    if bbox is not None:
-        ref_x = (bbox[0] + bbox[2]) / 2.0
-        ref_y = (bbox[1] + bbox[3]) / 2.0
-    else:
-        ref_x = sum(d.cx for d in holes) / len(holes)
-        ref_y = sum(d.cy for d in holes) / len(holes)
-
-    for d in holes:
-        top = d.cy < ref_y
-        left = d.cx < ref_x
-        if top and left:
-            d.hole_number = 1
-        elif top and not left:
-            d.hole_number = 2
-        elif not top and left:
-            d.hole_number = 3
-        else:
-            d.hole_number = 4
+# assign_hole_quadrants was moved onto YoloMarkerBridgeNode itself
+# (2026-07-30, hole_number flicker fix) -- see
+# YoloMarkerBridgeNode.assign_hole_quadrants's own doc comment for why: it
+# now needs persistent per-node state (self._prev_holes) to add hysteresis
+# across frames, which a bare module-level function has no way to hold. Only
+# ever called from within this file (confirmed via grep), so this is a safe
+# in-file refactor -- no other module imports assign_hole_quadrants.
 
 
 class YoloMarkerBridgeNode(Node):
@@ -323,6 +287,52 @@ class YoloMarkerBridgeNode(Node):
             self.get_parameter("confidence_threshold").value
         )
         self.jpeg_quality = int(self.get_parameter("jpeg_quality").value)
+
+        # hole_number flicker fix (2026-07-30) -- see
+        # assign_hole_quadrants's own doc comment for the full mechanism.
+        # hole_quadrant_hysteresis_px is a deadband margin (pixels, in the
+        # SAME frame the /detect response's cx/cy already come back in --
+        # i.e. post-rescale, full native-resolution pixel space, matching
+        # every other pixel-space field this node publishes) added around
+        # the ref_x/ref_y split lines: a previously-classified hole only
+        # flips to the other side of a line once it has crossed that line
+        # by MORE than this many pixels, not the instant it crosses zero.
+        # Sized relative to hole_min_radius_px/hole_max_radius_px
+        # (cup_holder_detector_sim.yaml's sim-only classical-CV equivalent,
+        # 4-40px) -- the only existing pixel-scale reference for "how big
+        # is a hole" in this codebase; a hole's own radius is a reasonable
+        # floor for "how far past the line is genuinely a new position vs.
+        # detection noise jittering the same physical hole's reported
+        # centroid." Default 6px chosen as a small multiple of that floor
+        # (roughly 1.5x hole_min_radius_px) -- deliberately conservative
+        # (favors stability over split-second re-classification accuracy
+        # right at a boundary) since a wrong-but-STABLE label lets
+        # depth_perception_node's rolling-window filter converge, while a
+        # flickering label corrupts it outright (see this node's own
+        # module-level docstring / the task this fix was written for).
+        # Live-tunable (`ros2 param set /yolo_marker_bridge_node
+        # hole_quadrant_hysteresis_px <value>`) since the right value is a
+        # function of actual live jitter amplitude, not something to guess
+        # blind -- see assign_hole_quadrants's doc comment for how to tune
+        # it against real overlay/rviz observations.
+        self.hole_quadrant_hysteresis_px = float(
+            self.get_parameter("hole_quadrant_hysteresis_px").value
+        )
+        # Previous frame's labeled holes, as a list of dicts
+        # {"cx", "cy", "hole_number"} -- persistent node state (same
+        # convention as self._latest_stable_positions/self._calibration_running
+        # above: a plain cached-from-last-callback attribute, not a
+        # ROS-visible topic/param). Used by assign_hole_quadrants to
+        # nearest-centroid-match this frame's holes against last frame's
+        # already-decided labels before applying the hysteresis deadband.
+        # None until the first frame with at least one hole detected.
+        self._prev_holes = None
+        # This frame's cup_holder bbox (see assign_hole_quadrants's own doc
+        # comment for why it's threaded through as an explicit attribute
+        # rather than passed the whole `result` dict as the pre-fix version
+        # did) -- set fresh in _process_image before assign_hole_quadrants
+        # is called, None if no cup_holder was in this frame's response.
+        self._latest_cup_holder_bbox = None
 
         # Detection-resolution downscaling (2026-07-28) -- confirmed live:
         # this project's sim AND real environments are both CPU-only (no
@@ -741,6 +751,26 @@ class YoloMarkerBridgeNode(Node):
                     detection["cy"] *= rescale_factor
                     detection["bbox"] = [v * rescale_factor for v in detection["bbox"]]
 
+        # Quadrant-label every "hole" entry ONCE per frame, here -- writes a
+        # "hole_number" key directly onto each result["hole"][i] dict so
+        # publish_detections_2d/publish_overlay_image_msg below both read
+        # the SAME assignment rather than each independently re-deriving it.
+        # This single-call-per-frame structure is required (not just
+        # tidier) by the 2026-07-30 hysteresis fix: assign_hole_quadrants
+        # now advances self._prev_holes as persistent cross-frame state, so
+        # calling it twice within the same frame (as publish_overlay_image_msg
+        # used to, by rebuilding its own throwaway Detection2D list) would
+        # make the second call see the first call's own output as "the
+        # previous frame," silently corrupting the hysteresis memory every
+        # single frame. See assign_hole_quadrants's own doc comment for the
+        # full mechanism.
+        self._latest_cup_holder_bbox = (
+            result["cup_holder"][0].get("bbox")
+            if result.get("cup_holder") else None
+        )
+        if "hole" in result:
+            self.assign_hole_quadrants(result["hole"])
+
         # classical/hybrid switch: only publish the marker pose when this
         # node is the active detector -- live re-read, never cached, see
         # class doc comment / the "active" parameter's declare_parameter
@@ -766,6 +796,180 @@ class YoloMarkerBridgeNode(Node):
         # cup_holder/hole publish unconditionally, regardless of "active" --
         # depth-perception needs this stream running continuously either way.
         self.publish_detections_2d(msg, result)
+
+    def assign_hole_quadrants(self, hole_dicts):
+        """Assigns each entry of `hole_dicts` (a list of the raw
+        result["hole"] dicts from inference_server.py's response -- mutated
+        in place, a "hole_number" key is added/overwritten on each) a fixed
+        image-space quadrant label:
+            1 = top-left, 2 = top-right, 3 = bottom-left, 4 = bottom-right.
+
+        Decided design (simpler than an angle-around-centroid sort): the
+        camera here is wall-fixed with at most pitch variation -- it never
+        rolls or views from a mirrored/opposite angle -- so a plain 2-axis
+        image-space split (above/below a horizontal line, left/right of a
+        vertical line) is robust, unlike on a moving wrist camera where it
+        wouldn't be. This part of the design is UNCHANGED from the original
+        version of this function.
+
+        Reference point for the horizontal/vertical split: the cup_holder's
+        own detected bbox center, if a cup_holder is currently cached (see
+        below), else the centroid of this frame's own hole detections (mean
+        cx, mean cy) -- still a reasonable reference since holes are
+        arranged around the cup_holder. NOTE: reading self._latest_cup_holder_bbox
+        here (rather than a `result` dict as the original signature took)
+        is a deliberate narrowing -- this method only ever needs the bbox,
+        never the rest of the /detect response, so cup_holder_bbox is
+        threaded through explicitly by the caller instead.
+
+        Hysteresis fix (2026-07-30) -- the flicker bug this was written
+        for: with NO cross-frame memory, a hole sitting near either
+        reference line gets independently reclassified from scratch every
+        frame, so ordinary per-frame detection noise in cx/cy (a few
+        pixels, same source as any YOLO bbox-center jitter) can flip which
+        side of ref_x/ref_y it lands on from one frame to the next, even
+        though the physical hole never moved. depth_perception_node's
+        rolling_windows_ keys its drift-gated median filter by
+        (class_name, hole_number) -- if that key's identity itself
+        flickers between two different physical holes, the filter mixes
+        position samples from two different objects into one "instance,"
+        corrupting it. (Confirmed sibling bug/fix: sim's
+        cup_holder_detector_node.cpp::assignHoleQuadrants() got its own fix
+        for a related but DISTINCT problem this same day -- an ellipse-
+        fit-distortion issue specific to sim's wrist-camera viewing angle,
+        not this frame-to-frame flicker mechanism; that fix does not apply
+        here and this one does not apply there, per that function's own
+        doc comment.)
+
+        Fix mechanics: nearest-centroid-match this frame's holes against
+        self._prev_holes (last frame's already-decided {"cx","cy",
+        "hole_number"} dicts), then apply a pixel deadband
+        (hole_quadrant_hysteresis_px) around each reference line -- a
+        matched hole only flips to the other side of a line if its new
+        position crosses that line by MORE than the deadband, not the
+        instant it crosses zero. An unmatched hole (no previous-frame hole
+        within reasonable range -- practically: this is the first frame
+        with any holes at all, or self._prev_holes was empty) has no prior
+        label to hold onto, so it's classified by the plain rule with no
+        hysteresis applied, same as the original behavior.
+
+        Nearest-centroid matching (rather than e.g. matching by whichever
+        hole_number a candidate WOULD get under the plain rule) is used
+        because a hole flickering between two labels is exactly the
+        scenario where "what label would the plain rule assign" is
+        unreliable -- centroid position is continuous frame-to-frame even
+        when a naive quadrant classification of that same position is not.
+        Matching is greedy-with-mutual-exclusion (sort all (current,
+        previous) pairs by distance ascending, consume in that order,
+        skipping any pair where either side is already claimed) rather
+        than each hole independently taking its own single nearest
+        neighbor -- the latter would let two different current-frame holes
+        both match the SAME previous-frame hole (e.g. if hole A moves
+        closer to hole B's old position than to its own old position),
+        corrupting one hole's hysteresis anchor with another physical
+        hole's history. Not the full Hungarian/optimal assignment: at most
+        4 holes (so at most 16 candidate pairs), arranged with real
+        physical separation around the cup_holder, so this cheaper
+        greedy-with-exclusion match is not expected to misassign in
+        practice, and stays fast (this runs every frame -- not worth
+        adding a scipy dependency for at this scale; see
+        rotation_matrix_to_quaternion's own doc comment for this file's
+        general stance on new dependencies this close to the deadline).
+        """
+        if not hole_dicts:
+            # No holes this frame -- reset the memory rather than leaving a
+            # stale self._prev_holes around. Deliberate: an empty frame (or
+            # a run of them) means whatever hysteresis anchor existed is no
+            # longer trustworthy anyway (the physical scene may have
+            # changed by the time holes reappear), and holding onto stale
+            # positions risks matching a REAPPEARING hole to a stale,
+            # unrelated (cx, cy) by nearest-centroid distance. Starting
+            # fresh (no hysteresis on the very next frame with holes) is
+            # the safer failure mode -- matches this function's original,
+            # pre-fix behavior for that first frame either way.
+            self._prev_holes = None
+            return
+
+        if self._latest_cup_holder_bbox is not None:
+            bbox = self._latest_cup_holder_bbox
+            ref_x = (bbox[0] + bbox[2]) / 2.0
+            ref_y = (bbox[1] + bbox[3]) / 2.0
+        else:
+            ref_x = sum(d["cx"] for d in hole_dicts) / len(hole_dicts)
+            ref_y = sum(d["cy"] for d in hole_dicts) / len(hole_dicts)
+
+        margin = self.hole_quadrant_hysteresis_px
+        prev_holes = self._prev_holes or []
+
+        # Greedy mutual-exclusion nearest-centroid matching -- computed
+        # once, up front, for the whole frame (rather than each hole
+        # independently picking its own closest prev_holes entry via a bare
+        # min()) specifically to prevent two DIFFERENT current-frame holes
+        # from both matching the SAME previous-frame hole. That failure
+        # mode would let one physical hole's position "steal" another's
+        # hysteresis anchor, defeating the point of this fix. All
+        # (current, previous) pairs are ranked by squared distance
+        # ascending, then consumed in that order, skipping any pair where
+        # either side has already been claimed -- at most 4x4=16 pairs, so
+        # this stays cheap (see this method's own doc comment for why a
+        # full Hungarian/optimal assignment isn't needed at this scale).
+        matches = {}  # id(d) -> matched prev_holes entry
+        if prev_holes:
+            pairs = []
+            for i, d in enumerate(hole_dicts):
+                for j, p in enumerate(prev_holes):
+                    dist_sq = (p["cx"] - d["cx"]) ** 2 + (p["cy"] - d["cy"]) ** 2
+                    pairs.append((dist_sq, i, j))
+            pairs.sort(key=lambda t: t[0])
+            used_current, used_prev = set(), set()
+            for _, i, j in pairs:
+                if i in used_current or j in used_prev:
+                    continue
+                used_current.add(i)
+                used_prev.add(j)
+                matches[id(hole_dicts[i])] = prev_holes[j]
+
+        new_prev_holes = []
+        for d in hole_dicts:
+            cx, cy = d["cx"], d["cy"]
+            match = matches.get(id(d))
+
+            if match is not None:
+                prev_top = match["hole_number"] in (1, 2)
+                prev_left = match["hole_number"] in (1, 3)
+                # Deadband: only flip a side's classification if `cx`/`cy`
+                # crossed its reference line by MORE than `margin` -- a
+                # small jitter that doesn't clear the deadband keeps the
+                # PREVIOUS frame's side, exactly the behavior needed to
+                # stop a boundary-straddling hole from flickering labels.
+                if prev_top:
+                    top = cy < ref_y + margin
+                else:
+                    top = cy < ref_y - margin
+                if prev_left:
+                    left = cx < ref_x + margin
+                else:
+                    left = cx < ref_x - margin
+            else:
+                # No previous-frame anchor for this hole (first frame with
+                # any holes, or self._prev_holes was reset to None above) --
+                # fall back to the original, no-hysteresis plain rule.
+                top = cy < ref_y
+                left = cx < ref_x
+
+            if top and left:
+                hole_number = 1
+            elif top and not left:
+                hole_number = 2
+            elif not top and left:
+                hole_number = 3
+            else:
+                hole_number = 4
+
+            d["hole_number"] = hole_number
+            new_prev_holes.append({"cx": cx, "cy": cy, "hole_number": hole_number})
+
+        self._prev_holes = new_prev_holes
 
     def publish_detections_2d(self, image_msg, result):
         """aruco_marker/cup_holder/hole detections, as
@@ -821,14 +1025,17 @@ class YoloMarkerBridgeNode(Node):
                 det.confidence = float(d.get("confidence", 0.0))
                 bbox = d.get("bbox", [0.0, 0.0, 0.0, 0.0])
                 det.bbox = [float(v) for v in bbox]
-                det.hole_number = 0  # unset/not-applicable by default
+                # "hole" entries: read the "hole_number" already written
+                # onto this SAME dict by _process_image's single
+                # assign_hole_quadrants call for this frame (see that
+                # method's own doc comment for the 2026-07-30 hysteresis
+                # fix this supports -- calling assign_hole_quadrants a
+                # second time here, as this file used to, would corrupt
+                # its cross-frame memory). cup_holder/aruco_marker: left at
+                # 0 (unset/not-applicable) -- only one of each ever exists
+                # in frame, no ambiguity to label.
+                det.hole_number = int(d.get("hole_number", 0)) if class_name == "hole" else 0
                 array_msg.detections.append(det)
-
-        # Quadrant-label every "hole" entry just added above (aruco_marker/
-        # cup_holder are left at hole_number=0 -- only one of each ever
-        # exists in frame, no ambiguity to label). See assign_hole_quadrants'
-        # own doc comment for the exact rule.
-        assign_hole_quadrants(array_msg.detections, result)
 
         self.detections_2d_pub.publish(array_msg)
 
@@ -916,20 +1123,20 @@ class YoloMarkerBridgeNode(Node):
             )
 
         if "hole" in result:
-            # Recompute the same quadrant assignment used for the published
-            # Detection2DArray (cheap, keeps this function independent of
-            # publish_detections_2d's own Detection2D list) so the overlay's
-            # drawn labels always match what was published this frame.
-            holes = [Detection2D() for _ in result["hole"]]
-            for det, d in zip(holes, result["hole"]):
-                det.class_name = "hole"
-                det.cx = float(d.get("cx", 0.0))
-                det.cy = float(d.get("cy", 0.0))
-            assign_hole_quadrants(holes, result)
-
-            for det in holes:
-                label = str(det.hole_number)
-                text_pos = (int(det.cx) + 8, int(det.cy) - 8)
+            # Reads the SAME "hole_number" already written onto each
+            # result["hole"][i] dict by _process_image's single
+            # assign_hole_quadrants call for this frame -- does NOT call it
+            # again here. Pre-2026-07-30 this function recomputed its own
+            # throwaway quadrant assignment independently; that became
+            # actively wrong once assign_hole_quadrants started advancing
+            # persistent hysteresis state (self._prev_holes), since a
+            # second same-frame call would have seen the first call's own
+            # output as "the previous frame" -- see _process_image's own
+            # comment on why this is now computed exactly once per frame.
+            for d in result["hole"]:
+                label = str(d.get("hole_number", 0))
+                cx, cy = float(d.get("cx", 0.0)), float(d.get("cy", 0.0))
+                text_pos = (int(cx) + 8, int(cy) - 8)
                 # Black outline + green fill for readability against any
                 # background (matches the "clear/readable" requirement --
                 # a single solid color alone can wash out against a light
@@ -942,7 +1149,7 @@ class YoloMarkerBridgeNode(Node):
                     overlay, label, text_pos, cv2.FONT_HERSHEY_SIMPLEX,
                     0.9, (0, 255, 0), 2, cv2.LINE_AA,
                 )
-                cv2.circle(overlay, (int(det.cx), int(det.cy)), 4, (0, 255, 0), -1)
+                cv2.circle(overlay, (int(cx), int(cy)), 4, (0, 255, 0), -1)
 
         # depth_perception_node's stabilized positions (2026-07-27) --
         # drawn in a DISTINCT color (cyan/magenta) from the green raw-YOLO

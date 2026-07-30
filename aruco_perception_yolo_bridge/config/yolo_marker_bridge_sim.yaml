@@ -52,6 +52,29 @@ yolo_marker_bridge_node:
     confidence_threshold: 0.25
     jpeg_quality: 90
 
+    # hole_number flicker fix (2026-07-30) -- see
+    # yolo_marker_bridge_node.py's assign_hole_quadrants doc comment for
+    # the full mechanism/rationale. Deadband (pixels, full native-resolution
+    # image space -- same space cx/cy/bbox already publish in) added around
+    # the top/bottom and left/right reference lines used to quadrant-label
+    # each "hole" detection: a hole only flips to the other side of a line
+    # once it crosses by MORE than this many pixels, not the instant it
+    # crosses zero -- stops ordinary per-frame detection noise from
+    # flickering a boundary-straddling hole's hole_number between two
+    # different values every frame (which corrupts
+    # depth_perception_node's rolling_windows_ keyed by (class_name,
+    # hole_number) -- see that fix's own doc comment for the full
+    # downstream failure mode). 6px chosen as roughly 1.5x
+    # cup_holder_detector_sim.yaml's hole_min_radius_px (4px) -- the only
+    # existing pixel-scale reference for "how big is a hole" in this
+    # codebase, and a reasonable floor for "this is a genuinely new
+    # position, not noise." Live-tunable (`ros2 param set
+    # /yolo_marker_bridge_node hole_quadrant_hysteresis_px <value>`) --
+    # increase if hole_number is still observed to flicker live, decrease
+    # if a genuinely moving hole is observed to lag/stick past where it
+    # should have relabeled.
+    hole_quadrant_hysteresis_px: 6.0
+
     # Downscale before sending to inference_server.py (2026-07-28) — CPU-
     # only env, no GPU; smaller image = less YOLO compute per request.
     # possible values: 0 (disabled, native 640 resolution), 160, 240, 320,

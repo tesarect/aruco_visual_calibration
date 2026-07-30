@@ -42,6 +42,34 @@ yolo_marker_bridge_node:
     confidence_threshold: 0.25
     jpeg_quality: 90
 
+    # hole_number flicker fix (2026-07-30) -- see
+    # yolo_marker_bridge_node.py's assign_hole_quadrants doc comment for
+    # the full mechanism/rationale (same fix on both sim/real yaml -- this
+    # node's own hole detection/labeling code is identical on both, only
+    # the camera topics/intrinsics differ). Deadband (pixels, full
+    # native-resolution image space -- same space cx/cy/bbox already
+    # publish in) added around the top/bottom and left/right reference
+    # lines used to quadrant-label each "hole" detection: a hole only
+    # flips to the other side of a line once it crosses by MORE than this
+    # many pixels, not the instant it crosses zero -- stops ordinary
+    # per-frame detection noise from flickering a boundary-straddling
+    # hole's hole_number between two different values every frame (which
+    # corrupts depth_perception_node's rolling_windows_ keyed by
+    # (class_name, hole_number) -- see that fix's own doc comment for the
+    # full downstream failure mode this was written to prevent, originally
+    # observed live on sim's hole_3). 6px chosen as roughly 1.5x sim's
+    # cup_holder_detector_sim.yaml hole_min_radius_px (4px, real's own
+    # YOLO-based hole detection has no directly equivalent pixel-radius
+    # config to anchor against, so this borrows sim's classical-CV value as
+    # the closest existing "how big is a hole" reference) -- kept the same
+    # value as sim per the same "consistent behavior across environments"
+    # choice already used for detect_max_width_px below. Live-tunable
+    # (`ros2 param set /yolo_marker_bridge_node
+    # hole_quadrant_hysteresis_px <value>`) -- increase if hole_number is
+    # still observed to flicker live, decrease if a genuinely moving hole
+    # is observed to lag/stick past where it should have relabeled.
+    hole_quadrant_hysteresis_px: 6.0
+
     # Downscale before sending to inference_server.py (2026-07-28) — CPU-
     # only env, no GPU; smaller image = less YOLO compute per request.
     # Native width here is 424 (D415), so this is a smaller reduction than
