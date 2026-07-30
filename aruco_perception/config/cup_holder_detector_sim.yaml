@@ -29,6 +29,16 @@ cup_holder_detector_node:
     overlay_image_input_topic: "/aruco_perception/overlay_image_marker_only"
     overlay_image_topic: "/aruco_perception/overlay_image"
 
+    # Base layer (always drawn): filled green centroid dot + label for the
+    # cup_holder and each hole — matches yolo_marker_bridge_node.py's own
+    # always-on hole-marker style. Extras layer (this param, 2026-07-30,
+    # same name/semantics as yolo_marker_bridge_node.py's own
+    # show_extras_markers): the diagnostic detection-radius ring —
+    # default OFF to keep the base overlay uncluttered, live-toggle via
+    # `ros2 param set /cup_holder_detector_node show_extras_markers true`
+    # while tuning.
+    show_extras_markers: false
+
     active: true
 
     # Pass 1 — cup_holder disc, found via its RIM (Canny edge + dilate +

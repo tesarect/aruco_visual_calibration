@@ -291,36 +291,78 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
   tf2::Transform known_to_camera;
   tf2::fromMsg(known_to_camera_tf.transform, known_to_camera);
 
+  // cup_holder anchors the 4 holes (2026-07-30) — find its current
+  // last_stable first so hole TFs below can be expressed relative to it
+  // (cup_holder -> hole_N) instead of each hole independently re-deriving
+  // its own base_link -> hole_N chain. All holes move together with the
+  // holder as one rigid unit in reality, so anchoring to the holder's own
+  // tracked centroid — rather than base_link — is both the physically
+  // correct parent and immune to the holder's own position noise being
+  // double-counted in each hole's independent base_link chain.
+  const TrackedInstanceKey cup_holder_key{"cup_holder", 0};
+  const auto cup_holder_it = rolling_windows_.find(cup_holder_key);
+  const bool cup_holder_valid =
+    cup_holder_it != rolling_windows_.end() && cup_holder_it->second.last_stable.valid;
+
+  if (cup_holder_valid) {
+    const auto & cup_holder_point = cup_holder_it->second.last_stable;
+    tf2::Transform camera_to_cup_holder(
+      tf2::Quaternion::getIdentity(),
+      tf2::Vector3(cup_holder_point.x, cup_holder_point.y, cup_holder_point.z));
+    const tf2::Transform known_to_cup_holder = known_to_camera * camera_to_cup_holder;
+
+    geometry_msgs::msg::TransformStamped cup_holder_tf;
+    cup_holder_tf.header.stamp = header.stamp;
+    cup_holder_tf.header.frame_id = config_.known_chain_frame;
+    cup_holder_tf.child_frame_id = "cup_holder";
+    cup_holder_tf.transform.translation.x = known_to_cup_holder.getOrigin().x();
+    cup_holder_tf.transform.translation.y = known_to_cup_holder.getOrigin().y();
+    cup_holder_tf.transform.translation.z = known_to_cup_holder.getOrigin().z();
+    cup_holder_tf.transform.rotation.w = 1.0;
+    instance_tf_broadcaster_.sendTransform(cup_holder_tf);
+  }
+
   for (const auto & [key, window] : rolling_windows_) {
-    if (!window.last_stable.valid) {
+    if (key.class_name != "hole" || !window.last_stable.valid) {
       continue;
     }
 
-    tf2::Transform camera_to_instance(
-      tf2::Quaternion::getIdentity(),
-      tf2::Vector3(window.last_stable.x, window.last_stable.y, window.last_stable.z));
-    const tf2::Transform known_to_instance = known_to_camera * camera_to_instance;
+    // No cup_holder to anchor to yet this cycle — skip holes entirely
+    // rather than falling back to a base_link chain, so a hole TF is
+    // never silently published in a different, inconsistent parent frame
+    // from one cycle to the next.
+    if (!cup_holder_valid) {
+      continue;
+    }
 
-    geometry_msgs::msg::TransformStamped instance_tf;
-    instance_tf.header.stamp = header.stamp;
-    instance_tf.header.frame_id = config_.known_chain_frame;
-    // "cup_holder" as-is (hole_number 0, unused); "hole_1".."hole_4" for
-    // holes — same instance_desc convention detections2dCallback's own
-    // logging already uses, kept consistent rather than inventing a
-    // second naming scheme for the same instances.
-    instance_tf.child_frame_id = key.class_name == "hole" ?
-      "hole_" + std::to_string(key.hole_number) : key.class_name;
-    instance_tf.transform.translation.x = known_to_instance.getOrigin().x();
-    instance_tf.transform.translation.y = known_to_instance.getOrigin().y();
-    instance_tf.transform.translation.z = known_to_instance.getOrigin().z();
+    const auto & cup_holder_point = cup_holder_it->second.last_stable;
+    // Both points are camera-frame, identity-rotation positions (see
+    // BackProjectedPoint's doc comment) — plain vector subtraction gives
+    // the hole's offset from the holder's centroid, still expressed along
+    // the camera frame's axes, before rotating into known_chain_frame.
+    tf2::Transform camera_to_offset(
+      tf2::Quaternion::getIdentity(),
+      tf2::Vector3(
+        window.last_stable.x - cup_holder_point.x,
+        window.last_stable.y - cup_holder_point.y,
+        window.last_stable.z - cup_holder_point.z));
+    const tf2::Transform cup_holder_to_hole = known_to_camera.getBasis() * camera_to_offset;
+
+    geometry_msgs::msg::TransformStamped hole_tf;
+    hole_tf.header.stamp = header.stamp;
+    hole_tf.header.frame_id = "cup_holder";
+    hole_tf.child_frame_id = "hole_" + std::to_string(key.hole_number);
+    hole_tf.transform.translation.x = cup_holder_to_hole.getOrigin().x();
+    hole_tf.transform.translation.y = cup_holder_to_hole.getOrigin().y();
+    hole_tf.transform.translation.z = cup_holder_to_hole.getOrigin().z();
     // Position-only — no orientation estimate exists for cup_holder/hole
     // (see BackProjectedPoint's own doc comment: position only, no
     // orientation, no averaging-across-frames beyond the rolling window),
     // so this TF's rotation is left as the identity quaternion rather than
     // fabricating a meaningless one.
-    instance_tf.transform.rotation.w = 1.0;
+    hole_tf.transform.rotation.w = 1.0;
 
-    instance_tf_broadcaster_.sendTransform(instance_tf);
+    instance_tf_broadcaster_.sendTransform(hole_tf);
   }
 }
 

@@ -148,6 +148,33 @@ struct PlannerConfig
   double cartesian_min_fraction = 0.95;
 };
 
+/// Tuning for ~/move_to_instance's two-stage hover-then-descend approach
+/// (2026-07-30) — every instance move (cup_holder or hole_1..hole_4) first
+/// goes, via joint-space planning, to a single shared pose hover_offset_m
+/// above cup_holder's own current TF (same X/Y/orientation as cup_holder,
+/// only Z raised) — cup_holder specifically, not the per-call target
+/// instance, so hole_1..hole_4 all approach from the SAME known-safe point
+/// directly above the holder, regardless of which hole was requested. From
+/// there, a second, Cartesian move descends descend_offset_m straight down
+/// (in the planning frame's Z) from the HOVER pose toward the requested
+/// instance's own X/Y — see handleMoveToInstance's doc comment for the
+/// exact pose math. Loaded from a parameter file alongside StandoffConfig/
+/// PolygonConfig.
+struct HoverConfig
+{
+  /// Height (meters) above cup_holder's own TF the joint-space approach
+  /// leg targets. Positive = above (planning frame's +Z).
+  double hover_offset_m = 0.20;
+  /// How far (meters) the second, Cartesian leg descends from the hover
+  /// pose's Z toward the requested instance's own Z. Independent from
+  /// hover_offset_m so the descent doesn't have to travel the hover
+  /// height's full distance (e.g. a hover well above the holder, but a
+  /// shorter final approach into a hole) — NOT clamped against
+  /// hover_offset_m, a misconfigured descend_offset_m taller than
+  /// hover_offset_m would overshoot below the instance's own Z.
+  double descend_offset_m = 0.15;
+};
+
 /// Tuning for the sequenced-goal stay/lift/standby behavior (see
 /// ArmState), loaded from a parameter file alongside StandoffConfig/
 /// PolygonConfig.
@@ -399,15 +426,31 @@ private:
     const std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Request> request,
     std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Response> response);
 
-  /// Handles a MoveToInstance service request (2026-07-29) — looks up
-  /// move_group_interface_.getPlanningFrame() (base_link) ->
-  /// request->instance_name via tf_buffer_ (fresh every call, same
-  /// lookup-then-tracePath pattern polygonWaypointsAroundStandoff already
-  /// uses for its own TF lookup), then calls tracePath() with the single
-  /// resulting pose — moves the arm. Fails with a clear message
-  /// (response->success = false) if the TF lookup fails, e.g. no
-  /// ~/calibrate run has completed yet or depth_perception_node hasn't
-  /// detected this instance — see MoveToInstance.srv's own doc comment.
+  /// Handles a MoveToInstance service request. Two-stage hover-then-descend
+  /// approach (2026-07-30, see HoverConfig's doc comment) — replaces the
+  /// original 2026-07-29 single-move version:
+  ///   1. Looks up move_group_interface_.getPlanningFrame() -> "cup_holder"
+  ///      via tf_buffer_ (fresh every call), builds a hover pose directly
+  ///      above it (same X/Y/orientation as cup_holder, Z raised by
+  ///      hover_config_.hover_offset_m), and reaches it via joint-space
+  ///      planAndExecute() — a free-space move, chosen deliberately so this
+  ///      shared hover point is reliably reachable regardless of which
+  ///      instance was actually requested or where the arm started.
+  ///   2. Looks up move_group_interface_.getPlanningFrame() ->
+  ///      request->instance_name (same as step 1, but for the ACTUAL
+  ///      target — cup_holder itself, or a specific hole_N). Builds a
+  ///      descend pose: the instance's own X/Y, Z = hover pose's Z minus
+  ///      hover_config_.descend_offset_m, same orientation as the hover
+  ///      pose (identity, matching the position-only instance TFs — see
+  ///      broadcastInstanceTfs's own doc comment) — then reaches it via
+  ///      planAndExecuteCartesian(), a straight-line descent from directly
+  ///      above the target.
+  /// Fails (response->success = false) with a clear message if either TF
+  /// lookup or either move fails — including, at step 1, if cup_holder
+  /// itself isn't currently tracked (no ~/calibrate run completed yet, or
+  /// depth_perception_node hasn't detected it), since the hover pose
+  /// cannot be computed at all without it, even when the actual requested
+  /// instance is cup_holder itself.
   void handleMoveToInstance(
     const std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Request> request,
     std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Response> response);
@@ -426,6 +469,10 @@ private:
   /// Reads planner_id, planning_time_s, and num_planning_attempts from
   /// this node's declared parameters and returns them as a PlannerConfig.
   PlannerConfig loadPlannerConfigFromParams() const;
+
+  /// Reads instance_hover_offset_m and instance_descend_offset_m from this
+  /// node's declared parameters and returns them as a HoverConfig.
+  HoverConfig loadHoverConfigFromParams() const;
 
   /// Reads stay_seconds_at_goal, lift_target_z_m, lift_wait_seconds,
   /// waypoint_settle_seconds, and gripper_close_settle_seconds from this
@@ -515,6 +562,7 @@ private:
   StandoffConfig standoff_config_;
   PolygonConfig polygon_config_;
   PlannerConfig planner_config_;
+  HoverConfig hover_config_;
   SequenceConfig sequence_config_;
   PresetPoses preset_poses_;
   rclcpp::Service<visual_calibration_msgs::srv::TracePath>::SharedPtr trace_path_service_;

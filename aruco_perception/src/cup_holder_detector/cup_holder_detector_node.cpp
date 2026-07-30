@@ -301,20 +301,57 @@ void CupHolderDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSh
       }
     }
 
+    // Live re-read every frame (never cached) — see
+    // CupHolderDetectorConfig::show_extras_markers's doc comment.
+    const bool show_extras_markers = get_parameter("show_extras_markers").as_bool();
+
+    // Base layer — ALWAYS drawn: filled centroid dot + readable label for
+    // the cup_holder and each hole. Matches yolo_marker_bridge_node.py's
+    // own always-on hole marker style exactly (black outline + green fill
+    // text, filled green dot) — see class doc comment. real's overlay
+    // never drew a cup_holder-specific marker at all; this adds one using
+    // the same visual style for consistency.
     if (cup_holder_found) {
-      cv::circle(
-        overlay_ptr->image, cv::Point2d(cup_holder->cx, cup_holder->cy),
-        static_cast<int>(cup_holder->radius), cv::Scalar(0, 255, 255), 2);
+      const cv::Point2i center(
+        static_cast<int>(cup_holder->cx), static_cast<int>(cup_holder->cy));
+      cv::circle(overlay_ptr->image, center, 4, cv::Scalar(0, 255, 0), -1);
+      const cv::Point2i text_pos(center.x + 8, center.y - 8);
+      cv::putText(
+        overlay_ptr->image, "cup_holder", text_pos, cv::FONT_HERSHEY_SIMPLEX, 0.6,
+        cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+      cv::putText(
+        overlay_ptr->image, "cup_holder", text_pos, cv::FONT_HERSHEY_SIMPLEX, 0.6,
+        cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
     }
     for (const auto & hole : holes) {
-      const double radius = (hole.bbox[2] - hole.bbox[0]) / 2.0;
-      cv::circle(
-        overlay_ptr->image, cv::Point2d(hole.cx, hole.cy),
-        static_cast<int>(radius), cv::Scalar(0, 0, 255), 2);
+      const cv::Point2i center(static_cast<int>(hole.cx), static_cast<int>(hole.cy));
+      cv::circle(overlay_ptr->image, center, 4, cv::Scalar(0, 255, 0), -1);
+      const std::string label = std::to_string(hole.hole_number);
+      const cv::Point2i text_pos(center.x + 8, center.y - 8);
       cv::putText(
-        overlay_ptr->image, std::to_string(hole.hole_number),
-        cv::Point2d(hole.cx - 5, hole.cy + 5), cv::FONT_HERSHEY_SIMPLEX, 0.6,
-        cv::Scalar(255, 255, 255), 2);
+        overlay_ptr->image, label, text_pos, cv::FONT_HERSHEY_SIMPLEX, 0.9,
+        cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+      cv::putText(
+        overlay_ptr->image, label, text_pos, cv::FONT_HERSHEY_SIMPLEX, 0.9,
+        cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+    }
+
+    // Extras layer — gated behind show_extras_markers (default OFF): the
+    // diagnostic detection-radius ring, distinct color (yellow/red) from
+    // the base layer's green so both remain visually distinguishable when
+    // both are on.
+    if (show_extras_markers) {
+      if (cup_holder_found) {
+        cv::circle(
+          overlay_ptr->image, cv::Point2d(cup_holder->cx, cup_holder->cy),
+          static_cast<int>(cup_holder->radius), cv::Scalar(0, 255, 255), 2);
+      }
+      for (const auto & hole : holes) {
+        const double radius = (hole.bbox[2] - hole.bbox[0]) / 2.0;
+        cv::circle(
+          overlay_ptr->image, cv::Point2d(hole.cx, hole.cy),
+          static_cast<int>(radius), cv::Scalar(0, 0, 255), 2);
+      }
     }
 
     overlay_image_pub_.publish(overlay_ptr->toImageMsg());
@@ -329,6 +366,7 @@ CupHolderDetectorConfig CupHolderDetectorNode::loadConfigFromParams() const
   config.publish_overlay_image = get_parameter("publish_overlay_image").as_bool();
   config.overlay_image_input_topic = get_parameter("overlay_image_input_topic").as_string();
   config.overlay_image_topic = get_parameter("overlay_image_topic").as_string();
+  config.show_extras_markers = get_parameter("show_extras_markers").as_bool();
 
   config.cup_holder_canny_low = static_cast<int>(get_parameter("cup_holder_canny_low").as_int());
   config.cup_holder_canny_high = static_cast<int>(get_parameter("cup_holder_canny_high").as_int());

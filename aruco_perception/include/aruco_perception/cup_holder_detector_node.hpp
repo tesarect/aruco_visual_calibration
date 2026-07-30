@@ -46,6 +46,20 @@ struct CupHolderDetectorConfig
   /// this node is the SOLE publisher of it on sim (see class doc comment).
   std::string overlay_image_topic;
 
+  /// Base layer (always drawn when publish_overlay_image is true): a
+  /// filled centroid dot + label for the cup_holder and each detected
+  /// hole — matches yolo_marker_bridge_node.py's own always-on "green
+  /// centroid marker" convention for holes (real's overlay never drew a
+  /// cup_holder-specific marker at all — this node adds one). Extras
+  /// layer (gated behind this live-toggleable param, default OFF): the
+  /// diagnostic detection-radius ring for the cup_holder/each hole — same
+  /// show_extras_markers name/semantics as yolo_marker_bridge_node.py's
+  /// own param (2026-07-28, "let's have only the green centroid marker"),
+  /// so a future web "Extras" toggle can target this node identically to
+  /// how it already targets yolo_marker_bridge_node. Live re-read every
+  /// frame (never cached), same pattern as "active".
+  bool show_extras_markers = false;
+
   /// cv::Canny low/high threshold pair, run on a blurred grayscale image
   /// (see cup_holder_blur_kernel_px) to find the cup_holder disc's rim.
   /// REPLACES an earlier flat cv::threshold(THRESH_BINARY) approach

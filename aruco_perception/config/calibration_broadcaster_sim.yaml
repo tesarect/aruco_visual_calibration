@@ -93,9 +93,12 @@ calibration_broadcaster_node:
     # original one-sample-per-waypoint behavior.
     samples_per_waypoint: 2
 
-    # --- Clustering-based position averaging (2026-07-29) ---
+    # --- Clustering-based position+orientation averaging (2026-07-29) ---
     # See calibration_broadcaster_real.yaml's own comment for the full
-    # rationale — motivated by a real-robot observation, default false
+    # rationale (now clusters on BOTH position and orientation, fixing a
+    # camera roll error the original position-only version left
+    # uncorrected) — motivated by a real-robot observation, default false
     # (unchanged behavior) on both envs until explicitly tried.
     use_clustering_average: false
     clustering_bucket_size_cm: 2.0
+    clustering_bucket_angle_deg: 5.0

@@ -899,25 +899,36 @@ std::vector<size_t> CalibrationBroadcasterNode::rejectOutliers() const
   return kept_indices;
 }
 
-geometry_msgs::msg::Vector3 CalibrationBroadcasterNode::computeClusteredPosition(
-  const std::vector<size_t> & indices, double bucket_size_cm) const
+ClusteredPose CalibrationBroadcasterNode::computeClusteredPose(
+  const std::vector<size_t> & indices, double position_bucket_size_cm,
+  double orientation_bucket_size_deg) const
 {
-  auto plainMean = [this](const std::vector<size_t> & idx) {
+  auto plainAverage = [this](const std::vector<size_t> & idx) {
       geometry_msgs::msg::Vector3 mean;
+      std::vector<tf2::Quaternion> orientations;
+      orientations.reserve(idx.size());
       for (const size_t i : idx) {
         mean.x += collected_positions_[i].x;
         mean.y += collected_positions_[i].y;
         mean.z += collected_positions_[i].z;
+        orientations.push_back(collected_orientations_[i]);
       }
       const double n = static_cast<double>(idx.size());
       mean.x /= n;
       mean.y /= n;
       mean.z /= n;
-      return mean;
+
+      ClusteredPose result;
+      result.position = mean;
+      result.orientation = orientations.empty() ?
+        tf2::Quaternion::getIdentity() :
+        averageQuaternions(orientations, averaging_method_).averaged;
+      result.member_indices = idx;
+      return result;
     };
 
   if (indices.size() < 2) {
-    return plainMean(indices);
+    return plainAverage(indices);
   }
 
   // Union-find over `indices` (not the raw 0..collected_positions_.size()
@@ -937,7 +948,11 @@ geometry_msgs::msg::Vector3 CalibrationBroadcasterNode::computeClusteredPosition
       return k;
     };
 
-  const double bucket_size_m = bucket_size_cm / 100.0;
+  // Two samples are unioned into the same cluster ONLY if BOTH their
+  // position AND orientation agree within tolerance — see this method's
+  // header doc comment for why position-only clustering left a camera
+  // roll error uncorrected.
+  const double position_bucket_size_m = position_bucket_size_cm / 100.0;
   for (size_t a = 0; a < indices.size(); ++a) {
     for (size_t b = a + 1; b < indices.size(); ++b) {
       const geometry_msgs::msg::Vector3 & pa = collected_positions_[indices[a]];
@@ -945,7 +960,14 @@ geometry_msgs::msg::Vector3 CalibrationBroadcasterNode::computeClusteredPosition
       const double dx = pa.x - pb.x;
       const double dy = pa.y - pb.y;
       const double dz = pa.z - pb.z;
-      if (std::sqrt(dx * dx + dy * dy + dz * dz) <= bucket_size_m) {
+      const bool position_agrees =
+        std::sqrt(dx * dx + dy * dy + dz * dz) <= position_bucket_size_m;
+
+      const double orientation_deviation_deg = angularDeviationDeg(
+        collected_orientations_[indices[a]], collected_orientations_[indices[b]]);
+      const bool orientation_agrees = orientation_deviation_deg <= orientation_bucket_size_deg;
+
+      if (position_agrees && orientation_agrees) {
         const size_t root_a = find(a);
         const size_t root_b = find(b);
         if (root_a != root_b) {
@@ -966,10 +988,12 @@ geometry_msgs::msg::Vector3 CalibrationBroadcasterNode::computeClusteredPosition
     [](const auto & a, const auto & b) {return a.second.size() < b.second.size();});
 
   RCLCPP_INFO(
-    get_logger(), "Clustering: largest cluster has %zu of %zu samples (bucket size %.2fcm)",
-    largest_cluster_it->second.size(), indices.size(), bucket_size_cm);
+    get_logger(), "Clustering: largest cluster has %zu of %zu samples (position bucket "
+    "%.2fcm, orientation bucket %.2fdeg)",
+    largest_cluster_it->second.size(), indices.size(), position_bucket_size_cm,
+    orientation_bucket_size_deg);
 
-  return plainMean(largest_cluster_it->second);
+  return plainAverage(largest_cluster_it->second);
 }
 
 void CalibrationBroadcasterNode::finishCalibration(
@@ -986,8 +1010,24 @@ void CalibrationBroadcasterNode::finishCalibration(
   const bool use_clustering = get_parameter("use_clustering_average").as_bool();
 
   geometry_msgs::msg::Vector3 average_position;
+  tf2::Quaternion averaged_orientation;
+  // The set of indices actually contributing to the final average — either
+  // every kept_index (Mean method) or just the winning cluster's members
+  // (Clustering method, 2026-07-29 — see computeClusteredPose()'s doc
+  // comment for why orientation is now part of clustering too, not just
+  // position). Spread/is_high_confidence below is computed against
+  // whichever set actually produced the broadcast result, not always the
+  // full kept_indices — a low spread among only the winning cluster's
+  // members is the whole point of clustering, and reporting spread against
+  // the UNCLUSTERED full set would defeat that.
+  std::vector<size_t> contributing_indices;
+
   if (use_clustering) {
-    average_position = computeClusteredPosition(kept_indices, config_.clustering_bucket_size_cm);
+    const ClusteredPose clustered = computeClusteredPose(
+      kept_indices, config_.clustering_bucket_size_cm, config_.clustering_bucket_angle_deg);
+    average_position = clustered.position;
+    averaged_orientation = clustered.orientation;
+    contributing_indices = clustered.member_indices;
   } else {
     for (const size_t i : kept_indices) {
       average_position.x += collected_positions_[i].x;
@@ -998,37 +1038,52 @@ void CalibrationBroadcasterNode::finishCalibration(
     average_position.x /= count;
     average_position.y /= count;
     average_position.z /= count;
+
+    std::vector<tf2::Quaternion> kept_orientations;
+    kept_orientations.reserve(kept_indices.size());
+    for (const size_t i : kept_indices) {
+      kept_orientations.push_back(collected_orientations_[i]);
+    }
+    averaged_orientation = averageQuaternions(kept_orientations, averaging_method_).averaged;
+    contributing_indices = kept_indices;
   }
 
-  std::vector<tf2::Quaternion> kept_orientations;
-  kept_orientations.reserve(kept_indices.size());
-  for (const size_t i : kept_indices) {
-    kept_orientations.push_back(collected_orientations_[i]);
-  }
-
-  const OrientationAveragingResult orientation_result =
-    averageQuaternions(kept_orientations, averaging_method_);
-
-  // Post-rejection (and post-clustering, if active) position spread — the
-  // max distance of any KEPT sample from the FINAL average_position used
-  // for the broadcast, needed for is_high_confidence below. Deliberately
-  // computed against average_position (whichever method produced it), not
-  // a separate unfiltered mean — this is meant to answer "how much does
-  // the position we're ACTUALLY broadcasting disagree with the samples
-  // that went into it," not a general spread statistic.
+  // Post-rejection (and post-clustering, if active) spread — computed
+  // against contributing_indices (whichever set actually produced
+  // average_position/averaged_orientation) and the FINAL averaged values,
+  // needed for is_high_confidence below. This answers "how much does the
+  // result we're ACTUALLY broadcasting disagree with the samples that went
+  // into it," not a general unfiltered spread statistic.
   double max_position_spread_cm = 0.0;
-  for (const size_t i : kept_indices) {
+  double max_orientation_spread_deg = 0.0;
+  for (const size_t i : contributing_indices) {
     const geometry_msgs::msg::Vector3 & position = collected_positions_[i];
     const double dx = position.x - average_position.x;
     const double dy = position.y - average_position.y;
     const double dz = position.z - average_position.z;
     max_position_spread_cm =
       std::max(max_position_spread_cm, std::sqrt(dx * dx + dy * dy + dz * dz) * 100.0);
+
+    max_orientation_spread_deg = std::max(
+      max_orientation_spread_deg,
+      angularDeviationDeg(collected_orientations_[i], averaged_orientation));
   }
+
+  // orientation_result kept for its mean_spread_deg (still reported/logged
+  // below) — max_spread_deg is superseded by max_orientation_spread_deg
+  // above, which (unlike this) is computed against contributing_indices
+  // and the FINAL averaged_orientation, not always the full kept set.
+  std::vector<tf2::Quaternion> kept_orientations_for_mean;
+  kept_orientations_for_mean.reserve(kept_indices.size());
+  for (const size_t i : kept_indices) {
+    kept_orientations_for_mean.push_back(collected_orientations_[i]);
+  }
+  const OrientationAveragingResult orientation_result =
+    averageQuaternions(kept_orientations_for_mean, averaging_method_);
 
   const bool is_high_confidence =
     max_position_spread_cm <= config_.position_spread_tolerance_cm &&
-    orientation_result.max_spread_deg <= config_.orientation_spread_tolerance_deg;
+    max_orientation_spread_deg <= config_.orientation_spread_tolerance_deg;
 
   geometry_msgs::msg::TransformStamped broadcast_tf;
   broadcast_tf.header.stamp = get_clock()->now();
@@ -1040,7 +1095,19 @@ void CalibrationBroadcasterNode::finishCalibration(
   // CalibrationBroadcasterConfig::broadcast_frame_suffix.
   broadcast_tf.child_frame_id = last_sample_.header.frame_id + config_.broadcast_frame_suffix;
   broadcast_tf.transform.translation = average_position;
-  broadcast_tf.transform.rotation = tf2::toMsg(orientation_result.averaged);
+  // averaged_orientation (NOT orientation_result.averaged) — this is the
+  // actual bug this whole change fixes: orientation_result is always the
+  // Mean-method average over every kept sample, regardless of
+  // use_clustering_average; broadcasting IT here would silently discard
+  // clustering's whole point for orientation specifically (the position
+  // would correctly reflect the winning cluster, but the rotation would
+  // still be dragged by orientation outliers clustering was supposed to
+  // exclude — exactly the camera roll error this change was written to
+  // fix). averaged_orientation is the one that's actually
+  // clustering-aware (equal to orientation_result.averaged when
+  // use_clustering_average is false, since contributing_indices ==
+  // kept_indices in that branch — see the if/else above).
+  broadcast_tf.transform.rotation = tf2::toMsg(averaged_orientation);
 
   static_broadcaster_.sendTransform(broadcast_tf);
 
@@ -1060,18 +1127,22 @@ void CalibrationBroadcasterNode::finishCalibration(
 
   RCLCPP_INFO(
     get_logger(), "Calibration complete: broadcasting static TF '%s' -> '%s' "
-    "(position via %s over %zu samples, max position spread %.2fcm; orientation spread: "
-    "max %.3f deg, mean %.3f deg; %s)",
+    "(position+orientation via %s, %zu contributing samples of %zu kept; spread vs. "
+    "broadcast result: max position %.2fcm, max orientation %.3fdeg; %s)",
     config_.known_chain_frame.c_str(), broadcast_tf.child_frame_id.c_str(),
-    use_clustering ? "clustering" : "mean", kept_indices.size(), max_position_spread_cm,
-    orientation_result.max_spread_deg, orientation_result.mean_spread_deg,
+    use_clustering ? "clustering (position+orientation)" : "mean", contributing_indices.size(),
+    kept_indices.size(), max_position_spread_cm, max_orientation_spread_deg,
     is_high_confidence ? "HIGH CONFIDENCE" : "LOW CONFIDENCE (spread exceeds tolerance)");
 
   auto result = std::make_shared<Calibrate::Result>();
   result->success = true;
   result->message = "Broadcasting static TF '" + config_.known_chain_frame + "' -> '" +
     broadcast_tf.child_frame_id + "'";
-  result->max_spread_deg = orientation_result.max_spread_deg;
+  // max_orientation_spread_deg (NOT orientation_result.max_spread_deg) —
+  // same reasoning as broadcast_tf.transform.rotation above: this must
+  // reflect spread against the ACTUAL broadcast result, which
+  // orientation_result does not when clustering is active.
+  result->max_spread_deg = max_orientation_spread_deg;
   result->mean_spread_deg = orientation_result.mean_spread_deg;
   result->is_high_confidence = is_high_confidence;
   goal_handle->succeed(result);
@@ -1135,6 +1206,8 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
 
   config.clustering_bucket_size_cm =
     get_parameter("clustering_bucket_size_cm").as_double();
+  config.clustering_bucket_angle_deg =
+    get_parameter("clustering_bucket_angle_deg").as_double();
   // use_clustering_average is intentionally NOT read here — see
   // CalibrationBroadcasterConfig's own comment on why it must stay a live
   // get_parameter() call at the point of use in finishCalibration(),

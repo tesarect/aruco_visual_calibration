@@ -158,23 +158,32 @@ struct CalibrationBroadcasterConfig
   /// disagreement between them.
   int samples_per_waypoint = 2;
 
-  // --- Clustering-based position averaging (2026-07-29) ---
-  // clustering_bucket_size_cm is cached in config_ like every other field
-  // above (it's a tuning constant, fine to require a restart to change).
-  // use_clustering_average is DELIBERATELY NOT a field here — see
-  // finishCalibration()'s own comment for why it must be read live via
-  // get_parameter() at the point of use, not cached into this struct at
-  // construction (it's meant to be flippable from the web UI's DevSpace
-  // drawer switch without a node restart, unlike every field in this
-  // struct, which IS restart-only by convention).
+  // --- Clustering-based position+orientation averaging (2026-07-29) ---
+  // clustering_bucket_size_cm/clustering_bucket_angle_deg are cached in
+  // config_ like every other field above (tuning constants, fine to
+  // require a restart to change). use_clustering_average is DELIBERATELY
+  // NOT a field here — see finishCalibration()'s own comment for why it
+  // must be read live via get_parameter() at the point of use, not cached
+  // into this struct at construction (it's meant to be flippable from the
+  // web UI's DevSpace drawer switch without a node restart, unlike every
+  // other field in this struct, which IS restart-only by convention).
   //
-  // Bucket/offset tolerance (cm) for treating two samples' positions as
+  // Bucket/offset tolerance (cm) for treating two samples' POSITIONS as
   // "the same cluster" when use_clustering_average is true — see
-  // computeClusteredPosition()'s doc comment. Same default as
+  // computeClusteredPose()'s doc comment. Same default as
   // position_spread_tolerance_cm/outlier_position_threshold_cm (2.0cm) for
   // consistency, but an independently-tunable value, not a shared one —
   // confirmed via explicit instruction, not assumed.
   double clustering_bucket_size_cm = 2.0;
+  // Angular tolerance (degrees) for treating two samples' ORIENTATIONS as
+  // "the same cluster" (2026-07-29, added after position-only clustering
+  // was found live to still leave a camera roll error — see
+  // computeClusteredPose()'s doc comment). Both this AND
+  // clustering_bucket_size_cm must hold for two samples to be grouped
+  // together. Same default as orientation_spread_tolerance_deg/
+  // outlier_orientation_threshold_deg (5.0deg) for consistency, but an
+  // independently-tunable value.
+  double clustering_bucket_angle_deg = 5.0;
 };
 
 /// Orchestrates calibration: fetches waypoints AND their center pose from
@@ -223,6 +232,25 @@ struct CalibrationBroadcasterConfig
 /// resulting spread metrics are included in the action result and logged,
 /// as a signal for whether the average is trustworthy — not yet used to
 /// auto-escalate between methods (see progress.md's Feature Additions).
+
+/// Result of computeClusteredPosition() (2026-07-29) — both position AND
+/// orientation of the winning cluster's members, since clustering now
+/// groups on BOTH (see that method's own doc comment for why: position-only
+/// clustering still let outlier ORIENTATIONS drag the quaternion average,
+/// producing a visible camera roll error even when position converged
+/// well).
+struct ClusteredPose
+{
+  geometry_msgs::msg::Vector3 position;
+  tf2::Quaternion orientation;
+  /// Local indices (into the `indices` vector passed to
+  /// computeClusteredPosition(), NOT collected_positions_ directly) of the
+  /// winning cluster's members — so the caller can compute a post-
+  /// clustering spread/is_high_confidence check against exactly the
+  /// samples that contributed to this result, not the full unfiltered set.
+  std::vector<size_t> member_indices;
+};
+
 class CalibrationBroadcasterNode : public rclcpp::Node
 {
 public:
@@ -456,17 +484,24 @@ private:
   /// returns every index unfiltered (a no-op pass-through).
   std::vector<size_t> rejectOutliers() const;
 
-  /// Clustering-based position average (2026-07-29) — an alternative to
-  /// the plain arithmetic mean, used when use_clustering_average is true
+  /// Clustering-based position+orientation average (2026-07-29, extended
+  /// to include orientation — an alternative to the plain arithmetic
+  /// mean/quaternion average, used when use_clustering_average is true
   /// (read live via get_parameter(), NOT config_ — see
   /// CalibrationBroadcasterConfig's own comment on why). Motivated by a
   /// direct live observation: watching CalibratedCameraModel's in-progress
   /// sample meshes during a run showed many samples visibly clustering/
   /// overlapping near one location (with a small, consistent offset
   /// between them — never EXACTLY the same point) while a handful of
-  /// outliers sat further away — a plain mean lets those outliers drag the
-  /// result off, while this method votes for the densest agreement
-  /// instead.
+  /// outliers sat further away — a plain mean/quaternion-average lets
+  /// those outliers drag the result off. Position-only clustering (the
+  /// original 2026-07-29 version) still left orientation vulnerable to
+  /// this — confirmed live: it produced a visible camera ROLL error even
+  /// once position converged well, because an outlier sample's orientation
+  /// could still be included in the orientation average regardless of
+  /// which position cluster it fell into. This version requires BOTH
+  /// position AND orientation agreement for two samples to be grouped
+  /// together, closing that gap.
   ///
   /// Algorithm: pairwise-distance clustering (NOT a fixed grid/histogram —
   /// a fixed grid has an arbitrary origin/alignment problem that would
@@ -474,15 +509,20 @@ private:
   /// observed offsets are described as "close but not exact," i.e. fuzzy
   /// grouping, not points that will ever land in identical bins). Two
   /// samples (from `indices`, typically rejectOutliers()'s surviving set)
-  /// are unioned into the same cluster if their straight-line distance is
-  /// <= clustering_bucket_size_cm. O(n^2) pairwise comparison — fine at
-  /// this data scale (dozens of samples, not thousands), no spatial index
-  /// needed. Returns the arithmetic mean of just the LARGEST cluster's
-  /// member positions (ties broken by whichever cluster was formed first).
-  /// Falls back to the plain mean of every index in `indices` if fewer
-  /// than 2 samples are given (clustering is meaningless there).
-  geometry_msgs::msg::Vector3 computeClusteredPosition(
-    const std::vector<size_t> & indices, double bucket_size_cm) const;
+  /// are unioned into the same cluster ONLY if BOTH their straight-line
+  /// position distance is <= position_bucket_size_cm AND their angular
+  /// orientation distance (angularDeviationDeg) is <= orientation_bucket_size_deg.
+  /// O(n^2) pairwise comparison — fine at this data scale (dozens of
+  /// samples, not thousands), no spatial index needed. Returns the
+  /// arithmetic-mean position and quaternion-averaged (kSumNormalize)
+  /// orientation of just the LARGEST cluster's members (ties broken by
+  /// whichever cluster was formed first), plus that cluster's member
+  /// indices (see ClusteredPose's own doc comment for why). Falls back to
+  /// the plain mean/average of every index in `indices` if fewer than 2
+  /// samples are given (clustering is meaningless there).
+  ClusteredPose computeClusteredPose(
+    const std::vector<size_t> & indices, double position_bucket_size_cm,
+    double orientation_bucket_size_deg) const;
 
   /// Averages collected_positions_/collected_orientations_ — first passing
   /// them through rejectOutliers() if config_.outlier_rejection_enabled,

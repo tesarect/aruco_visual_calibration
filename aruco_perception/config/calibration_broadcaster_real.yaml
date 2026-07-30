@@ -146,26 +146,35 @@ calibration_broadcaster_node:
     # original one-sample-per-waypoint behavior.
     samples_per_waypoint: 2
 
-    # --- Clustering-based position averaging (2026-07-29) ---
+    # --- Clustering-based position+orientation averaging (2026-07-29) ---
     # When true, finishCalibration() computes the final broadcast POSITION
-    # by bucketing samples (pairwise distance <= clustering_bucket_size_cm
-    # counts as "same cluster") and averaging only the largest cluster,
-    # instead of the plain arithmetic mean of every kept sample — see
-    # CalibrationBroadcasterNode::computeClusteredPosition's doc comment.
+    # AND ORIENTATION by bucketing samples (pairwise position distance <=
+    # clustering_bucket_size_cm AND pairwise orientation distance <=
+    # clustering_bucket_angle_deg BOTH required to count as "same cluster")
+    # and averaging only the largest cluster's members, instead of the
+    # plain arithmetic mean/quaternion average of every kept sample — see
+    # CalibrationBroadcasterNode::computeClusteredPose's doc comment.
     # Motivated by a direct live observation: many in-progress sample
     # meshes (CalibratedCameraModel.tsx, web UI) visibly clustered/
     # overlapped near one location while a few outliers sat further away —
-    # a plain mean lets those outliers drag the result off; this votes for
-    # the densest agreement instead. Orientation is UNAFFECTED either way
-    # (always uses the existing quaternion averaging). Read LIVE via
-    # get_parameter() at the point of use, NOT cached — flip this via the
-    # web UI's DevSpace drawer switch (Mean vs Clustering) and it takes
-    # effect on the very next ~/calibrate run, no node restart needed.
-    # Default false: preserves today's exact behavior until explicitly
-    # tried.
+    # a plain mean lets those outliers drag the result off. Position-only
+    # clustering (this param's original 2026-07-29 version) still left a
+    # visible camera ROLL error uncorrected, since orientation was still
+    # averaged over every kept sample regardless of which position cluster
+    # it landed in — orientation is now part of the clustering criterion
+    # too, not just position. Read LIVE via get_parameter() at the point of
+    # use, NOT cached — flip this via the web UI's DevSpace drawer switch
+    # (Mean vs Clustering) and it takes effect on the very next
+    # ~/calibrate run, no node restart needed. Default false: preserves
+    # today's exact behavior until explicitly tried.
     use_clustering_average: false
-    # Offset tolerance (cm) for treating two samples as the same cluster.
-    # Independently tunable from position_spread_tolerance_cm/
+    # Position offset tolerance (cm) for treating two samples as the same
+    # cluster. Independently tunable from position_spread_tolerance_cm/
     # outlier_position_threshold_cm above (same 2.0cm starting value, not a
     # shared parameter) — only used when use_clustering_average is true.
     clustering_bucket_size_cm: 2.0
+    # Orientation angular tolerance (degrees) for treating two samples as
+    # the same cluster — BOTH this AND clustering_bucket_size_cm must hold.
+    # Same 5.0deg starting value as orientation_spread_tolerance_deg/
+    # outlier_orientation_threshold_deg above, independently tunable.
+    clustering_bucket_angle_deg: 5.0

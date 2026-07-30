@@ -53,6 +53,7 @@ TrajectoryPlanner::TrajectoryPlanner(
   standoff_config_(loadStandoffConfigFromParams()),
   polygon_config_(loadPolygonConfigFromParams()),
   planner_config_(loadPlannerConfigFromParams()),
+  hover_config_(loadHoverConfigFromParams()),
   sequence_config_(loadSequenceConfigFromParams()),
   preset_poses_(node_)
 {
@@ -713,15 +714,49 @@ void TrajectoryPlanner::handleMoveToInstance(
   const std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Request> request,
   std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Response> response)
 {
-  // Fresh lookup every call, no caching — depth_perception_node republishes
-  // this instance's TF continuously (a live, non-static broadcast), so the
-  // most recent detection is always what this moves to. Same
+  // Fresh lookups every call, no caching — depth_perception_node
+  // republishes these TFs continuously (a live, non-static broadcast), so
+  // the most recent detection is always what this moves to. Same
   // planning-frame lookup pattern polygonWaypointsAroundStandoff already
   // uses for its own TF read (getPlanningFrame(), not a hardcoded
   // "base_link" string — resolves to whatever MoveIt's planning group is
   // actually configured with).
   const std::string & planning_frame = move_group_interface_.getPlanningFrame();
 
+  // Stage 1: hover above cup_holder itself — the SAME shared approach
+  // point regardless of which instance was actually requested (see
+  // HoverConfig's doc comment) — looked up even when request->instance_name
+  // IS "cup_holder", since the hover pose is always derived from
+  // cup_holder's own TF, never from the requested instance's.
+  geometry_msgs::msg::TransformStamped cup_holder_tf;
+  try {
+    cup_holder_tf = tf_buffer_.lookupTransform(
+      planning_frame, "cup_holder", tf2::TimePointZero, tf2::durationFromSec(1.0));
+  } catch (const tf2::TransformException & ex) {
+    response->success = false;
+    response->message = "Could not look up 'cup_holder' in planning frame '" + planning_frame +
+      "' (needed as the hover anchor for '" + request->instance_name + "'): " + ex.what() +
+      " — has a ~/calibrate run completed and has depth_perception_node detected the "
+      "cup_holder yet?";
+    RCLCPP_ERROR(node_->get_logger(), "%s", response->message.c_str());
+    return;
+  }
+
+  geometry_msgs::msg::Pose hover_pose;
+  hover_pose.position.x = cup_holder_tf.transform.translation.x;
+  hover_pose.position.y = cup_holder_tf.transform.translation.y;
+  hover_pose.position.z = cup_holder_tf.transform.translation.z + hover_config_.hover_offset_m;
+  hover_pose.orientation = cup_holder_tf.transform.rotation;  // identity — position-only TF
+
+  if (!tracePath({hover_pose}, visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_JOINT_SPACE)) {
+    response->success = false;
+    response->message = "Failed to reach the hover pose above cup_holder (see log for the error)";
+    return;
+  }
+
+  // Stage 2: descend to the actual requested instance — cup_holder itself,
+  // or a specific hole_N — via a straight-line Cartesian move from
+  // directly above it.
   geometry_msgs::msg::TransformStamped instance_tf;
   try {
     instance_tf = tf_buffer_.lookupTransform(
@@ -729,30 +764,28 @@ void TrajectoryPlanner::handleMoveToInstance(
       tf2::durationFromSec(1.0));
   } catch (const tf2::TransformException & ex) {
     response->success = false;
-    response->message = "Could not look up '" + request->instance_name + "' in planning frame '" +
-      planning_frame + "': " + ex.what() +
-      " — has a ~/calibrate run completed and has depth_perception_node detected this "
-      "instance yet?";
+    response->message = "Reached the hover pose, but could not look up '" +
+      request->instance_name + "' in planning frame '" + planning_frame + "': " + ex.what();
     RCLCPP_ERROR(node_->get_logger(), "%s", response->message.c_str());
     return;
   }
 
-  geometry_msgs::msg::Pose target_pose;
-  target_pose.position.x = instance_tf.transform.translation.x;
-  target_pose.position.y = instance_tf.transform.translation.y;
-  target_pose.position.z = instance_tf.transform.translation.z;
-  // instance_tf's rotation is the identity quaternion (depth_perception_node
-  // publishes position-only TFs — see broadcastInstanceTfs()'s own doc
-  // comment, no orientation estimate exists for cup_holder/hole) — using
-  // it as-is here means the arm keeps whatever orientation the planner
-  // finds convenient for reaching this position, same as any other
-  // position-only goal.
-  target_pose.orientation = instance_tf.transform.rotation;
+  geometry_msgs::msg::Pose descend_pose;
+  descend_pose.position.x = instance_tf.transform.translation.x;
+  descend_pose.position.y = instance_tf.transform.translation.y;
+  descend_pose.position.z = hover_pose.position.z - hover_config_.descend_offset_m;
+  // Same orientation as the hover leg (identity, matching the
+  // position-only instance TFs — see broadcastInstanceTfs()'s own doc
+  // comment) — keeps the descent a straight vertical drop rather than
+  // also reorienting mid-approach.
+  descend_pose.orientation = hover_pose.orientation;
 
-  response->success = tracePath({target_pose}, polygon_config_.default_planning_mode);
+  response->success = tracePath(
+    {descend_pose}, visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN);
   response->message = response->success ?
-    "Moved to '" + request->instance_name + "'" :
-    "Failed to move to '" + request->instance_name + "' (see log for the error)";
+    "Moved to '" + request->instance_name + "' via the cup_holder hover approach" :
+    "Reached the hover pose, but failed to descend to '" + request->instance_name +
+    "' (see log for the error)";
 }
 
 StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const
@@ -801,6 +834,14 @@ PlannerConfig TrajectoryPlanner::loadPlannerConfigFromParams() const
   config.num_planning_attempts =
     static_cast<int>(node_->get_parameter("num_planning_attempts").as_int());
   config.cartesian_min_fraction = node_->get_parameter("cartesian_min_fraction").as_double();
+  return config;
+}
+
+HoverConfig TrajectoryPlanner::loadHoverConfigFromParams() const
+{
+  HoverConfig config;
+  config.hover_offset_m = node_->get_parameter("instance_hover_offset_m").as_double();
+  config.descend_offset_m = node_->get_parameter("instance_descend_offset_m").as_double();
   return config;
 }
 

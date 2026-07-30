@@ -118,6 +118,22 @@ trajectory_planner:
     # 4.0 on a live move_group instance.
     move_to_home_on_startup: true
 
+    # ~/move_to_instance's two-stage hover-then-descend approach
+    # (2026-07-30, see HoverConfig's doc comment) — every instance move
+    # (cup_holder or hole_1..hole_4) first goes, via joint-space planning,
+    # to a single shared pose directly above cup_holder's own TF (Z raised
+    # by instance_hover_offset_m), then descends, via a straight-line
+    # Cartesian move, instance_descend_offset_m below that hover pose's Z
+    # toward the actually-requested instance's own X/Y. Motivated by a
+    # request to make hole_1..hole_4 approaches consistent and predictable
+    # (always from directly above the holder) rather than each hole being
+    # reached by whatever path free-space planning happens to find from
+    # wherever the arm currently is. PLACEHOLDER — same starting values as
+    # sim, not yet re-tuned/verified against the real cell's actual
+    # reachable envelope above the holder.
+    instance_hover_offset_m: 0.20
+    instance_descend_offset_m: 0.15
+
     # Sequenced-goal stay/lift/standby timing (see ArmState /
     # TracePath.srv's is_sequenced_goal doc comment) — only applies to
     # ~/trace_path calls that explicitly set is_sequenced_goal: true.
