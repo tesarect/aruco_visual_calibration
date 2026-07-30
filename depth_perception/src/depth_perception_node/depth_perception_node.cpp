@@ -339,22 +339,26 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     // Both points are camera-frame, identity-rotation positions (see
     // BackProjectedPoint's doc comment) — plain vector subtraction gives
     // the hole's offset from the holder's centroid, still expressed along
-    // the camera frame's axes, before rotating into known_chain_frame.
-    tf2::Transform camera_to_offset(
-      tf2::Quaternion::getIdentity(),
-      tf2::Vector3(
-        window.last_stable.x - cup_holder_point.x,
-        window.last_stable.y - cup_holder_point.y,
-        window.last_stable.z - cup_holder_point.z));
-    const tf2::Transform cup_holder_to_hole = known_to_camera.getBasis() * camera_to_offset;
+    // the camera frame's axes. Matrix3x3::operator* rotates a bare Vector3
+    // (there is no Matrix3x3 * Transform overload — only Transform's own
+    // operator* composes two Transforms) — exactly what's needed here
+    // since camera_to_offset is translation-only anyway: rotate the offset
+    // vector into known_chain_frame's axes via known_to_camera's rotation,
+    // no translation component involved (a hole's offset FROM cup_holder
+    // must not be shifted by cup_holder's own position again).
+    const tf2::Vector3 camera_offset(
+      window.last_stable.x - cup_holder_point.x,
+      window.last_stable.y - cup_holder_point.y,
+      window.last_stable.z - cup_holder_point.z);
+    const tf2::Vector3 cup_holder_to_hole = known_to_camera.getBasis() * camera_offset;
 
     geometry_msgs::msg::TransformStamped hole_tf;
     hole_tf.header.stamp = header.stamp;
     hole_tf.header.frame_id = "cup_holder";
     hole_tf.child_frame_id = "hole_" + std::to_string(key.hole_number);
-    hole_tf.transform.translation.x = cup_holder_to_hole.getOrigin().x();
-    hole_tf.transform.translation.y = cup_holder_to_hole.getOrigin().y();
-    hole_tf.transform.translation.z = cup_holder_to_hole.getOrigin().z();
+    hole_tf.transform.translation.x = cup_holder_to_hole.x();
+    hole_tf.transform.translation.y = cup_holder_to_hole.y();
+    hole_tf.transform.translation.z = cup_holder_to_hole.z();
     // Position-only — no orientation estimate exists for cup_holder/hole
     // (see BackProjectedPoint's own doc comment: position only, no
     // orientation, no averaging-across-frames beyond the rolling window),
