@@ -91,4 +91,23 @@ depth_perception_node:
     # Z-only offset makes the position actually reachable — this is a
     # fast, explicitly-requested, fully reversible thing to try (set back
     # to 0.0 to undo), not a fix for the underlying reach limitation.
-    instance_tf_z_offset_m: 0.5
+    instance_tf_z_offset_m: 0.05
+
+    # Horizontal (X/Y) reachability clamp (2026-07-30, real-only — no
+    # entry in depth_perception_sim.yaml) — same "explicitly requested
+    # cheat, not a real fix" spirit as instance_tf_z_offset_m above, same
+    # live-tunable convention:
+    # `ros2 param set /depth_perception_node instance_tf_max_horizontal_dist_m <value>`
+    # with NO node restart needed. If cup_holder's horizontal distance
+    # from base_link exceeds this radius, its X/Y is scaled back toward
+    # base_link's origin (same direction, i.e. pulled straight toward the
+    # arm) until it sits exactly at this radius — Z is untouched (handled
+    # separately by instance_tf_z_offset_m above). 0.0 disables the clamp
+    # (today's raw, unclamped position). 0.45 is a starting value: under
+    # the UR3e's ~0.5m datasheet max_reach_m (trajectory_planner_real.yaml's
+    # own max_reach_m) with a small margin, since actual reachable envelope
+    # is typically somewhat less than the pure datasheet number once
+    # orientation/joint-limit constraints are factored in. DOES NOT make
+    # the real physical holder/table any closer — only changes the
+    # reported position the arm is told to reach.
+    instance_tf_max_horizontal_dist_m: 0.45

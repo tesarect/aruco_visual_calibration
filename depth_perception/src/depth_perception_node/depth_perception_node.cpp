@@ -314,6 +314,21 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
   double instance_tf_z_offset_m = 0.0;
   get_parameter_or("instance_tf_z_offset_m", instance_tf_z_offset_m, 0.0);
 
+  // Horizontal (X/Y) reachability clamp (2026-07-30) — same "explicitly
+  // requested cheat, not a real fix" spirit as instance_tf_z_offset_m
+  // above, live-read the same way. If cup_holder's horizontal distance
+  // from known_chain_frame's origin exceeds this radius, scale its X/Y
+  // back toward the origin (along the same direction, i.e. pulling it
+  // straight toward the arm's base) until it sits exactly at the radius —
+  // Z is untouched here (instance_tf_z_offset_m above already handles
+  // that axis separately). 0.0 (default) disables the clamp entirely —
+  // matches today's raw, unclamped position. Does NOT make the real
+  // physical holder/table any closer; it only changes the reported
+  // position the arm is told to reach, same caveat as the Z offset.
+  double instance_tf_max_horizontal_dist_m = 0.0;
+  get_parameter_or(
+    "instance_tf_max_horizontal_dist_m", instance_tf_max_horizontal_dist_m, 0.0);
+
   if (cup_holder_valid) {
     const auto & cup_holder_point = cup_holder_it->second.last_stable;
     tf2::Transform camera_to_cup_holder(
@@ -321,12 +336,25 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
       tf2::Vector3(cup_holder_point.x, cup_holder_point.y, cup_holder_point.z));
     const tf2::Transform known_to_cup_holder = known_to_camera * camera_to_cup_holder;
 
+    double cup_holder_x = known_to_cup_holder.getOrigin().x();
+    double cup_holder_y = known_to_cup_holder.getOrigin().y();
+
+    if (instance_tf_max_horizontal_dist_m > 0.0) {
+      const double horizontal_dist = std::sqrt(
+        cup_holder_x * cup_holder_x + cup_holder_y * cup_holder_y);
+      if (horizontal_dist > instance_tf_max_horizontal_dist_m) {
+        const double scale = instance_tf_max_horizontal_dist_m / horizontal_dist;
+        cup_holder_x *= scale;
+        cup_holder_y *= scale;
+      }
+    }
+
     geometry_msgs::msg::TransformStamped cup_holder_tf;
     cup_holder_tf.header.stamp = header.stamp;
     cup_holder_tf.header.frame_id = config_.known_chain_frame;
     cup_holder_tf.child_frame_id = "cup_holder";
-    cup_holder_tf.transform.translation.x = known_to_cup_holder.getOrigin().x();
-    cup_holder_tf.transform.translation.y = known_to_cup_holder.getOrigin().y();
+    cup_holder_tf.transform.translation.x = cup_holder_x;
+    cup_holder_tf.transform.translation.y = cup_holder_y;
     // instance_tf_z_offset_m (2026-07-30, default 0.0, live-read above) —
     // does NOT reduce cup_holder's actual distance from known_chain_frame,
     // only the reported/broadcast Z. hole_1..hole_4 inherit this

@@ -110,13 +110,15 @@ calibration_broadcaster_node:
     # Runs once after polygon/random sampling is otherwise done (early-stop
     # or full count) — returns to cal_ready, then probes pitch down/up and
     # roll left/right, one extra sample each, before finishCalibration. See
-    # CalibrationBroadcasterNode::runOrientationSweepPhase. Enabled on real
-    # — motivated directly by a live run (2026-07-29) that finished with
+    # CalibrationBroadcasterNode::runOrientationSweepPhase. Was enabled on
+    # real — motivated by a live run (2026-07-29) that finished with
     # 37.0deg max / 14.9deg mean orientation spread: neither the polygon
     # nor random phase varies orientation at all (randomPoseNear only
-    # offsets X/Y/Z), so this is the only source of orientation-diverse
-    # samples today.
-    orientation_sweep_enabled: true
+    # offsets X/Y/Z), so this was the only source of orientation-diverse
+    # samples. Disabled (2026-07-30, explicit request) — turns off the
+    # extra pitch/roll probing motion entirely; calibration now only does
+    # the polygon + random (position-only) phases, same as sim.
+    orientation_sweep_enabled: false
     # Pitch/roll offset (degrees) for all 4 sweep probes. PLACEHOLDER —
     # starting value, not yet tuned against real accuracy; a probe losing
     # marker visibility live is a sign this is too large for cal_ready's
