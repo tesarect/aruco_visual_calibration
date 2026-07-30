@@ -6,8 +6,8 @@ Panels:
       Expanded:
         - /MotionPlanning1/Scene Geometry1
         - /TF1/Frames1
-      Splitter Ratio: 0.5
-    Tree Height: 142
+      Splitter Ratio: 0.6823956370353699
+    Tree Height: 349
   - Class: rviz_common/Help
     Name: Help
   - Class: rviz_common/Views
@@ -371,19 +371,130 @@ Visualization Manager:
       Value: true
       Velocity_Scaling_Factor: 0.1
     - Class: rviz_default_plugins/TF
-      Enabled: false
+      Enabled: true
       Frame Timeout: 15
       Frames:
         All Enabled: false
+        base:
+          Value: false
+        base_link:
+          Value: true
+        base_link_inertia:
+          Value: false
+        camera_calibration_sample:
+          Value: false
+        cup_holder:
+          Value: true
+        flange:
+          Value: false
+        forearm_link:
+          Value: false
+        ft_frame:
+          Value: false
+        hole_3:
+          Value: true
+        hole_4:
+          Value: true
+        rg2_gripper_aruco_link:
+          Value: false
+        rg2_gripper_base_link:
+          Value: false
+        rg2_gripper_left_finger:
+          Value: false
+        rg2_gripper_left_thumb:
+          Value: false
+        rg2_gripper_right_finger:
+          Value: false
+        rg2_gripper_right_thumb:
+          Value: false
+        shoulder_link:
+          Value: false
+        tool0:
+          Value: false
+        upper_arm_link:
+          Value: false
+        world:
+          Value: false
+        wrist_1_link:
+          Value: false
+        wrist_2_link:
+          Value: false
+        wrist_3_link:
+          Value: false
+        wrist_rgbd_camera_depth_frame:
+          Value: false
+        wrist_rgbd_camera_depth_optical_frame:
+          Value: true
+        wrist_rgbd_camera_depth_optical_frame_calibrated:
+          Value: true
+        wrist_rgbd_camera_fisheye_frame:
+          Value: false
+        wrist_rgbd_camera_fisheye_optical_frame:
+          Value: false
+        wrist_rgbd_camera_left_ir_frame:
+          Value: false
+        wrist_rgbd_camera_left_ir_optical_frame:
+          Value: false
+        wrist_rgbd_camera_link:
+          Value: false
+        wrist_rgbd_camera_right_ir_frame:
+          Value: false
+        wrist_rgbd_camera_right_ir_optical_frame:
+          Value: false
       Marker Scale: 0.5
       Name: TF
       Show Arrows: true
       Show Axes: true
       Show Names: true
       Tree:
-        {}
+        world:
+          base_link:
+            base:
+              {}
+            base_link_inertia:
+              shoulder_link:
+                upper_arm_link:
+                  forearm_link:
+                    wrist_1_link:
+                      wrist_2_link:
+                        wrist_3_link:
+                          flange:
+                            tool0:
+                              rg2_gripper_base_link:
+                                rg2_gripper_aruco_link:
+                                  {}
+                                rg2_gripper_left_finger:
+                                  rg2_gripper_left_thumb:
+                                    {}
+                                rg2_gripper_right_finger:
+                                  rg2_gripper_right_thumb:
+                                    {}
+                          ft_frame:
+                            {}
+            camera_calibration_sample:
+              {}
+            cup_holder:
+              hole_3:
+                {}
+              hole_4:
+                {}
+            wrist_rgbd_camera_depth_optical_frame_calibrated:
+              {}
+            wrist_rgbd_camera_link:
+              wrist_rgbd_camera_depth_frame:
+                wrist_rgbd_camera_depth_optical_frame:
+                  {}
+                wrist_rgbd_camera_fisheye_frame:
+                  wrist_rgbd_camera_fisheye_optical_frame:
+                    {}
+                wrist_rgbd_camera_left_ir_frame:
+                  wrist_rgbd_camera_left_ir_optical_frame:
+                    {}
+                wrist_rgbd_camera_right_ir_frame:
+                  wrist_rgbd_camera_right_ir_optical_frame:
+                    {}
       Update Interval: 0
-      Value: false
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: false
       Name: arucoMarker
@@ -429,7 +540,7 @@ Visualization Manager:
       Color: 255; 255; 255
       Color Transformer: RGB8
       Decay Time: 0
-      Enabled: true
+      Enabled: false
       Invert Rainbow: false
       Max Color: 255; 255; 255
       Max Intensity: 4096
@@ -450,7 +561,7 @@ Visualization Manager:
         Value: /wrist_rgbd_depth_sensor/points
       Use Fixed Frame: true
       Use rainbow: true
-      Value: true
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -476,18 +587,18 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: -0.1911935955286026
-        Y: 0.3182968497276306
-        Z: 0.11656501144170761
+        X: -0.21190106868743896
+        Y: 0.2767220735549927
+        Z: -0.26840147376060486
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5552037358283997
+      Pitch: 0.23520371317863464
       Target Frame: world
       Value: Orbit (rviz_default_plugins)
-      Yaw: 2.550187110900879
+      Yaw: 2.5351874828338623
     Saved: ~
 Window Geometry:
   Displays:
@@ -501,7 +612,7 @@ Window Geometry:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000002000000000000022900000304fc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c0069006400650072000000003e000000410000004100fffffffb000000100044006900730070006c006100790073010000003e000000cb000000cb00fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e0067010000010f000001880000017d00fffffffb0000000800480065006c0070000000029a0000006e0000006f00fffffffb0000001a006f00700074006900630061006c00430061006d006500720061010000029d000000a50000002800ffffff00000001000001b600000304fc0200000001fb0000000a00560069006500770073000000003e00000304000000a500ffffff000004110000030400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000022900000304fc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c0069006400650072000000003e000000410000004100fffffffb000000100044006900730070006c006100790073010000003e0000019a000000cb00fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e0067000000010f0000017d0000017d00fffffffb0000000800480065006c0070000000029a0000006e0000006f00fffffffb0000001a006f00700074006900630061006c00430061006d00650072006101000001de000001640000002800ffffff00000001000001b600000304fc0200000001fb0000000a00560069006500770073000000003e00000304000000a500ffffff000004110000030400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: true
   Width: 1600

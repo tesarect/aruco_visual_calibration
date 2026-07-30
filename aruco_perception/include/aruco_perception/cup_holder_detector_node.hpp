@@ -220,6 +220,27 @@ private:
   static std::vector<CircleCandidate> findCircularContours(
     const cv::Mat & binary, double min_area_px, double min_circularity);
 
+  /// Re-fits `candidate.contour` with cv::fitEllipse and overwrites cx/cy/
+  /// radius in place with the ellipse's own center and the average of its
+  /// two semi-axes (radius unchanged if the contour has < 5 points —
+  /// fitEllipse's own minimum). REPLACES the cup_holder pass's initial
+  /// cv::minEnclosingCircle fit (2026-07-30): live-tested that the disc's
+  /// Canny/dilate contour is slightly non-circular (circularity ~0.78, not
+  /// 1.0) because it also picks up a bit of the disc's own 3D
+  /// cylinder-side/rim edge below the flat top surface, not just the flat
+  /// top's true boundary — minEnclosingCircle stretches to cover that
+  /// outlier bulge (radius 113.9px in the confirmed test frame), visibly
+  /// overshooting the wall at the disc's top edge and the flat-top/rim
+  /// seam at the bottom. fitEllipse's least-squares fit is far less
+  /// sensitive to a few outlier boundary points than "smallest circle
+  /// containing every point" — confirmed to give a tighter, more accurate
+  /// radius (~110.6px average semi-axis, vs. the same contour's
+  /// minEnclosingCircle radius of 113.9px) that better matches the disc's
+  /// true flat-top boundary by eye. Only applied to the cup_holder — the 4
+  /// holes are small, clean, near-perfect circles already (no equivalent
+  /// bulge observed), so minEnclosingCircle stays unchanged for them.
+  static void refineCupHolderCircle(CircleCandidate & candidate);
+
   /// Ported from yolo_marker_bridge_node.py's assign_hole_quadrants() —
   /// see class doc comment for the sim-specific caveat on this algorithm.
   /// Mutates each element of `holes` in place, setting hole_number.

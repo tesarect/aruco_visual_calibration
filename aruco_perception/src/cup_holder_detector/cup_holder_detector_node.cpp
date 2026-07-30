@@ -84,6 +84,26 @@ std::vector<CupHolderDetectorNode::CircleCandidate> CupHolderDetectorNode::findC
   return candidates;
 }
 
+void CupHolderDetectorNode::refineCupHolderCircle(CircleCandidate & candidate)
+{
+  // fitEllipse requires >= 5 points — every contour reaching this point
+  // already passed cup_holder_min_area_px (default 400px^2), which in
+  // practice always yields far more than 5 boundary points, but guard
+  // anyway rather than let OpenCV throw.
+  if (candidate.contour.size() < 5) {
+    return;
+  }
+  const cv::RotatedRect ellipse = cv::fitEllipse(candidate.contour);
+  candidate.cx = ellipse.center.x;
+  candidate.cy = ellipse.center.y;
+  // size.width/height are the full major/minor axis lengths — average the
+  // two SEMI-axes (half of each) into one representative radius. See
+  // this function's declaration comment for why: minEnclosingCircle
+  // stretches to cover a rim/cylinder-edge outlier bulge in the contour,
+  // fitEllipse's least-squares fit does not.
+  candidate.radius = (ellipse.size.width + ellipse.size.height) / 4.0;
+}
+
 void CupHolderDetectorNode::assignHoleQuadrants(
   std::vector<visual_calibration_msgs::msg::Detection2D> & holes,
   bool cup_holder_found, double cup_holder_cx, double cup_holder_cy)
@@ -195,7 +215,7 @@ void CupHolderDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSh
     cup_holder_dilate_kernel_px, cup_holder_dilate_kernel_px, CV_8U);
   cv::dilate(cup_holder_edges, cup_holder_edges_dilated, dilate_kernel);
 
-  const std::vector<CircleCandidate> cup_holder_candidates = findCircularContours(
+  std::vector<CircleCandidate> cup_holder_candidates = findCircularContours(
     cup_holder_edges_dilated, cup_holder_min_area_px, cup_holder_min_circularity);
 
   // Canny+dilate on a rim produces TWO concentric contours per real edge
@@ -204,6 +224,12 @@ void CupHolderDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSh
   // sort naturally picks the outer one as front() without extra dedup
   // logic; the inner duplicate is simply never used.
   const bool cup_holder_found = !cup_holder_candidates.empty();
+  if (cup_holder_found) {
+    // Re-fit the winning contour with fitEllipse — see
+    // refineCupHolderCircle's doc comment for why minEnclosingCircle
+    // overshoots the disc's true flat-top boundary.
+    refineCupHolderCircle(cup_holder_candidates.front());
+  }
   const CircleCandidate * cup_holder =
     cup_holder_found ? &cup_holder_candidates.front() : nullptr;
 
