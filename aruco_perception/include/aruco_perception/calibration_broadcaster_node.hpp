@@ -184,6 +184,42 @@ struct CalibrationBroadcasterConfig
   // outlier_orientation_threshold_deg (5.0deg) for consistency, but an
   // independently-tunable value.
   double clustering_bucket_angle_deg = 5.0;
+
+  // --- Per-run yaw/roll clamp (2026-07-30) ---
+  // The wall-mounted D415 (real) is physically fixed in yaw (cannot rotate
+  // sideways without being unbolted/re-mounted) and effectively fixed in
+  // roll (only minor, non-deliberate human-jostle variation) — pitch (tilt
+  // up/down) is the only axis genuinely expected to vary. Confirmed as an
+  // already-true structural fact for THIS project, not a new assumption:
+  // sim's own ground-truth camera mount (base_link -> wrist_rgbd_camera_link,
+  // from ur.urdf.xacro's sensor_r430 instantiation) has a fixed rpy=(0,
+  // pi/3, pi/2) — roll and yaw are exact mechanical constants there too,
+  // only pitch would ever legitimately change. aruco_detector_node does
+  // zero corner/pose smoothing (confirmed 2026-07-30 investigation) — every
+  // frame's raw ArUco-derived orientation flows straight into
+  // collected_orientations_, so any yaw/roll variation observed across a
+  // run's samples is corner-detection noise being misread as real
+  // orientation change, not signal.
+  //
+  // When true, finishCalibration() computes a circular mean of yaw and of
+  // roll across ALL collected samples THIS RUN (not a hardcoded constant —
+  // real's true mount yaw/roll are unmeasured, unlike sim's URDF-given
+  // values, so a per-run self-averaged reference is used instead), then
+  // re-encodes every sample's orientation as (mean_roll, that sample's own
+  // original pitch, mean_yaw) BEFORE rejectOutliers()/averaging runs on
+  // them — see clampYawRoll()'s own doc comment for the full algorithm.
+  // Pitch is deliberately left untouched per-sample: it is the one axis
+  // that could carry real signal (e.g. a future orientation-sweep phase
+  // deliberately varying pitch), so only the existing outlier-rejection/
+  // averaging logic (unchanged) should ever filter it, not this clamp.
+  //
+  // Default false in BOTH sim and real yaml — this is an opt-in hypothesis
+  // test, not a proven fix yet, and must not silently change today's
+  // behavior. Restart-only (cached here like every other field in this
+  // struct, unlike use_clustering_average above) — the clamp's own
+  // per-run mean computation still runs fresh every finishCalibration()
+  // call regardless; only the on/off switch itself is restart-only.
+  bool yaw_roll_clamp_enabled = false;
 };
 
 /// Orchestrates calibration: fetches waypoints AND their center pose from
@@ -472,6 +508,33 @@ private:
   /// (returns false) if fewer than 2 samples are collected yet (spread is
   /// meaningless with only 1 sample).
   bool stableAgreementReached();
+
+  /// If config_.yaw_roll_clamp_enabled (see that field's own doc comment
+  /// for the full motivation): decomposes every orientation in
+  /// `orientations` to roll/pitch/yaw via tf2::Matrix3x3::getRPY() —
+  /// orientations here are known_chain_frame -> camera rotations (i.e.
+  /// base_link -> camera on real), and base_link is REP-103-aligned
+  /// (X forward, Y left, Z up, per the UR xacro's own comment), so
+  /// getRPY's standard Z-Y-X intrinsic convention gives yaw = rotation
+  /// about base_link's vertical (the axis a wall mount physically cannot
+  /// rotate about), pitch = rotation about Y (tilt up/down, the one real
+  /// DOF), roll = rotation about X (in-plane image tilt, also physically
+  /// fixed by a rigid wall mount). This is DIFFERENT from
+  /// rotatedPoseNear()'s local end-effector-frame axis convention (that
+  /// function's own comment flags its axis mapping as unverified) — do
+  /// not conflate the two; this operates on an already-computed
+  /// base_link-frame sample rotation, not a commanded arm pose.
+  ///
+  /// Computes a CIRCULAR mean (atan2(mean(sin), mean(cos)), NOT a naive
+  /// arithmetic mean — angles wrap at +-pi) of yaw and of roll across
+  /// every orientation in `orientations`, then returns a new vector where
+  /// every sample's yaw and roll are replaced by those two run-wide means
+  /// while each sample's own individually-measured pitch is left
+  /// untouched. Returns `orientations` unchanged if
+  /// config_.yaw_roll_clamp_enabled is false, or if `orientations` has
+  /// fewer than 1 element (mean is meaningless/trivial).
+  std::vector<tf2::Quaternion> clampYawRoll(
+    const std::vector<tf2::Quaternion> & orientations) const;
 
   /// If config_.outlier_rejection_enabled: computes each collected
   /// sample's position deviation (cm, from the unfiltered arithmetic mean)

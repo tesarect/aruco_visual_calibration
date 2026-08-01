@@ -11,6 +11,7 @@
 #include <tuple>
 #include <vector>
 
+#include <tf2/LinearMath/Matrix3x3.h>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
@@ -834,6 +835,62 @@ bool CalibrationBroadcasterNode::stableAgreementReached()
   return stable_agreement_count_ >= config_.stable_agreement_count;
 }
 
+std::vector<tf2::Quaternion> CalibrationBroadcasterNode::clampYawRoll(
+  const std::vector<tf2::Quaternion> & orientations) const
+{
+  if (!config_.yaw_roll_clamp_enabled || orientations.size() < 1) {
+    return orientations;
+  }
+
+  // Circular mean — a naive arithmetic mean of angles breaks near the
+  // +-pi wraparound (e.g. mean of +179deg and -179deg should be 180deg,
+  // not 0deg). atan2(mean(sin), mean(cos)) is the standard fix.
+  double yaw_sin_sum = 0.0, yaw_cos_sum = 0.0;
+  double roll_sin_sum = 0.0, roll_cos_sum = 0.0;
+
+  std::vector<std::array<double, 3>> rpy_per_sample;
+  rpy_per_sample.reserve(orientations.size());
+
+  for (const tf2::Quaternion & q : orientations) {
+    double roll = 0.0, pitch = 0.0, yaw = 0.0;
+    tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
+    rpy_per_sample.push_back({roll, pitch, yaw});
+
+    yaw_sin_sum += std::sin(yaw);
+    yaw_cos_sum += std::cos(yaw);
+    roll_sin_sum += std::sin(roll);
+    roll_cos_sum += std::cos(roll);
+  }
+
+  const double mean_yaw = std::atan2(yaw_sin_sum, yaw_cos_sum);
+  const double mean_roll = std::atan2(roll_sin_sum, roll_cos_sum);
+
+  RCLCPP_INFO(
+    get_logger(),
+    "clampYawRoll: run-wide mean yaw=%.2fdeg, mean roll=%.2fdeg (computed from %zu samples) — "
+    "every sample's yaw/roll replaced with these, pitch left as individually measured",
+    mean_yaw * 180.0 / M_PI, mean_roll * 180.0 / M_PI, orientations.size());
+
+  std::vector<tf2::Quaternion> clamped;
+  clamped.reserve(orientations.size());
+  for (size_t i = 0; i < orientations.size(); ++i) {
+    const double original_pitch = rpy_per_sample[i][1];
+    tf2::Quaternion clamped_q;
+    clamped_q.setRPY(mean_roll, original_pitch, mean_yaw);
+    clamped.push_back(clamped_q);
+
+    RCLCPP_DEBUG(
+      get_logger(),
+      "clampYawRoll: sample %zu pre-clamp rpy=(%.2f, %.2f, %.2f)deg -> post-clamp "
+      "rpy=(%.2f, %.2f, %.2f)deg",
+      i, rpy_per_sample[i][0] * 180.0 / M_PI, rpy_per_sample[i][1] * 180.0 / M_PI,
+      rpy_per_sample[i][2] * 180.0 / M_PI, mean_roll * 180.0 / M_PI,
+      original_pitch * 180.0 / M_PI, mean_yaw * 180.0 / M_PI);
+  }
+
+  return clamped;
+}
+
 std::vector<size_t> CalibrationBroadcasterNode::rejectOutliers() const
 {
   const size_t count = collected_positions_.size();
@@ -999,6 +1056,15 @@ ClusteredPose CalibrationBroadcasterNode::computeClusteredPose(
 void CalibrationBroadcasterNode::finishCalibration(
   const std::shared_ptr<GoalHandleCalibrate> & goal_handle)
 {
+  // Runs BEFORE rejectOutliers()/averaging, so both operate on a yaw/roll
+  // signal with fake (corner-detection-noise-induced) variation already
+  // removed — see clampYawRoll()'s and config_.yaw_roll_clamp_enabled's
+  // own doc comments. Overwrites collected_orientations_ in place (a
+  // no-op when the clamp is disabled — clampYawRoll returns its input
+  // unchanged) since rejectOutliers()/every downstream call reads that
+  // member vector directly, not a passed-in argument.
+  collected_orientations_ = clampYawRoll(collected_orientations_);
+
   const std::vector<size_t> kept_indices = rejectOutliers();
   const bool rejection_changed_anything = kept_indices.size() != collected_positions_.size();
 
@@ -1212,6 +1278,8 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
   // CalibrationBroadcasterConfig's own comment on why it must stay a live
   // get_parameter() call at the point of use in finishCalibration(),
   // never cached into this struct.
+
+  config.yaw_roll_clamp_enabled = get_parameter("yaw_roll_clamp_enabled").as_bool();
 
   return config;
 }

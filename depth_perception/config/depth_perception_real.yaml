@@ -91,7 +91,12 @@ depth_perception_node:
     # Z-only offset makes the position actually reachable — this is a
     # fast, explicitly-requested, fully reversible thing to try (set back
     # to 0.0 to undo), not a fix for the underlying reach limitation.
-    instance_tf_z_offset_m: 0.05
+    # Turned OFF (2026-07-30) — this masks bad TF placement rather than
+    # fixing it; leave at 0.0 while working through the accuracy
+    # investigation in _errors/finetuning_modification_floor_plan.txt.
+    # Re-enable only if reachability (not accuracy) becomes the immediate
+    # blocker again.
+    instance_tf_z_offset_m: 0.0
 
     # Horizontal (X/Y) reachability clamp (2026-07-30, real-only — no
     # entry in depth_perception_sim.yaml) — same "explicitly requested
@@ -110,4 +115,6 @@ depth_perception_node:
     # orientation/joint-limit constraints are factored in. DOES NOT make
     # the real physical holder/table any closer — only changes the
     # reported position the arm is told to reach.
-    instance_tf_max_horizontal_dist_m: 0.45
+    # Turned OFF (2026-07-30) — same reasoning as instance_tf_z_offset_m
+    # above; 0.0 disables the clamp entirely.
+    instance_tf_max_horizontal_dist_m: 0.0

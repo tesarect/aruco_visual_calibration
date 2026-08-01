@@ -180,3 +180,23 @@ calibration_broadcaster_node:
     # Same 5.0deg starting value as orientation_spread_tolerance_deg/
     # outlier_orientation_threshold_deg above, independently tunable.
     clustering_bucket_angle_deg: 5.0
+
+    # --- Per-run yaw/roll clamp (2026-07-30) ---
+    # The wall-mounted D415 is physically fixed in yaw (bolted to a wall,
+    # cannot rotate sideways) and effectively fixed in roll (only minor
+    # human-jostle variation) — pitch is the only axis genuinely expected
+    # to vary. aruco_detector_node does zero corner/pose smoothing, so any
+    # yaw/roll variation observed across a run's samples is
+    # corner-detection noise being misread as real orientation change.
+    # When true, finishCalibration() computes a circular mean of yaw and
+    # of roll across THIS RUN's own samples (not a hardcoded constant —
+    # real's true mount yaw/roll are unmeasured), then re-encodes every
+    # sample's orientation as (mean_roll, that sample's own pitch,
+    # mean_yaw) BEFORE outlier rejection/averaging runs — see
+    # CalibrationBroadcasterConfig::yaw_roll_clamp_enabled's own doc
+    # comment for the full algorithm. Default false: this is an opt-in
+    # hypothesis test (2026-07-30 discussion, see
+    # _errors/finetuning_modification_floor_plan.txt), not a proven fix
+    # yet — flip to true to test live, compare max_spread_deg/
+    # mean_spread_deg before vs. after with the same physical setup.
+    yaw_roll_clamp_enabled: false

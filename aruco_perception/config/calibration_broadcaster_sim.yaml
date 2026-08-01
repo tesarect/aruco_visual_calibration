@@ -102,3 +102,11 @@ calibration_broadcaster_node:
     use_clustering_average: false
     clustering_bucket_size_cm: 2.0
     clustering_bucket_angle_deg: 5.0
+
+    # --- Per-run yaw/roll clamp (2026-07-30) ---
+    # See calibration_broadcaster_real.yaml's own comment for the full
+    # rationale — an opt-in hypothesis test for real-robot corner-
+    # detection noise showing up as fake yaw/roll variation. Kept off on
+    # sim: sim's ground-truth camera TF already lets accuracy be verified
+    # directly, and this is specifically a real-robot mitigation.
+    yaw_roll_clamp_enabled: false
