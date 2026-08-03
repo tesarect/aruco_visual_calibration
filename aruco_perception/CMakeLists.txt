@@ -18,6 +18,12 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(rclcpp_action REQUIRED)
 find_package(visual_calibration_msgs REQUIRED)
 find_package(OpenCV REQUIRED COMPONENTS aruco calib3d)
+# Markley's method (orientation_averaging.cpp's kMarkley branch, added
+# 2026-08-01) needs a symmetric 4x4 eigenvalue solve — first Eigen usage
+# anywhere in this package. eigen3_cmake_module provides Eigen3's CMake
+# config on ROS 2 systems where Eigen doesn't ship one directly.
+find_package(eigen3_cmake_module REQUIRED)
+find_package(Eigen3 REQUIRED)
 
 add_executable(image_subscriber_node
   src/image_subscriber/image_subscriber_node.cpp
@@ -83,6 +89,7 @@ ament_target_dependencies(calibration_broadcaster_node
   tf2
   tf2_ros
   tf2_geometry_msgs
+  Eigen3
 )
 
 install(TARGETS

@@ -19,10 +19,14 @@ enum class OrientationAveragingMethod
   /// (true here — same physical marker/camera, only per-frame noise
   /// differs) — not a proper SO(3) average for widely-spread samples.
   kSumNormalize,
-  /// Markley's eigenvalue method (proper SO(3) average, robust to
-  /// widely-spread samples) — NOT YET IMPLEMENTED. Reserved so priority
-  /// configs can name it now; averageQuaternions throws
-  /// std::invalid_argument if this is actually selected.
+  /// Markley's eigenvalue method (Markley, Cheng, Crassidis, Oshman,
+  /// "Averaging Quaternions," JGCD 2007) — the proper SO(3) average,
+  /// robust to widely-spread samples, unlike kSumNormalize above.
+  /// Computes the dominant eigenvector of a 4x4 symmetric matrix built
+  /// from the samples' weighted outer products (see orientation_averaging
+  /// .cpp's markleyAverage() for the full algorithm and Eigen usage —
+  /// this package's first, added 2026-08-01). Equal-weighted (1/N) today;
+  /// no per-sample weighting exists anywhere in this codebase yet.
   kMarkley,
 };
 
@@ -46,8 +50,7 @@ OrientationAveragingMethod selectAveragingMethod(
   int sum_normalize_priority, int markley_priority);
 
 /// Averages `samples` (must be non-empty) using `method`. Throws
-/// std::invalid_argument if method is kMarkley (not yet implemented) or if
-/// samples is empty.
+/// std::invalid_argument if samples is empty.
 OrientationAveragingResult averageQuaternions(
   const std::vector<tf2::Quaternion> & samples,
   OrientationAveragingMethod method);

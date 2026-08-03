@@ -131,13 +131,16 @@ trajectory_planner:
     # 4.0 on a live move_group instance.
     move_to_home_on_startup: true
 
-    # ~/move_to_instance's two-stage hover-then-descend approach
-    # (2026-07-30, see HoverConfig's doc comment) — every instance move
-    # (cup_holder or hole_1..hole_4) first goes, via joint-space planning,
-    # to a single shared pose directly above cup_holder's own TF (Z raised
-    # by instance_hover_offset_m), then descends, via a straight-line
-    # Cartesian move, instance_descend_offset_m below that hover pose's Z
-    # toward the actually-requested instance's own X/Y. Motivated by a
+    # ~/move_to_instance's hover-descend-stay-return-preset approach
+    # (2026-07-30, extended 2026-08-02, see HoverConfig's doc comment) —
+    # every instance move (cup_holder or hole_1..hole_4) first goes
+    # (Cartesian first, joint-space fallback — was joint-space-only until
+    # 2026-08-02) to a single shared pose directly above cup_holder's own
+    # TF (Z raised by instance_hover_offset_m), then descends, via a
+    # straight-line Cartesian move, instance_descend_offset_m below that
+    # hover pose's Z toward the actually-requested instance's own X/Y,
+    # stays instance_stay_seconds, returns to the SAME hover pose, then
+    # optionally moves to instance_return_preset_name. Motivated by a
     # request to make hole_1..hole_4 approaches consistent and predictable
     # (always from directly above the holder) rather than each hole being
     # reached by whatever path free-space planning happens to find from
@@ -152,12 +155,23 @@ trajectory_planner:
     # looking down at a countertop BELOW the arm's own base — unlike sim,
     # where base_link's origin sits near the tabletop already — so a hover
     # offset tuned only against sim's geometry doesn't carry over. 0.40m
-    # is a first real-cell attempt, not a measured value — re-tune via
-    # `ros2 param set /trajectory_planner instance_hover_offset_m <value>`
-    # (live, no restart needed) if planning still fails or still can't
-    # clear the table/mount.
+    # is a first real-cell attempt, not a measured value. NOTE: this field
+    # (like every other field in HoverConfig) is read once at node
+    # construction via loadHoverConfigFromParams(), NOT live — a param
+    # file change or `ros2 param set` requires a node restart to take
+    # effect, despite an earlier version of this comment claiming
+    # otherwise.
     instance_hover_offset_m: 0.40
     instance_descend_offset_m: 0.15
+    # How long (seconds) to stay at the descended goal before returning to
+    # the hover pose. PLACEHOLDER — starting value, exact number left as
+    # an open decision (see _errors/finetuning_modification_floor_plan.txt).
+    instance_stay_seconds: 3.0
+    # Preset (from preset_poses_real.yaml) to move to after returning to
+    # the hover pose, as the sequence's final step. Empty string disables
+    # this step entirely. Exact name ("home" vs "standby") explicitly
+    # deferred as of 2026-08-02 — left empty until decided.
+    instance_return_preset_name: ""
 
     # Sequenced-goal stay/lift/standby timing (see ArmState /
     # TracePath.srv's is_sequenced_goal doc comment) — only applies to

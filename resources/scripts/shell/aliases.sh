@@ -535,6 +535,7 @@ yoloenv() {
 
 vcpkgbuild() {
     local pkg="${1}"
+    fixscriptperms
     cd ~/ros2_ws || return
     colcon build --packages-up-to "$pkg"
     source install/setup.bash
@@ -542,12 +543,14 @@ vcpkgbuild() {
 
 vcpkgbuildsymlink() {
     local pkg="${1}"
+    fixscriptperms
     cd ~/ros2_ws || return
     colcon build --packages-up-to "$pkg" --symlink-install
     source install/setup.bash
 }
 
 vcbuild() {
+    fixscriptperms
     cd ~/ros2_ws || return
     # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception orchestrator calibration_validation real_ur3e_description
     colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs
@@ -555,6 +558,7 @@ vcbuild() {
 }
 
 vcbuildsymlink() {
+    fixscriptperms
     cd ~/ros2_ws || return
     # colcon build --packages-up-to aruco_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception orchestrator calibration_validation real_ur3e_description --symlink-install
     colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs --symlink-install
@@ -587,6 +591,7 @@ vccleanbuild() {
         install/real_ur3e_description \
         install/robotiq_85_msgs
 
+    fixscriptperms
     colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs
     source install/setup.bash
 }
@@ -617,6 +622,7 @@ vccleanbuildsymlink() {
         install/real_ur3e_description \
         install/robotiq_85_msgs
 
+    fixscriptperms
     colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs --symlink-install
     source install/setup.bash
 }
@@ -628,6 +634,7 @@ allcleanbuild() {
     rm -rf install/
     rm -rf log/
 
+    fixscriptperms
     colcon build
     source install/setup.bash
 }

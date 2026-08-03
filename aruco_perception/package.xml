@@ -20,6 +20,13 @@
   <depend>rclcpp_action</depend>
   <depend>visual_calibration_msgs</depend>
   <depend>libopencv-dev</depend>
+  <!-- Markley's method (orientation_averaging.cpp's kMarkley branch, added
+       2026-08-01) needs a symmetric 4x4 eigenvalue solve — first Eigen
+       usage anywhere in this package. eigen3_cmake_module provides
+       Eigen3's CMake config on ROS 2 systems where Eigen doesn't ship
+       one directly. -->
+  <depend>eigen</depend>
+  <depend>eigen3_cmake_module</depend>
 
   <!-- New launch/bringup_aruco_pipeline.launch.py (staged/ordered bringup,
        see visual_calibration_moveit/launch/bringup_full_sim_README.md)

@@ -745,6 +745,20 @@ void TrajectoryPlanner::handleMoveToPreset(
     "Failed to move to preset '" + request->name + "' (see log for the error)";
 }
 
+namespace
+{
+/// Straight-line distance from the planning frame's own origin (0,0,0) to
+/// pose — the planning frame IS the reach-check reference point (e.g.
+/// base_link), so this is just the pose's own translation magnitude, no
+/// separate origin lookup needed.
+double distanceFromPlanningOrigin(const geometry_msgs::msg::Pose & pose)
+{
+  return std::sqrt(
+    pose.position.x * pose.position.x + pose.position.y * pose.position.y +
+    pose.position.z * pose.position.z);
+}
+}  // namespace
+
 void TrajectoryPlanner::handleMoveToInstance(
   const std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Request> request,
   std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Response> response)
@@ -758,7 +772,33 @@ void TrajectoryPlanner::handleMoveToInstance(
   // actually configured with).
   const std::string & planning_frame = move_group_interface_.getPlanningFrame();
 
-  // Stage 1: hover above cup_holder itself — the SAME shared approach
+  // Logged unconditionally (not just on failure) for every pose this
+  // handler attempts to plan to (2026-08-02) — see this method's own doc
+  // comment. standoff_config_.max_reach_m is the same UR3e datasheet
+  // reach figure planAndExecuteInFrontOf already checks (trajectory_planner
+  // .cpp's distance_from_origin check) — reused here as a soft signal
+  // only (logged, never refused — max_reach_m is an approximation, not a
+  // guaranteed cutoff; the real planner still gets the final say).
+  auto logReachability = [this](const std::string & label, const geometry_msgs::msg::Pose & pose) {
+    const double distance_m = distanceFromPlanningOrigin(pose);
+    if (distance_m > standoff_config_.max_reach_m) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "move_to_instance: %s target is %.3fm from the planning frame's origin, beyond "
+        "max_reach_m (%.3fm) — planning is likely to fail (pose: x=%.3f y=%.3f z=%.3f)",
+        label.c_str(), distance_m, standoff_config_.max_reach_m, pose.position.x,
+        pose.position.y, pose.position.z);
+    } else {
+      RCLCPP_INFO(
+        node_->get_logger(),
+        "move_to_instance: %s target is %.3fm from the planning frame's origin (within "
+        "max_reach_m %.3fm; pose: x=%.3f y=%.3f z=%.3f)",
+        label.c_str(), distance_m, standoff_config_.max_reach_m, pose.position.x,
+        pose.position.y, pose.position.z);
+    }
+  };
+
+  // Step 1: hover above cup_holder itself — the SAME shared approach
   // point regardless of which instance was actually requested (see
   // HoverConfig's doc comment) — looked up even when request->instance_name
   // IS "cup_holder", since the hover pose is always derived from
@@ -783,13 +823,28 @@ void TrajectoryPlanner::handleMoveToInstance(
   hover_pose.position.z = cup_holder_tf.transform.translation.z + hover_config_.hover_offset_m;
   hover_pose.orientation = cup_holder_tf.transform.rotation;  // identity — position-only TF
 
-  if (!tracePath({hover_pose}, visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_JOINT_SPACE)) {
+  logReachability("hover", hover_pose);
+
+  // Cartesian first, joint-space fallback (2026-08-02 — was joint-space-only
+  // before). A straight-line approach is preferable when achievable; the
+  // free-space fallback exists for when it isn't from the arm's current
+  // pose, matching this method's own doc comment.
+  move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
+  bool reached_hover = planAndExecuteCartesian(hover_pose, planner_config_.cartesian_min_fraction);
+  if (!reached_hover) {
+    RCLCPP_WARN(
+      node_->get_logger(),
+      "move_to_instance: Cartesian hover attempt failed, falling back to joint-space");
+    reached_hover = planAndExecute(hover_pose);
+  }
+  if (!reached_hover) {
     response->success = false;
-    response->message = "Failed to reach the hover pose above cup_holder (see log for the error)";
+    response->message = "Failed to reach the hover pose above cup_holder — both Cartesian and "
+      "joint-space attempts failed (see log for the error)";
     return;
   }
 
-  // Stage 2: descend to the actual requested instance — cup_holder itself,
+  // Step 2: descend to the actual requested instance — cup_holder itself,
   // or a specific hole_N — via a straight-line Cartesian move from
   // directly above it.
   geometry_msgs::msg::TransformStamped instance_tf;
@@ -815,12 +870,57 @@ void TrajectoryPlanner::handleMoveToInstance(
   // also reorienting mid-approach.
   descend_pose.orientation = hover_pose.orientation;
 
-  response->success = tracePath(
-    {descend_pose}, visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN);
-  response->message = response->success ?
-    "Moved to '" + request->instance_name + "' via the cup_holder hover approach" :
-    "Reached the hover pose, but failed to descend to '" + request->instance_name +
-    "' (see log for the error)";
+  logReachability(request->instance_name, descend_pose);
+
+  if (!planAndExecuteCartesian(descend_pose, planner_config_.cartesian_min_fraction)) {
+    response->success = false;
+    response->message = "Reached the hover pose, but failed to descend to '" +
+      request->instance_name + "' (see log for the error)";
+    return;
+  }
+
+  // Step 3: stay at the goal — see HoverConfig::instance_stay_seconds's
+  // own doc comment (safe to sleep this service callback thread, same
+  // reasoning as tracePath()'s own waypoint_settle_seconds sleep).
+  if (hover_config_.instance_stay_seconds > 0.0) {
+    RCLCPP_INFO(
+      node_->get_logger(), "move_to_instance: staying at '%s' for %.1fs",
+      request->instance_name.c_str(), hover_config_.instance_stay_seconds);
+    std::this_thread::sleep_for(
+      std::chrono::duration<double>(hover_config_.instance_stay_seconds));
+  }
+
+  // Step 4: return to the SAME hover_pose computed in step 1 — not a
+  // fresh TF lookup, not a fixed absolute-Z lift (see this method's own
+  // doc comment for why that's a deliberate departure from the separate,
+  // currently-unused is_sequenced_goal machinery).
+  if (!planAndExecuteCartesian(hover_pose, planner_config_.cartesian_min_fraction)) {
+    response->success = false;
+    response->message = "Reached '" + request->instance_name + "', but failed to return to the "
+      "hover pose (see log for the error)";
+    return;
+  }
+
+  // Step 5: optional final move to a configured preset — empty string
+  // (the default) skips this step entirely. See
+  // HoverConfig::instance_return_preset_name's own doc comment — exact
+  // name is an explicitly deferred decision.
+  if (!hover_config_.instance_return_preset_name.empty()) {
+    if (!planAndExecuteToPreset(hover_config_.instance_return_preset_name)) {
+      response->success = false;
+      response->message = "Reached '" + request->instance_name + "' and returned to the hover "
+        "pose, but failed to move to preset '" + hover_config_.instance_return_preset_name +
+        "' (see log for the error)";
+      return;
+    }
+  }
+
+  response->success = true;
+  response->message = "Moved to '" + request->instance_name + "' via the cup_holder hover "
+    "approach, stayed " + std::to_string(hover_config_.instance_stay_seconds) +
+    "s, and returned" +
+    (hover_config_.instance_return_preset_name.empty() ?
+    " to the hover pose" : " via preset '" + hover_config_.instance_return_preset_name + "'");
 }
 
 StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const
@@ -885,6 +985,14 @@ HoverConfig TrajectoryPlanner::loadHoverConfigFromParams() const
   HoverConfig config;
   config.hover_offset_m = node_->get_parameter("instance_hover_offset_m").as_double();
   config.descend_offset_m = node_->get_parameter("instance_descend_offset_m").as_double();
+  config.instance_stay_seconds = node_->get_parameter("instance_stay_seconds").as_double();
+  // get_parameter_or (not get_parameter) — the exact preset name is an
+  // explicitly deferred decision (see HoverConfig::instance_return_preset_name's
+  // own doc comment); empty-string default lets this be omitted from a
+  // yaml entirely until decided, rather than forcing every deployment to
+  // declare it upfront.
+  node_->get_parameter_or(
+    "instance_return_preset_name", config.instance_return_preset_name, std::string(""));
   return config;
 }
 

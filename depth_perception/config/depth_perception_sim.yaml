@@ -66,3 +66,11 @@ depth_perception_node:
     # broadcastInstanceTfs()'s doc comment. No-op (throttled log only)
     # until a ~/calibrate run has completed at least once this session.
     broadcast_instance_tfs: true
+
+    # [Change the comment as this lift up is used to compensate to 
+    # place tf on surface of the holder]
+    instance_tf_z_offset_m: 0.05
+
+    # [Change the comment as this lift up is used to compensate to 
+    # place tf on surface of the holder]
+    instance_tf_max_horizontal_dist_m: 0.0

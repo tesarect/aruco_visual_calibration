@@ -27,8 +27,14 @@ calibration_broadcaster_node:
     # straight-line guarantee). See TracePath.srv.
     planning_mode: "cartesian"
     # Orientation-averaging method priority (0 = disabled, lower positive
-    # number = tried first). Markley's method isn't implemented yet — leave
-    # its priority at 0 until orientation_averaging.hpp adds it.
+    # number = tried first). Markley's method implemented 2026-08-01 (see
+    # orientation_averaging.cpp's markleyAverage()) — still defaults to
+    # disabled here (opt-in, same convention as yaw_roll_clamp_enabled
+    # below: don't silently change today's behavior). To test: set this to
+    # e.g. 1 and orientation_sum_normalize_priority to 0 (clean A/B swap),
+    # or a higher number than sum_normalize's to keep both "available" with
+    # sum_normalize still winning ties — restart required, this is read
+    # once at construction, not live.
     orientation_sum_normalize_priority: 1
     orientation_markley_priority: 0
 

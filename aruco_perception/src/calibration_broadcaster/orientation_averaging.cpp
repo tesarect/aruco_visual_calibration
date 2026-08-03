@@ -4,6 +4,8 @@
 #include <cmath>
 #include <stdexcept>
 
+#include <Eigen/Eigenvalues>
+
 namespace aruco_perception
 {
 
@@ -55,6 +57,62 @@ tf2::Quaternion sumNormalize(const std::vector<tf2::Quaternion> & samples)
   return sum;
 }
 
+/// Markley's method (Markley, Cheng, Crassidis, Oshman, "Averaging
+/// Quaternions," JGCD 2007) — the quaternion that minimizes the weighted
+/// sum of squared chordal (Euclidean, in R^4) distances to every sample is
+/// the eigenvector of the LARGEST eigenvalue of M = sum_i w_i * (q_i *
+/// q_i^T), a 4x4 symmetric matrix built from the samples' outer products.
+/// Unlike sumNormalize()'s pre-sum hemisphere flip, this metric is
+/// naturally insensitive to the q/-q double-cover (squaring the dot
+/// product in the underlying optimization makes q_i and -q_i contribute
+/// identically) — no per-sample flip needed before accumulating M, only a
+/// single sign-ambiguity resolution on the FINAL result (the dominant
+/// eigenvector itself is only defined up to an overall sign).
+///
+/// Equal weights (w_i = 1/N) — matches every existing averageQuaternions()
+/// call site, none of which pass or track per-sample weights today.
+/// Weighting cancels out of "which eigenvector is dominant" for a uniform
+/// weight anyway (only relative weights matter), so 1/N vs. un-normalized
+/// 1 makes no difference here — kept as 1/N for clarity against the
+/// paper's own formulation.
+tf2::Quaternion markleyAverage(const std::vector<tf2::Quaternion> & samples)
+{
+  const double weight = 1.0 / static_cast<double>(samples.size());
+
+  Eigen::Matrix4d m = Eigen::Matrix4d::Zero();
+  for (const tf2::Quaternion & sample : samples) {
+    // tf2::Quaternion's own accessor order (x, y, z, w) — component order
+    // doesn't matter mathematically as long as it's applied consistently
+    // between q_i's construction here and the eigenvector's decode below.
+    const Eigen::Vector4d q(sample.x(), sample.y(), sample.z(), sample.w());
+    m += weight * (q * q.transpose());
+  }
+
+  // SelfAdjointEigenSolver (not the general EigenSolver): exploits M's
+  // symmetry for a numerically robust, efficient solve — the correct
+  // Eigen class for a symmetric/self-adjoint matrix. Eigenvalues are
+  // returned in ASCENDING order, so the dominant eigenvector (largest
+  // eigenvalue) is the LAST column, index 3, for a 4x4 matrix.
+  const Eigen::SelfAdjointEigenSolver<Eigen::Matrix4d> solver(m);
+  Eigen::Vector4d dominant = solver.eigenvectors().col(3);
+
+  // Sign ambiguity: the eigenvector is only defined up to an overall sign
+  // (v and -v are the same physical rotation) — resolve against samples[0]
+  // the same way sumNormalize() resolves its own hemisphere ambiguity, so
+  // both methods are consistent/comparable in which hemisphere they land.
+  const tf2::Quaternion & reference = samples[0];
+  const double dot =
+    dominant.x() * reference.x() + dominant.y() * reference.y() +
+    dominant.z() * reference.z() + dominant.w() * reference.w();
+  if (dot < 0.0) {
+    dominant = -dominant;
+  }
+
+  tf2::Quaternion result(dominant.x(), dominant.y(), dominant.z(), dominant.w());
+  result.normalize();
+  return result;
+}
+
 }  // namespace
 
 double angularDeviationDeg(const tf2::Quaternion & a, const tf2::Quaternion & b)
@@ -72,13 +130,9 @@ OrientationAveragingResult averageQuaternions(
     throw std::invalid_argument("averageQuaternions requires at least one sample");
   }
 
-  if (method == OrientationAveragingMethod::kMarkley) {
-    throw std::invalid_argument(
-            "OrientationAveragingMethod::kMarkley is not yet implemented");
-  }
-
   OrientationAveragingResult result;
-  result.averaged = sumNormalize(samples);
+  result.averaged = method == OrientationAveragingMethod::kMarkley ?
+    markleyAverage(samples) : sumNormalize(samples);
 
   double sum_deg = 0.0;
   for (const tf2::Quaternion & sample : samples) {
