@@ -50,6 +50,21 @@ CalibrationBroadcasterNode::CalibrationBroadcasterNode()
   trace_path_client_ = create_client<visual_calibration_msgs::srv::TracePath>(
     "/trajectory_planner/trace_path");
 
+  // Which of kSumNormalize/kMarkley selectAveragingMethod() actually picked
+  // (2026-08-03) — added after discovering neither the raw priority values
+  // nor the resulting method were logged anywhere, making a test run's log
+  // alone insufficient to confirm which averaging method it actually
+  // exercised (e.g. a "markley_priority-1" test run silently falling back
+  // to kSumNormalize if orientation_sum_normalize_priority wasn't also set
+  // to 0 — see selectAveragingMethod's own tie-break: sum_normalize wins
+  // whenever its priority is <= markley's).
+  RCLCPP_INFO(
+    get_logger(),
+    "Orientation averaging method selected: %s (orientation_sum_normalize_priority: %d, "
+    "orientation_markley_priority: %d)",
+    averaging_method_ == OrientationAveragingMethod::kMarkley ? "kMarkley" : "kSumNormalize",
+    config_.orientation_sum_normalize_priority, config_.orientation_markley_priority);
+
   RCLCPP_INFO(
     get_logger(), "calibration_broadcaster_node ready (known_chain_frame: '%s', marker_frame: "
     "'%s', num_samples: %d) — send a ~/calibrate action goal to begin",
@@ -862,14 +877,28 @@ std::vector<tf2::Quaternion> CalibrationBroadcasterNode::clampYawRoll(
     roll_cos_sum += std::cos(roll);
   }
 
-  const double mean_yaw = std::atan2(yaw_sin_sum, yaw_cos_sum);
-  const double mean_roll = std::atan2(roll_sin_sum, roll_cos_sum);
+  // Forced yaw/roll test bypass (2026-08-03, real-only — see
+  // CalibrationBroadcasterConfig::yaw_roll_clamp_forced_yaw_deg's own doc
+  // comment) — NaN (default/unset) means "use the circular mean computed
+  // above for that axis," same as before this bypass existed. A non-NaN
+  // value skips straight to the known, physically-measured mount constant
+  // instead, so this run's own (possibly noisy) samples never factor into
+  // that axis at all.
+  const bool yaw_forced = !std::isnan(config_.yaw_roll_clamp_forced_yaw_deg);
+  const bool roll_forced = !std::isnan(config_.yaw_roll_clamp_forced_roll_deg);
+  const double mean_yaw = yaw_forced ?
+    config_.yaw_roll_clamp_forced_yaw_deg * M_PI / 180.0 :
+    std::atan2(yaw_sin_sum, yaw_cos_sum);
+  const double mean_roll = roll_forced ?
+    config_.yaw_roll_clamp_forced_roll_deg * M_PI / 180.0 :
+    std::atan2(roll_sin_sum, roll_cos_sum);
 
   RCLCPP_INFO(
     get_logger(),
-    "clampYawRoll: run-wide mean yaw=%.2fdeg, mean roll=%.2fdeg (computed from %zu samples) — "
-    "every sample's yaw/roll replaced with these, pitch left as individually measured",
-    mean_yaw * 180.0 / M_PI, mean_roll * 180.0 / M_PI, orientations.size());
+    "clampYawRoll: run-wide mean yaw=%.2fdeg%s, mean roll=%.2fdeg%s (computed from %zu samples) "
+    "— every sample's yaw/roll replaced with these, pitch left as individually measured",
+    mean_yaw * 180.0 / M_PI, yaw_forced ? " (forced)" : "",
+    mean_roll * 180.0 / M_PI, roll_forced ? " (forced)" : "", orientations.size());
 
   std::vector<tf2::Quaternion> clamped;
   clamped.reserve(orientations.size());
@@ -1280,6 +1309,17 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
   // never cached into this struct.
 
   config.yaw_roll_clamp_enabled = get_parameter("yaw_roll_clamp_enabled").as_bool();
+
+  // get_parameter_or (not get_parameter) since these are absent from
+  // sim's yaml entirely (real-only test hook — see this field's own doc
+  // comment) and automatically_declare_parameters_from_overrides(true)
+  // means get_parameter() on an undeclared key would throw.
+  get_parameter_or(
+    "yaw_roll_clamp_forced_yaw_deg", config.yaw_roll_clamp_forced_yaw_deg,
+    std::numeric_limits<double>::quiet_NaN());
+  get_parameter_or(
+    "yaw_roll_clamp_forced_roll_deg", config.yaw_roll_clamp_forced_roll_deg,
+    std::numeric_limits<double>::quiet_NaN());
 
   return config;
 }

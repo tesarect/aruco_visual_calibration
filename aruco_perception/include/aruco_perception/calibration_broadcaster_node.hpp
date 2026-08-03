@@ -2,6 +2,7 @@
 #define ARUCO_PERCEPTION__CALIBRATION_BROADCASTER_NODE_HPP_
 
 #include <condition_variable>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -220,6 +221,19 @@ struct CalibrationBroadcasterConfig
   // per-run mean computation still runs fresh every finishCalibration()
   // call regardless; only the on/off switch itself is restart-only.
   bool yaw_roll_clamp_enabled = false;
+
+  // --- forced yaw/roll test bypass (2026-08-03, real-only, throwaway) ---
+  // Quick test hook, NOT a general feature: real's mount yaw/roll are now
+  // physically bolted/measured (yaw=-180deg, roll=180deg), so this lets
+  // clampYawRoll() use those known-correct constants directly for one test
+  // run instead of re-deriving (possibly noisy) values from this run's own
+  // samples via circular mean. NaN (default, unset) on either field means
+  // "use today's existing circular-mean behavior for that axis" — set both
+  // in degrees to bypass the mean computation entirely. Not wired into
+  // sim's yaml at all: sim already has its own ground-truth mount angles
+  // from the URDF and has no use for this.
+  double yaw_roll_clamp_forced_yaw_deg = std::numeric_limits<double>::quiet_NaN();
+  double yaw_roll_clamp_forced_roll_deg = std::numeric_limits<double>::quiet_NaN();
 };
 
 /// Orchestrates calibration: fetches waypoints AND their center pose from

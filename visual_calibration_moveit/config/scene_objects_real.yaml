@@ -36,8 +36,8 @@ planning_scene_setup:
 
     # Coffee machine — rough box, padded. Fill in real rough distances.
     coffee_machine.shape_type: "box"
-    coffee_machine.pose.x: 0.5
-    coffee_machine.pose.y: 0.78
+    coffee_machine.pose.x: 0.7
+    coffee_machine.pose.y: 0.82
     coffee_machine.pose.z: -0.032
     coffee_machine.pose.yaw: 1.57
     coffee_machine.box_names: ["body"]
@@ -110,9 +110,9 @@ planning_scene_setup:
     # below) points along base_link's Y axis instead of X.
     table_edge_guard.shape_type: "box"
     table_edge_guard.pose.x: -0.09
-    table_edge_guard.pose.y: 0.70
-    table_edge_guard.pose.z: 0.07
+    table_edge_guard.pose.y: 0.20
+    table_edge_guard.pose.z: 0.03
     table_edge_guard.pose.yaw: -1.57
     table_edge_guard.box_names: ["body"]
-    table_edge_guard.boxes.body.size: [1.0, 0.07, 0.05]
+    table_edge_guard.boxes.body.size: [0.10, 0.06, 0.05]
     table_edge_guard.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]

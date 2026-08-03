@@ -8,7 +8,7 @@ Panels:
         - /TF1
         - /TF1/Frames1
       Splitter Ratio: 0.5
-    Tree Height: 142
+    Tree Height: 201
   - Class: rviz_common/Help
     Name: Help
   - Class: rviz_common/Views
@@ -336,8 +336,6 @@ Visualization Manager:
           Value: false
         D415_color_optical_frame:
           Value: false
-        D415_color_optical_frame_calibrated:
-          Value: true
         D415_depth_frame:
           Value: false
         D415_depth_optical_frame:
@@ -352,8 +350,6 @@ Visualization Manager:
           Value: true
         base_link_inertia:
           Value: false
-        camera_calibration_sample:
-          Value: true
         flange:
           Value: false
         forearm_link:
@@ -402,8 +398,6 @@ Visualization Manager:
       Tree:
         world:
           base_link:
-            D415_color_optical_frame_calibrated:
-              {}
             base:
               tool0_controller:
                 {}
@@ -433,9 +427,21 @@ Visualization Manager:
                                     {}
                           ft_frame:
                             {}
-            camera_calibration_sample:
-              {}
       Update Interval: 0
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Max Value: 1
+      Median window: 5
+      Min Value: 0
+      Name: Image
+      Normalize Range: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /aruco_perception/overlay_image
       Value: true
   Enabled: true
   Global Options:
@@ -483,11 +489,13 @@ Window Geometry:
     collapsed: false
   Hide Left Dock: false
   Hide Right Dock: false
+  Image:
+    collapsed: false
   MotionPlanning:
     collapsed: false
   MotionPlanning - Trajectory Slider:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000100000000000002b400000304fc0200000005fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004100fffffffb000000100044006900730070006c006100790073010000003e000000cb000000cb00fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e0067010000010f000001880000017d00fffffffb0000000800480065006c0070000000029a0000006e0000006f00fffffffb0000000a00560069006500770073010000029d000000a5000000a500ffffff000003860000030400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd0000000100000000000002b400000304fc0200000006fb00000044004d006f00740069006f006e0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f0072007900200053006c00690064006500720000000000ffffffff0000004100fffffffb000000100044006900730070006c006100790073010000003e00000106000000cb00fffffffb0000001c004d006f00740069006f006e0050006c0061006e006e0069006e00670000000149000001f90000017d00fffffffb0000000800480065006c0070000000029a0000006e0000006f00fffffffb0000000a00560069006500770073000000029d000000a5000000a500fffffffb0000000a0049006d006100670065010000014a000001f80000002800ffffff000003860000030400000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: false
   Width: 1600
