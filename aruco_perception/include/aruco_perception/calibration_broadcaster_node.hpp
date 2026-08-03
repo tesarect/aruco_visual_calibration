@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include <opencv2/opencv.hpp>
+
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <geometry_msgs/msg/pose.hpp>
@@ -21,7 +23,9 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <tf2_ros/transform_broadcaster.h>
 #include <visual_calibration_msgs/action/calibrate.hpp>
+#include <visual_calibration_msgs/srv/detect_marker_once.hpp>
 #include <visual_calibration_msgs/srv/get_polygon_waypoints.hpp>
+#include <visual_calibration_msgs/srv/signal_inference_server.hpp>
 #include <visual_calibration_msgs/srv/trace_path.hpp>
 
 #include "aruco_perception/orientation_averaging.hpp"
@@ -158,6 +162,33 @@ struct CalibrationBroadcasterConfig
   /// agreement check) — outlier_rejection above is what sorts out any
   /// disagreement between them.
   int samples_per_waypoint = 2;
+
+  // --- Per-waypoint on-demand hybrid detection (2026-08-04) ---
+  // When true, each polygon/random-phase waypoint's sample(s) come from
+  // exactly one ~/detect_marker_once call to yolo_marker_bridge_node
+  // (DetectMarkerOnce.srv — YOLO crop + image-enhancement cascade +
+  // classical ArUco + solvePnP, run once per call) instead of the
+  // continuous marker_pose topic (waitForFreshMarkerPose) — see
+  // sampleOnceAtCurrentWaypoint's own doc comment for the full mechanism.
+  // Motivation: aruco_detector_node's classical-only corner detection
+  // (tuned extensively but still imperfect per live testing) may benefit
+  // from YOLO's crop + enhancement cascade before classical corner-finding
+  // runs, and this only costs the (expensive) cascade once per waypoint
+  // rather than continuously (which previously caused ~200% CPU usage —
+  // why executeAutoCalibrate already SIGSTOPs inference_server.py for the
+  // ENTIRE run today). Also brackets each waypoint's single detection call
+  // with SIGCONT/SIGSTOP (via ~/signal_inference_server on
+  // calibration_orchestrator_node) so the model process is live only for
+  // the duration of that one call, not the whole run.
+  //
+  // Default false — a deliberate opt-in, "flip of a switch" alternative to
+  // today's classical/continuous-hybrid behavior, not a replacement.
+  // Restart-only (cached here like every other field in this struct).
+  //
+  // NOT wired into sim's yaml at all — sim's classical detector has no
+  // real-world corner-detection noise to address, and hasn't been tested
+  // with this mode.
+  bool hybrid_per_waypoint_enabled = false;
 
   // --- Clustering-based position+orientation averaging (2026-07-29) ---
   // clustering_bucket_size_cm/clustering_bucket_angle_deg are cached in
@@ -310,6 +341,13 @@ public:
   CalibrationBroadcasterNode();
 
 private:
+  /// Grants the small RAII guard in calibration_broadcaster_node.cpp
+  /// (2026-08-04, guarantees saveDebugImageGrid() runs on every
+  /// executeCalibration exit path — see that guard's own doc comment)
+  /// access to the otherwise-private saveDebugImageGrid() below, without
+  /// making it callable from anywhere else.
+  friend struct DebugGridSaveGuard;
+
   CalibrationBroadcasterConfig loadConfigFromParams() const;
 
   /// Total sample count a full (non-early-stopped) run will collect, used
@@ -490,6 +528,42 @@ private:
   std::optional<geometry_msgs::msg::PoseStamped> waitForFreshMarkerPose(
     const rclcpp::Time & after);
 
+  /// Gets exactly one marker sample for the CURRENT waypoint (2026-08-04)
+  /// — the single point both runPolygonPhase/runRandomPhase's inner
+  /// sampling loops call, so neither has to know which of the two
+  /// underlying mechanisms actually produced the pose:
+  /// - config_.hybrid_per_waypoint_enabled == false (default): identical
+  ///   to today's behavior — calls waitForFreshMarkerPose(after) against
+  ///   the continuous marker_pose topic.
+  /// - == true: brackets a single ~/detect_marker_once call (to
+  ///   yolo_marker_bridge_node) with SIGCONT (before) / SIGSTOP (after)
+  ///   via ~/signal_inference_server (on calibration_orchestrator_node —
+  ///   see detect_marker_once_client_/signal_inference_server_client_'s
+  ///   own doc comments for why this crosses a package boundary through a
+  ///   service rather than a direct call). `after` is unused in this
+  ///   branch (each call is inherently a fresh, on-demand detection, not a
+  ///   wait against a continuous stream) but kept in the signature so both
+  ///   branches share one call site/signature in the sampling loops. On
+  ///   success in this mode, also appends the returned crop image +
+  ///   variant label to debug_grid_images_ for the end-of-run combined
+  ///   grid (see accumulateDebugGridImage/saveDebugImageGrid).
+  std::optional<geometry_msgs::msg::PoseStamped> sampleOnceAtCurrentWaypoint(
+    const rclcpp::Time & after, const std::string & waypoint_label);
+
+  /// Assembles debug_grid_images_ into one labeled grid image (tiles
+  /// arranged row-by-row via cv::hconcat/cv::vconcat, each waypoint's
+  /// label burned in via cv::putText) and writes it once to
+  /// /home/user/ros2_ws/log/tmux/real (the rosject's runtime log
+  /// directory — see the fix's own plan doc). Called once at the end of
+  /// executeCalibration (success or failure — whatever was collected
+  /// before a failure is still worth saving), only when
+  /// debug_grid_images_ is non-empty (i.e. only in
+  /// hybrid_per_waypoint_enabled mode, and only if at least one waypoint
+  /// succeeded). Logs (not throws) on any write failure — this is a
+  /// best-effort inspection/presentation artifact, not something that
+  /// should fail the calibration run itself.
+  void saveDebugImageGrid();
+
   /// Like waitForFreshMarkerPose, but only checks for visibility (doesn't
   /// need/return the pose itself) — used by the random phase's
   /// per-candidate visibility check, mirroring
@@ -646,6 +720,23 @@ private:
   rclcpp::Client<visual_calibration_msgs::srv::GetPolygonWaypoints>::SharedPtr
     get_polygon_waypoints_client_;
   rclcpp::Client<visual_calibration_msgs::srv::TracePath>::SharedPtr trace_path_client_;
+  /// ~/detect_marker_once on yolo_marker_bridge_node — see
+  /// config_.hybrid_per_waypoint_enabled's own doc comment. Only ever
+  /// called when that config field is true; lazily unused otherwise (no
+  /// harm in constructing the client regardless — matches
+  /// get_polygon_waypoints_client_/trace_path_client_'s own always-
+  /// constructed convention).
+  rclcpp::Client<visual_calibration_msgs::srv::DetectMarkerOnce>::SharedPtr
+    detect_marker_once_client_;
+  /// ~/signal_inference_server on calibration_orchestrator_node — see
+  /// config_.hybrid_per_waypoint_enabled's own doc comment (per-waypoint
+  /// SIGCONT/SIGSTOP bracketing). Cross-package client: this node
+  /// (aruco_perception) cannot call
+  /// CalibrationOrchestratorNode::signalInferenceServer() directly (it's a
+  /// private member of a different node/package) — this service is the
+  /// intentional, thin cross-package bridge for it.
+  rclcpp::Client<visual_calibration_msgs::srv::SignalInferenceServer>::SharedPtr
+    signal_inference_server_client_;
 
   /// Guards latest_marker_pose_/latest_marker_pose_stamp_, notified by
   /// markerPoseCallback and waited on by waitForFreshMarkerPose.
@@ -656,6 +747,16 @@ private:
 
   std::vector<geometry_msgs::msg::Vector3> collected_positions_;
   std::vector<tf2::Quaternion> collected_orientations_;
+
+  /// One entry per successful hybrid_per_waypoint_enabled detection this
+  /// run (2026-08-04) — the decoded crop image + a label ("waypoint 3
+  /// (polygon): gamma_0.7") for accumulateDebugGridImage/
+  /// saveDebugImageGrid's combined-grid capture. Cleared at the start of
+  /// each ~/calibrate run (executeCalibration) alongside
+  /// collected_positions_/collected_orientations_ — this is per-run state,
+  /// not persisted across runs. Empty entirely when
+  /// config_.hybrid_per_waypoint_enabled is false.
+  std::vector<std::pair<cv::Mat, std::string>> debug_grid_images_;
   /// The most recent sample's camera frame_id — carried through to the
   /// final broadcast's child_frame_id.
   geometry_msgs::msg::PoseStamped last_sample_;

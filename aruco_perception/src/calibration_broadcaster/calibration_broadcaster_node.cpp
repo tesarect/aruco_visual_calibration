@@ -50,6 +50,16 @@ CalibrationBroadcasterNode::CalibrationBroadcasterNode()
   trace_path_client_ = create_client<visual_calibration_msgs::srv::TracePath>(
     "/trajectory_planner/trace_path");
 
+  // Only ever called when config_.hybrid_per_waypoint_enabled is true —
+  // see that field's own doc comment. Constructed unconditionally anyway,
+  // matching get_polygon_waypoints_client_/trace_path_client_'s own
+  // always-constructed convention (cheap, no harm sitting unused).
+  detect_marker_once_client_ = create_client<visual_calibration_msgs::srv::DetectMarkerOnce>(
+    "/yolo_marker_bridge_node/detect_marker_once");
+  signal_inference_server_client_ =
+    create_client<visual_calibration_msgs::srv::SignalInferenceServer>(
+    "/calibration_orchestrator_node/signal_inference_server");
+
   // Which of kSumNormalize/kMarkley selectAveragingMethod() actually picked
   // (2026-08-03) — added after discovering neither the raw priority values
   // nor the resulting method were logged anywhere, making a test run's log
@@ -105,11 +115,42 @@ void CalibrationBroadcasterNode::handleAccepted(
     goal_handle}.detach();
 }
 
+// Guarantees saveDebugImageGrid() runs on every exit path out of
+// executeCalibration (2026-08-04) — that function has several early
+// `return`s on failure (service unavailable, sample timeout, phase
+// failure, cancellation) in addition to its normal success path ending in
+// finishCalibration(); per hybrid_per_waypoint_enabled's design ("whatever
+// was collected before a failure is still worth saving"), inserting the
+// save call before every individual return would be fragile (easy to miss
+// one on a future edit) — a destructor-based guard makes it structurally
+// impossible to skip instead.
+//
+// Declared directly in namespace aruco_perception (NOT an anonymous
+// namespace, unlike this file's other local helpers) so its friend
+// declaration inside CalibrationBroadcasterNode (see that class's own
+// comment) actually names the SAME type — an anonymous-namespace
+// definition here would be a distinct type from the one the friend
+// declaration forward-declares in the enclosing namespace, silently
+// failing to grant access (confirmed via a live compile error).
+struct DebugGridSaveGuard
+{
+  explicit DebugGridSaveGuard(CalibrationBroadcasterNode * node)
+  : node_(node) {}
+  ~DebugGridSaveGuard() {node_->saveDebugImageGrid();}
+  CalibrationBroadcasterNode * node_;
+};
+
 void CalibrationBroadcasterNode::executeCalibration(
   const std::shared_ptr<GoalHandleCalibrate> goal_handle)
 {
+  // Only actually writes anything if debug_grid_images_ is non-empty (see
+  // saveDebugImageGrid's own doc comment) — a no-op guard whenever
+  // hybrid_per_waypoint_enabled is false (the default).
+  DebugGridSaveGuard debug_grid_save_guard(this);
+
   collected_positions_.clear();
   collected_orientations_.clear();
+  debug_grid_images_.clear();
   stable_agreement_count_ = 0;
 
   if (!get_polygon_waypoints_client_->wait_for_service(std::chrono::seconds(5))) {
@@ -297,7 +338,8 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
     rclcpp::Time sample_boundary = before_move;
     for (int s = 0; s < config_.samples_per_waypoint; ++s) {
       const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
-        waitForFreshMarkerPose(sample_boundary);
+        sampleOnceAtCurrentWaypoint(
+          sample_boundary, "waypoint " + std::to_string(i + 1) + " (polygon)");
 
       if (!marker_pose.has_value()) {
         if (s > 0) {
@@ -456,7 +498,9 @@ bool CalibrationBroadcasterNode::runRandomPhase(
     rclcpp::Time sample_boundary = before_move;
     for (int s = 0; s < config_.samples_per_waypoint; ++s) {
       const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
-        waitForFreshMarkerPose(sample_boundary);
+        sampleOnceAtCurrentWaypoint(
+          sample_boundary,
+          "waypoint " + std::to_string(samples_already_collected + i + 1) + " (random)");
       if (!marker_pose.has_value()) {
         if (s > 0) {
           // Soft-fail (2026-07-29): isMarkerVisibleNow() above only checks
@@ -704,6 +748,196 @@ std::optional<geometry_msgs::msg::PoseStamped> CalibrationBroadcasterNode::waitF
     return std::nullopt;
   }
   return latest_marker_pose_;
+}
+
+namespace
+{
+/// Standard base64 -> raw bytes decode (2026-08-04) — no existing
+/// dependency in this package already provides one (confirmed via grep),
+/// and the payload here (one JPEG crop per waypoint, DetectMarkerOnce.srv's
+/// cascade_image_b64 field) doesn't justify pulling in a new library
+/// dependency for it. Inverse of Python's base64.b64encode, used
+/// symmetrically on inference_server.py's _encode_image_b64 side.
+std::vector<uchar> decodeBase64(const std::string & encoded)
+{
+  static const std::string kChars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::vector<int> decode_table(256, -1);
+  for (size_t i = 0; i < kChars.size(); ++i) {
+    decode_table[static_cast<unsigned char>(kChars[i])] = static_cast<int>(i);
+  }
+
+  std::vector<uchar> result;
+  result.reserve(encoded.size() / 4 * 3);
+
+  int val = 0, bits = -8;
+  for (unsigned char c : encoded) {
+    if (c == '=' || decode_table[c] == -1) {
+      if (c == '=') {break;}
+      continue;  // skip whitespace/newlines, if any
+    }
+    val = (val << 6) + decode_table[c];
+    bits += 6;
+    if (bits >= 0) {
+      result.push_back(static_cast<uchar>((val >> bits) & 0xFF));
+      bits -= 8;
+    }
+  }
+  return result;
+}
+}  // namespace
+
+std::optional<geometry_msgs::msg::PoseStamped>
+CalibrationBroadcasterNode::sampleOnceAtCurrentWaypoint(
+  const rclcpp::Time & after, const std::string & waypoint_label)
+{
+  if (!config_.hybrid_per_waypoint_enabled) {
+    return waitForFreshMarkerPose(after);
+  }
+
+  // Per-waypoint SIGCONT/SIGSTOP bracketing (2026-08-04) — see
+  // config_.hybrid_per_waypoint_enabled's own doc comment. Best-effort:
+  // logs (doesn't abort the run) if the orchestrator's service isn't
+  // reachable, since a missing/late SIGCONT just means inference_server.py
+  // takes its normal startup-from-stopped time on the actual detect call
+  // below, not a hard failure — the detection itself is what actually
+  // matters.
+  auto send_signal = [this](bool stop) {
+      if (!signal_inference_server_client_->wait_for_service(std::chrono::seconds(1))) {
+        RCLCPP_WARN(
+          get_logger(),
+          "sampleOnceAtCurrentWaypoint: ~/signal_inference_server not reachable — "
+          "continuing without SIGCONT/SIGSTOP bracketing for this waypoint");
+        return;
+      }
+      auto request =
+        std::make_shared<visual_calibration_msgs::srv::SignalInferenceServer::Request>();
+      request->stop = stop;
+      signal_inference_server_client_->async_send_request(request).wait();
+    };
+
+  send_signal(false);  // SIGCONT — resume inference_server.py for this one call
+
+  if (!detect_marker_once_client_->wait_for_service(std::chrono::seconds(2))) {
+    RCLCPP_ERROR(
+      get_logger(),
+      "sampleOnceAtCurrentWaypoint: ~/detect_marker_once not reachable — is "
+      "yolo_marker_bridge_node running?");
+    send_signal(true);  // SIGSTOP — don't leave the model running idle on failure
+    return std::nullopt;
+  }
+
+  auto request = std::make_shared<visual_calibration_msgs::srv::DetectMarkerOnce::Request>();
+  auto future = detect_marker_once_client_->async_send_request(request);
+  const auto response = future.get();
+
+  send_signal(true);  // SIGSTOP — done with this waypoint's single call
+
+  if (!response->success) {
+    RCLCPP_WARN(
+      get_logger(), "sampleOnceAtCurrentWaypoint (%s): %s",
+      waypoint_label.c_str(), response->message.c_str());
+    return std::nullopt;
+  }
+
+  // Accumulate for the end-of-run combined debug grid (see
+  // saveDebugImageGrid) — best-effort: a decode failure here doesn't
+  // invalidate the pose itself, just skips that one tile.
+  if (!response->cascade_image_b64.empty()) {
+    const std::vector<uchar> jpeg_bytes = decodeBase64(response->cascade_image_b64);
+    const cv::Mat decoded = cv::imdecode(jpeg_bytes, cv::IMREAD_COLOR);
+    if (!decoded.empty()) {
+      const std::string label = waypoint_label + ": " + response->cascade_variant_used;
+      debug_grid_images_.emplace_back(decoded, label);
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "sampleOnceAtCurrentWaypoint (%s): failed to decode cascade_image_b64 — "
+        "skipping this tile in the debug grid", waypoint_label.c_str());
+    }
+  }
+
+  return response->marker_pose;
+}
+
+void CalibrationBroadcasterNode::saveDebugImageGrid()
+{
+  if (debug_grid_images_.empty()) {
+    // No-op whenever hybrid_per_waypoint_enabled is false (default), or if
+    // it's true but zero waypoints succeeded this run — nothing worth
+    // writing either way.
+    return;
+  }
+
+  // Normalize every tile to a common width (the first tile's own width) so
+  // hconcat/vconcat below don't require identical dimensions across
+  // waypoints — cascade crops can differ slightly in size (a smaller
+  // marker-bbox crop, or a different upscale variant). Aspect ratio is
+  // preserved (uniform width, proportional height) rather than force-
+  // squashing to a fixed size, so each tile still looks like an
+  // undistorted crop of the marker.
+  const int kTileWidth = debug_grid_images_.front().first.cols;
+  const int kTilesPerRow = 4;
+  const cv::Scalar kLabelBgColor(0, 0, 0);
+  const cv::Scalar kLabelTextColor(0, 255, 0);
+
+  std::vector<cv::Mat> tiles;
+  tiles.reserve(debug_grid_images_.size());
+  for (const auto & [image, label] : debug_grid_images_) {
+    cv::Mat resized;
+    const double scale = static_cast<double>(kTileWidth) / image.cols;
+    cv::resize(image, resized, cv::Size(kTileWidth, static_cast<int>(image.rows * scale)));
+
+    // Label strip burned in at the bottom of each tile (2026-08-04) — self-
+    // contained labeling per user's explicit request ("just for visual
+    // inspection, or even to show during presentation"), so the single
+    // saved grid image needs no separate caption file to be meaningful.
+    const int label_strip_height = 22;
+    cv::Mat labeled(resized.rows + label_strip_height, resized.cols, resized.type(), kLabelBgColor);
+    resized.copyTo(labeled(cv::Rect(0, 0, resized.cols, resized.rows)));
+    cv::putText(
+      labeled, label, cv::Point(4, resized.rows + label_strip_height - 6),
+      cv::FONT_HERSHEY_SIMPLEX, 0.4, kLabelTextColor, 1, cv::LINE_AA);
+    tiles.push_back(labeled);
+  }
+
+  // Pad the tile count up to a full multiple of kTilesPerRow with blank
+  // tiles of matching size — hconcat below requires every image in a row
+  // to share the same height, and a ragged final row would otherwise need
+  // special-casing.
+  const cv::Mat blank_tile(tiles.front().rows, tiles.front().cols, tiles.front().type(), kLabelBgColor);
+  while (tiles.size() % kTilesPerRow != 0) {
+    tiles.push_back(blank_tile);
+  }
+
+  std::vector<cv::Mat> rows;
+  for (size_t row_start = 0; row_start < tiles.size(); row_start += kTilesPerRow) {
+    cv::Mat row;
+    cv::hconcat(
+      std::vector<cv::Mat>(tiles.begin() + row_start, tiles.begin() + row_start + kTilesPerRow),
+      row);
+    rows.push_back(row);
+  }
+
+  cv::Mat grid;
+  cv::vconcat(rows, grid);
+
+  // /home/user/ros2_ws/log/tmux/real (2026-08-04) — the rosject's own
+  // runtime log directory, per explicit user confirmation (NOT this local
+  // checkout's own _errors/real/ archive convention, a separate thing).
+  const std::string kOutputDir = "/home/user/ros2_ws/log/tmux/real";
+  const std::string output_path = kOutputDir + "/hybrid_per_waypoint_debug_grid.png";
+  if (!cv::imwrite(output_path, grid)) {
+    RCLCPP_ERROR(
+      get_logger(),
+      "saveDebugImageGrid: failed to write '%s' (%zu tiles) — does the directory exist?",
+      output_path.c_str(), debug_grid_images_.size());
+    return;
+  }
+
+  RCLCPP_INFO(
+    get_logger(), "saveDebugImageGrid: wrote %zu waypoint tiles to '%s'",
+    debug_grid_images_.size(), output_path.c_str());
 }
 
 bool CalibrationBroadcasterNode::isMarkerVisibleNow(const rclcpp::Time & after)
@@ -1298,6 +1532,13 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
 
   config.samples_per_waypoint =
     static_cast<int>(get_parameter("samples_per_waypoint").as_int());
+
+  // get_parameter_or (not get_parameter) since this is absent from sim's
+  // yaml entirely (real-only, see this field's own doc comment) and
+  // automatically_declare_parameters_from_overrides(true) means
+  // get_parameter() on an undeclared key would throw.
+  get_parameter_or(
+    "hybrid_per_waypoint_enabled", config.hybrid_per_waypoint_enabled, false);
 
   config.clustering_bucket_size_cm =
     get_parameter("clustering_bucket_size_cm").as_double();

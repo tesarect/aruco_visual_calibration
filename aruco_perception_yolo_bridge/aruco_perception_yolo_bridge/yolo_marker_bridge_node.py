@@ -141,6 +141,7 @@ never receives anything on that topic, draws nothing extra).
 """
 
 import base64
+import threading
 
 import cv2
 import numpy as np
@@ -159,6 +160,7 @@ from visual_calibration_msgs.msg import (
     Detection2DArray,
     StablePositionArray,
 )
+from visual_calibration_msgs.srv import DetectMarkerOnce
 
 
 def rotation_matrix_to_quaternion(rotation_matrix):
@@ -204,6 +206,38 @@ def rotation_matrix_to_quaternion(rotation_matrix):
         z = 0.25 * s
 
     return (x, y, z, w)
+
+
+def pose_stamped_from_marker_result(image_msg, marker_result):
+    """Builds a geometry_msgs/PoseStamped from one inference_server.py
+    "aruco_marker" result dict (rvec/tvec) -- extracted from
+    YoloMarkerBridgeNode.publish_marker_pose (2026-08-04) so
+    handle_detect_marker_once can build the SAME message shape to return in
+    a DetectMarkerOnce.srv response, without publishing it to marker_pose
+    (per-waypoint hybrid mode's whole point is NOT feeding the continuous
+    topic-driven consumers)."""
+    rvec = np.array(marker_result["rvec"], dtype=float)
+    tvec = np.array(marker_result["tvec"], dtype=float)
+
+    rotation_matrix, _ = cv2.Rodrigues(rvec)
+    qx, qy, qz, qw = rotation_matrix_to_quaternion(rotation_matrix)
+
+    pose_msg = PoseStamped()
+    # Same convention as aruco_detector_node.cpp: reuse the incoming Image
+    # message's own header (stamp + frame_id) rather than
+    # self.get_clock().now() -- matches this project's use_sim_time fix
+    # (see progress.md's 2026-07-08 entry / error-mitigation.md #16) and
+    # keeps frame_id as the camera's optical frame, exactly as the
+    # classical detector does.
+    pose_msg.header = image_msg.header
+    pose_msg.pose.position.x = float(tvec[0])
+    pose_msg.pose.position.y = float(tvec[1])
+    pose_msg.pose.position.z = float(tvec[2])
+    pose_msg.pose.orientation.x = qx
+    pose_msg.pose.orientation.y = qy
+    pose_msg.pose.orientation.z = qz
+    pose_msg.pose.orientation.w = qw
+    return pose_msg
 
 
 # assign_hole_quadrants was moved onto YoloMarkerBridgeNode itself
@@ -536,6 +570,26 @@ class YoloMarkerBridgeNode(Node):
             callback_group=self._camera_info_callback_group,
         )
 
+        # ~/detect_marker_once (2026-08-04) -- on-demand, single-shot
+        # hybrid detection for calibration_broadcaster_node's
+        # hybrid_per_waypoint_enabled mode (see DetectMarkerOnce.srv's own
+        # doc comment). Needs its OWN callback group, same reasoning as
+        # image_sub/camera_info_sub's split above: handle_detect_marker_once
+        # blocks (waiting on self._fresh_frame_event, then on a synchronous
+        # requests.post()) for potentially several seconds, and must not be
+        # queued behind -- or itself block -- image_callback/camera_info_
+        # callback's own groups.
+        self._detect_once_callback_group = MutuallyExclusiveCallbackGroup()
+        self._latest_image_msg = None
+        self._latest_cv_image = None
+        self._fresh_frame_event = threading.Event()
+        self._waiting_for_fresh_frame = False
+        self.detect_marker_once_srv = self.create_service(
+            DetectMarkerOnce, '~/detect_marker_once',
+            self.handle_detect_marker_once,
+            callback_group=self._detect_once_callback_group,
+        )
+
         self.get_logger().info(
             "yolo_marker_bridge_node ready (image_topic: '%s', "
             "camera_info_topic: '%s', pose_topic: '%s', "
@@ -606,34 +660,27 @@ class YoloMarkerBridgeNode(Node):
         finally:
             self._request_in_flight = False
 
-    def _process_image(self, msg):
-        if self.camera_matrix is None:
-            self.get_logger().warn(
-                "No camera_info received yet on '%s' -- skipping detection "
-                "(need intrinsics for the /detect request)." %
-                self.camera_info_topic,
-                throttle_duration_sec=5.0,
-            )
-            return
+    def _send_detect_request(self, cv_image, skip_marker):
+        """Shared request-building/POST/parse logic for one frame -- used
+        by both _process_image (continuous mode) and
+        handle_detect_marker_once (per-waypoint on-demand mode, 2026-08-04),
+        so both send byte-identical requests to inference_server.py and
+        apply the exact same downscale/rescale correction, rather than two
+        divergent copies of this logic.
 
-        try:
-            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
-        except CvBridgeError as e:
-            self.get_logger().error(
-                "cv_bridge conversion failed: %s" % str(e),
-                throttle_duration_sec=5.0,
-            )
-            return
-
+        Returns (result_dict, error_message) -- exactly one is None.
+        result_dict is inference_server.py's parsed JSON response, already
+        rescaled back to cv_image's true native resolution (a no-op if
+        detect_max_width_px didn't trigger this frame).
+        """
         # Detection-resolution downscaling (2026-07-28) -- see
         # detect_max_width_px's own __init__ comment for the full
         # rationale. detect_image/detect_camera_matrix are what's actually
         # SENT to inference_server.py; cv_image itself is left untouched
-        # (still needed at full resolution for the overlay draw below).
-        # rescale_factor is applied to every 2D pixel field in the
-        # response before anything downstream (marker_pose, detections_2d,
-        # overlay) ever sees it -- see the rescale block after the request
-        # completes.
+        # (still needed at full resolution for the overlay draw in
+        # _process_image's caller). rescale_factor is applied to every 2D
+        # pixel field in the response before anything downstream ever sees
+        # it -- see the rescale block below.
         detect_image = cv_image
         detect_camera_matrix = self.camera_matrix
         rescale_factor = 1.0
@@ -663,13 +710,96 @@ class YoloMarkerBridgeNode(Node):
             [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality],
         )
         if not ok:
-            self.get_logger().error(
-                "cv2.imencode failed to JPEG-encode the frame -- skipping.",
+            return None, "cv2.imencode failed to JPEG-encode the frame"
+
+        image_b64 = base64.b64encode(jpeg_bytes.tobytes()).decode("ascii")
+
+        request_body = {
+            "image_jpeg_base64": image_b64,
+            "camera_matrix": detect_camera_matrix.tolist(),
+            "dist_coeffs": self.dist_coeffs.tolist(),
+            "conf": self.confidence_threshold,
+            "skip_marker": skip_marker,
+        }
+
+        try:
+            response = requests.post(
+                self.inference_server_url, json=request_body,
+                timeout=self.request_timeout_sec,
+            )
+        except requests.exceptions.RequestException as e:
+            return None, (
+                "Inference server request failed (%s) -- is inference_server.py "
+                "running in ~/yolo_venv?" % str(e)
+            )
+
+        if response.status_code != 200:
+            return None, (
+                "Inference server returned HTTP %d: %s" %
+                (response.status_code, response.text)
+            )
+
+        try:
+            result = response.json()
+        except ValueError as e:
+            return None, "Inference server response was not valid JSON: %s" % str(e)
+
+        # Rescale every 2D pixel field back to cv_image's TRUE native
+        # resolution -- a no-op (rescale_factor == 1.0) when
+        # detect_max_width_px is disabled/didn't trigger this frame. Done
+        # ONCE, here, so every downstream consumer (publish_marker_pose,
+        # publish_detections_2d, publish_overlay_image_msg,
+        # handle_detect_marker_once) keeps working against full-resolution
+        # pixel coordinates with zero changes of its own -- none of them
+        # need to know downscaling happened. aruco_marker's rvec/tvec (a 3D
+        # metric position/orientation, not pixels) is DELIBERATELY left
+        # untouched: solvePnP already used detect_camera_matrix (scaled to
+        # match the downscaled image), so that result is already correct
+        # in real-world units -- only "corners" (raw pixel coordinates)
+        # needs this correction.
+        if rescale_factor != 1.0:
+            if "aruco_marker" in result:
+                result["aruco_marker"]["corners"] = [
+                    [x * rescale_factor, y * rescale_factor]
+                    for x, y in result["aruco_marker"]["corners"]
+                ]
+            for class_name in ("cup_holder", "hole"):
+                for detection in result.get(class_name, []):
+                    detection["cx"] *= rescale_factor
+                    detection["cy"] *= rescale_factor
+                    detection["bbox"] = [v * rescale_factor for v in detection["bbox"]]
+
+        return result, None
+
+    def _process_image(self, msg):
+        if self.camera_matrix is None:
+            self.get_logger().warn(
+                "No camera_info received yet on '%s' -- skipping detection "
+                "(need intrinsics for the /detect request)." %
+                self.camera_info_topic,
                 throttle_duration_sec=5.0,
             )
             return
 
-        image_b64 = base64.b64encode(jpeg_bytes.tobytes()).decode("ascii")
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except CvBridgeError as e:
+            self.get_logger().error(
+                "cv_bridge conversion failed: %s" % str(e),
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        # Feeds handle_detect_marker_once's wait-for-a-fresh-frame guard
+        # (see that method's own doc comment) -- stored unconditionally,
+        # every frame, regardless of the drop-stale-frames guard above or
+        # any throttling below, so a service call made while this node is
+        # otherwise idle (e.g. hybrid_per_waypoint_enabled with no other
+        # continuous consumer) still sees a frame arrive promptly.
+        self._latest_image_msg = msg
+        self._latest_cv_image = cv_image
+        if self._waiting_for_fresh_frame:
+            self._fresh_frame_event.set()
 
         # Marker-cascade throttling decision (2026-07-27) -- see
         # marker_check_every_n_frames/marker_check_full_rate_when_active's
@@ -689,67 +819,12 @@ class YoloMarkerBridgeNode(Node):
             and (self._frame_count % self.marker_check_every_n_frames != 0)
         )
 
-        request_body = {
-            "image_jpeg_base64": image_b64,
-            "camera_matrix": detect_camera_matrix.tolist(),
-            "dist_coeffs": self.dist_coeffs.tolist(),
-            "conf": self.confidence_threshold,
-            "skip_marker": skip_marker,
-        }
-
-        try:
-            response = requests.post(
-                self.inference_server_url, json=request_body,
-                timeout=self.request_timeout_sec,
-            )
-        except requests.exceptions.RequestException as e:
+        result, error = self._send_detect_request(cv_image, skip_marker)
+        if error is not None:
             self.get_logger().error(
-                "Inference server request failed (%s) -- skipping frame. "
-                "Is inference_server.py running in ~/yolo_venv?" % str(e),
-                throttle_duration_sec=5.0,
+                "%s -- skipping frame." % error, throttle_duration_sec=5.0,
             )
             return
-
-        if response.status_code != 200:
-            self.get_logger().error(
-                "Inference server returned HTTP %d: %s -- skipping frame." %
-                (response.status_code, response.text),
-                throttle_duration_sec=5.0,
-            )
-            return
-
-        try:
-            result = response.json()
-        except ValueError as e:
-            self.get_logger().error(
-                "Inference server response was not valid JSON: %s" % str(e),
-                throttle_duration_sec=5.0,
-            )
-            return
-
-        # Rescale every 2D pixel field back to cv_image's TRUE native
-        # resolution -- a no-op (rescale_factor == 1.0) when
-        # detect_max_width_px is disabled/didn't trigger this frame. Done
-        # ONCE, here, so every downstream consumer (publish_marker_pose,
-        # publish_detections_2d, publish_overlay_image_msg) keeps working
-        # against full-resolution pixel coordinates with zero changes of
-        # its own -- none of them need to know downscaling happened.
-        # aruco_marker's rvec/tvec (a 3D metric position/orientation, not
-        # pixels) is DELIBERATELY left untouched: solvePnP already used
-        # detect_camera_matrix (scaled to match the downscaled image), so
-        # that result is already correct in real-world units -- only
-        # "corners" (raw pixel coordinates) needs this correction.
-        if rescale_factor != 1.0:
-            if "aruco_marker" in result:
-                result["aruco_marker"]["corners"] = [
-                    [x * rescale_factor, y * rescale_factor]
-                    for x, y in result["aruco_marker"]["corners"]
-                ]
-            for class_name in ("cup_holder", "hole"):
-                for detection in result.get(class_name, []):
-                    detection["cx"] *= rescale_factor
-                    detection["cy"] *= rescale_factor
-                    detection["bbox"] = [v * rescale_factor for v in detection["bbox"]]
 
         # Quadrant-label every "hole" entry ONCE per frame, here -- writes a
         # "hole_number" key directly onto each result["hole"][i] dict so
@@ -796,6 +871,73 @@ class YoloMarkerBridgeNode(Node):
         # cup_holder/hole publish unconditionally, regardless of "active" --
         # depth-perception needs this stream running continuously either way.
         self.publish_detections_2d(msg, result)
+
+    def handle_detect_marker_once(self, request, response):
+        """~/detect_marker_once (2026-08-04) -- see DetectMarkerOnce.srv's
+        own doc comment for the full rationale (calibration_broadcaster_
+        node's hybrid_per_waypoint_enabled mode). Waits for the NEXT camera
+        frame to arrive after this call started (not whatever frame was
+        already buffered — that could be stale by an arbitrary amount if
+        this node was otherwise idle, e.g. inference_server.py just got
+        SIGCONT'd and the caller wants a frame taken AFTER the arm settled
+        at this waypoint), then runs exactly one detection with
+        skip_marker forced False (the per-waypoint caller wants the
+        cascade to actually run every time, regardless of the continuous-
+        mode marker_check_every_n_frames throttle — that throttle exists
+        to bound CONTINUOUS load, which is irrelevant here since this is
+        already a single on-demand call).
+
+        Does NOT publish to marker_pose/detections_2d/overlay_image at
+        all -- per-waypoint hybrid mode's whole point is bypassing those
+        continuous-topic consumers, not feeding them an extra sample.
+        """
+        # Reset before waiting -- a stale set() from a previous call (or
+        # from _process_image running concurrently while no one was
+        # waiting) must not let this immediately return an old frame.
+        self._fresh_frame_event.clear()
+        self._waiting_for_fresh_frame = True
+        try:
+            got_fresh_frame = self._fresh_frame_event.wait(timeout=self.request_timeout_sec)
+        finally:
+            self._waiting_for_fresh_frame = False
+
+        if not got_fresh_frame or self._latest_cv_image is None:
+            response.success = False
+            response.message = (
+                "Timed out waiting for a camera frame on '%s' (%.1fs) -- is the "
+                "camera publishing?" % (self.image_topic, self.request_timeout_sec)
+            )
+            return response
+
+        if self.camera_matrix is None:
+            response.success = False
+            response.message = (
+                "No camera_info received yet on '%s' -- need intrinsics for the "
+                "/detect request." % self.camera_info_topic
+            )
+            return response
+
+        cv_image = self._latest_cv_image
+        image_msg = self._latest_image_msg
+
+        result, error = self._send_detect_request(cv_image, skip_marker=False)
+        if error is not None:
+            response.success = False
+            response.message = error
+            return response
+
+        if "aruco_marker" not in result:
+            response.success = False
+            response.message = "No aruco_marker detected in this frame."
+            return response
+
+        marker_result = result["aruco_marker"]
+        response.success = True
+        response.message = "OK"
+        response.marker_pose = pose_stamped_from_marker_result(image_msg, marker_result)
+        response.cascade_variant_used = marker_result.get("cascade_variant", "")
+        response.cascade_image_b64 = marker_result.get("cascade_image_b64", "")
+        return response
 
     def assign_hole_quadrants(self, hole_dicts):
         """Assigns each entry of `hole_dicts` (a list of the raw
@@ -1040,29 +1182,7 @@ class YoloMarkerBridgeNode(Node):
         self.detections_2d_pub.publish(array_msg)
 
     def publish_marker_pose(self, image_msg, marker_result):
-        rvec = np.array(marker_result["rvec"], dtype=float)
-        tvec = np.array(marker_result["tvec"], dtype=float)
-
-        rotation_matrix, _ = cv2.Rodrigues(rvec)
-        qx, qy, qz, qw = rotation_matrix_to_quaternion(rotation_matrix)
-
-        pose_msg = PoseStamped()
-        # Same convention as aruco_detector_node.cpp: reuse the incoming
-        # Image message's own header (stamp + frame_id) rather than
-        # self.get_clock().now() -- matches this project's use_sim_time
-        # fix (see progress.md's 2026-07-08 entry / error-mitigation.md
-        # #16) and keeps frame_id as the camera's optical frame, exactly
-        # as the classical detector does.
-        pose_msg.header = image_msg.header
-        pose_msg.pose.position.x = float(tvec[0])
-        pose_msg.pose.position.y = float(tvec[1])
-        pose_msg.pose.position.z = float(tvec[2])
-        pose_msg.pose.orientation.x = qx
-        pose_msg.pose.orientation.y = qy
-        pose_msg.pose.orientation.z = qz
-        pose_msg.pose.orientation.w = qw
-
-        self.pose_pub.publish(pose_msg)
+        self.pose_pub.publish(pose_stamped_from_marker_result(image_msg, marker_result))
 
     def publish_overlay_image_msg(self, image_msg, cv_image, result):
         """Yellow border + XYZ axes overlay for aruco_marker (matching

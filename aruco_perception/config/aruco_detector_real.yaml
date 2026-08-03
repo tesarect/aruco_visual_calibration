@@ -70,3 +70,15 @@ aruco_detector_node:
     corner_refinement_max_iterations: 30
     corner_refinement_min_accuracy: 0.1
     polygonal_approx_accuracy_rate: 0.03
+
+    # kind of had a stable but still not perfect corner detection
+    # adaptive_thresh_win_size_min: 3
+    # adaptive_thresh_win_size_max: 40
+    # adaptive_thresh_win_size_step: 5
+    # adaptive_thresh_constant: 12.0
+    # min_marker_perimeter_rate: 0.03
+    # corner_refinement_method: 2
+    # corner_refinement_win_size: 3
+    # corner_refinement_max_iterations: 40
+    # corner_refinement_min_accuracy: 0.02
+    # polygonal_approx_accuracy_rate: 0.01

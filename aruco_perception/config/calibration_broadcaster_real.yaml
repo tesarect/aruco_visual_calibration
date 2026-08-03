@@ -151,7 +151,23 @@ calibration_broadcaster_node:
     # separate same-waypoint agreement check — outlier_rejection above
     # sorts out any disagreement between them. Set to 1 to restore the
     # original one-sample-per-waypoint behavior.
-    samples_per_waypoint: 2
+    #
+    # NOTE (2026-08-04): set this to 1 when testing
+    # hybrid_per_waypoint_enabled below — each hybrid detection is already
+    # a full, relatively expensive YOLO+cascade call (unlike a cheap
+    # continuous-topic read), so taking 2 per waypoint in that mode doubles
+    # cost for comparatively little benefit.
+    samples_per_waypoint: 1
+
+    # --- Per-waypoint on-demand hybrid detection (2026-08-04) ---
+    # See CalibrationBroadcasterConfig::hybrid_per_waypoint_enabled's own
+    # doc comment for the full mechanism/rationale. Default false — an
+    # opt-in alternative to today's classical/continuous-hybrid detection,
+    # not a replacement. Set samples_per_waypoint to 1 above when testing
+    # this (see that param's own note). NOT present in sim's yaml at all —
+    # sim's classical detector has no real-world corner-detection noise to
+    # address with this.
+    hybrid_per_waypoint_enabled: false
 
     # --- Clustering-based position+orientation averaging (2026-07-29) ---
     # When true, finishCalibration() computes the final broadcast POSITION

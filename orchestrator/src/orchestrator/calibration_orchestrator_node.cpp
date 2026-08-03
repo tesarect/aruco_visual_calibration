@@ -116,6 +116,17 @@ CalibrationOrchestratorNode::CalibrationOrchestratorNode()
       std::placeholders::_2),
     rmw_qos_profile_services_default, set_detector_mode_callback_group_);
 
+  // No dedicated callback group needed here (unlike set_detector_mode_
+  // service_ above) — signalInferenceServer() is fully synchronous, no
+  // AsyncParametersClient future to wait on, so this node's shared default
+  // group can safely serve it.
+  signal_inference_server_service_ =
+    create_service<visual_calibration_msgs::srv::SignalInferenceServer>(
+    "~/signal_inference_server",
+    std::bind(
+      &CalibrationOrchestratorNode::handleSignalInferenceServer, this, std::placeholders::_1,
+      std::placeholders::_2));
+
   RCLCPP_INFO(
     get_logger(),
     "calibration_orchestrator_node ready (auto_center_enabled: %s) — send a "
@@ -477,6 +488,16 @@ void CalibrationOrchestratorNode::handleSetDetectorMode(
   response->message = std::string("Switched to ") + request->mode + " (" + incoming_name +
     " active, " + outgoing_name + " inactive)";
   RCLCPP_INFO(get_logger(), "%s", response->message.c_str());
+}
+
+void CalibrationOrchestratorNode::handleSignalInferenceServer(
+  const std::shared_ptr<visual_calibration_msgs::srv::SignalInferenceServer::Request> request,
+  std::shared_ptr<visual_calibration_msgs::srv::SignalInferenceServer::Response> response)
+{
+  signalInferenceServer(request->stop ? SIGSTOP : SIGCONT);
+  response->success = true;
+  response->message = request->stop ?
+    "Sent SIGSTOP to inference_server.py" : "Sent SIGCONT to inference_server.py";
 }
 
 rclcpp_action::GoalResponse CalibrationOrchestratorNode::handleGoal(

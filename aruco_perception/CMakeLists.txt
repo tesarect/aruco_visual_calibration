@@ -91,6 +91,12 @@ ament_target_dependencies(calibration_broadcaster_node
   tf2_geometry_msgs
   Eigen3
 )
+# OpenCV (2026-08-04): hybrid_per_waypoint_enabled mode's combined-grid
+# debug image capture (decoding each waypoint's returned base64 JPEG crop,
+# tiling into one grid, cv::putText labels, cv::imwrite) — first OpenCV
+# usage in this executable, unlike aruco_detector_node/
+# cup_holder_detector_node in this same package, which already link it.
+target_link_libraries(calibration_broadcaster_node ${OpenCV_LIBS})
 
 install(TARGETS
   image_subscriber_node

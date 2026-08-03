@@ -1,0 +1,17 @@
+# Sends SIGSTOP or SIGCONT to the running "python3 inference_server.py"
+# process (2026-08-04) — a thin service wrapper around
+# CalibrationOrchestratorNode::signalInferenceServer(), which already does
+# exactly this (scans /proc for the process, signals it) for the
+# ENTIRE duration of a ~/calibrate run. Exposed as a service so
+# calibration_broadcaster_node (package aruco_perception, NOT orchestrator
+# — cannot call the orchestrator's private member function directly across
+# that package boundary) can reuse the SAME signalling implementation at a
+# per-waypoint grain for hybrid_per_waypoint_enabled mode, instead of a
+# second, divergent /proc-scan-and-signal implementation.
+#
+# stop: true = SIGSTOP (pause, ~0% CPU while stopped — confirmed by
+# executeAutoCalibrate's own existing use), false = SIGCONT (resume).
+bool stop
+---
+bool success
+string message

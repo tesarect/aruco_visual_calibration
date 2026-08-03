@@ -20,6 +20,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MoveToPreset.srv"
   "srv/MoveToInstance.srv"
   "srv/SetDetectorMode.srv"
+  "srv/DetectMarkerOnce.srv"
+  "srv/SignalInferenceServer.srv"
   "action/Calibrate.action"
   "action/AutoCalibrate.action"
   DEPENDENCIES geometry_msgs std_msgs

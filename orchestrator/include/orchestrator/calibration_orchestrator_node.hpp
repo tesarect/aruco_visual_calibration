@@ -23,6 +23,7 @@
 #include <visual_calibration_msgs/srv/get_standoff_pose.hpp>
 #include <visual_calibration_msgs/srv/move_to_preset.hpp>
 #include <visual_calibration_msgs/srv/set_detector_mode.hpp>
+#include <visual_calibration_msgs/srv/signal_inference_server.hpp>
 #include <visual_calibration_msgs/srv/trace_path.hpp>
 
 namespace orchestrator
@@ -211,6 +212,13 @@ struct OrchestratorConfig
 /// instances (one per detector node) and the standard ROS set_parameters
 /// service — no lifecycle nodes, no process start/stop, both detector
 /// nodes stay running/subscribed the whole time. See handleSetDetectorMode.
+///
+/// Also exposes ~/signal_inference_server (visual_calibration_msgs/
+/// SignalInferenceServer, 2026-08-04) — a thin wrapper around
+/// signalInferenceServer() so calibration_broadcaster_node (a different
+/// package) can SIGSTOP/SIGCONT the inference_server.py process itself,
+/// at a per-waypoint grain, for its own hybrid_per_waypoint_enabled mode —
+/// see handleSignalInferenceServer.
 class CalibrationOrchestratorNode : public rclcpp::Node
 {
 public:
@@ -291,6 +299,23 @@ private:
   void handleSetDetectorMode(
     const std::shared_ptr<visual_calibration_msgs::srv::SetDetectorMode::Request> request,
     std::shared_ptr<visual_calibration_msgs::srv::SetDetectorMode::Response> response);
+
+  /// Handles ~/signal_inference_server (2026-08-04) — a thin wrapper
+  /// exposing signalInferenceServer() (SIGSTOP/SIGCONT the
+  /// inference_server.py process) as a service, so calibration_broadcaster_
+  /// node (a different package — cannot call this class's private member
+  /// function directly) can reuse the SAME /proc-scan-and-signal
+  /// implementation at a per-waypoint grain for its
+  /// hybrid_per_waypoint_enabled mode, instead of executeAutoCalibrate's
+  /// existing once-per-whole-run SIGSTOP/SIGCONT. Unlike
+  /// handleSetDetectorMode, this does NOT need its own callback group:
+  /// signalInferenceServer() is fully synchronous (a direct /proc scan +
+  /// kill() syscalls, no futures/waits — see that method's own doc
+  /// comment), so it cannot deadlock the shared default callback group the
+  /// way an AsyncParametersClient-blocking call could.
+  void handleSignalInferenceServer(
+    const std::shared_ptr<visual_calibration_msgs::srv::SignalInferenceServer::Request> request,
+    std::shared_ptr<visual_calibration_msgs::srv::SignalInferenceServer::Response> response);
 
   /// Publishes one AutoCalibrateStatus with phase=PHASE_RUNNING and the
   /// given feedback fields (result fields left zero-valued) — called from
@@ -627,6 +652,13 @@ private:
   rclcpp::CallbackGroup::SharedPtr set_detector_mode_callback_group_;
   rclcpp::Service<visual_calibration_msgs::srv::SetDetectorMode>::SharedPtr
     set_detector_mode_service_;
+  /// ~/signal_inference_server (2026-08-04) — see
+  /// handleSignalInferenceServer's own doc comment. Uses this node's
+  /// shared default callback group (no dedicated group needed, unlike
+  /// set_detector_mode_service_ above — signalInferenceServer() is fully
+  /// synchronous, nothing to deadlock against).
+  rclcpp::Service<visual_calibration_msgs::srv::SignalInferenceServer>::SharedPtr
+    signal_inference_server_service_;
   /// The in-flight goal from the most recent ~/start_auto_calibrate call,
   /// set once its goal-response callback confirms server-side acceptance
   /// — used by handleCancelAutoCalibrate. Guarded by

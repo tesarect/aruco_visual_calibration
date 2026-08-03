@@ -1,0 +1,35 @@
+# On-demand, single-shot hybrid (YOLO crop + image-enhancement cascade +
+# classical ArUco + solvePnP) marker detection — added 2026-08-04 for
+# calibration_broadcaster_node's per-waypoint hybrid mode
+# (hybrid_per_waypoint_enabled), so exactly one detection happens per
+# waypoint instead of yolo_marker_bridge_node.py running its full pipeline
+# continuously at camera framerate. Served by yolo_marker_bridge_node.py:
+# on request, captures the next incoming camera frame and runs it through
+# the SAME estimate_marker_pose_cascade() path already used for continuous
+# mode (no duplicated cascade logic), returning the result synchronously
+# instead of only publishing it to marker_pose.
+#
+# Empty request — mirrors GetPolygonWaypoints.srv's own empty-request shape
+# (this is also a read-only "give me one result" call, not an action that
+# changes state elsewhere).
+---
+bool success
+string message
+geometry_msgs/PoseStamped marker_pose
+
+# The specific cascade variant that succeeded (e.g. "gamma_0.7",
+# "upscale_4x+clahe") — see YOLO-pipeline/config/cascade_real.yaml's own
+# variant list. Empty string if success is false. Used by
+# calibration_broadcaster_node to label each tile in its combined-grid
+# debug image (see that node's own doc comment on hybrid_per_waypoint_enabled).
+string cascade_variant_used
+
+# The actual crop image that succeeded detection (JPEG, base64-encoded —
+# same encoding inference_server.py's /debug_sweep endpoint already uses
+# via _encode_image_b64, reused here rather than inventing a second image
+# transport). Empty string if success is false. This is the "how clean are
+# the corners" inspection image the calibration_broadcaster_node
+# accumulates across a run into one labeled grid, per user's explicit
+# request (2026-08-04) for visual confirmation + a presentation artifact —
+# not consumed by any other node.
+string cascade_image_b64
