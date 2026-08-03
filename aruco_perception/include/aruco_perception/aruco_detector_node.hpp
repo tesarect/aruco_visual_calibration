@@ -81,6 +81,27 @@ struct ArucoDetectorConfig
   /// 1=subpixel, 2=contour, 3=AprilTag. Subpixel refinement improves pose
   /// accuracy at a small speed cost.
   int corner_refinement_method = 1;
+  /// cv::aruco::DetectorParameters::cornerRefinementWinSize (2026-08-03) —
+  /// pixel-radius neighborhood searched around each initial corner guess
+  /// during subpixel/contour refinement. OpenCV default 5. Never tuned
+  /// before this field existed — the prior 25-capture real tuning pass
+  /// (see aruco_detector_real.yaml's own header comment) only swept the 6
+  /// fields above it, not this one.
+  int corner_refinement_win_size = 5;
+  /// cv::aruco::DetectorParameters::cornerRefinementMaxIterations —
+  /// refinement's stop criteria: max iterations before giving up. OpenCV
+  /// default 30.
+  int corner_refinement_max_iterations = 30;
+  /// cv::aruco::DetectorParameters::cornerRefinementMinAccuracy —
+  /// refinement's stop criteria: minimum error to consider converged.
+  /// OpenCV default 0.1.
+  double corner_refinement_min_accuracy = 0.1;
+  /// cv::aruco::DetectorParameters::polygonalApproxAccuracyRate — how
+  /// loosely a candidate contour is approximated as a quadrilateral before
+  /// its 4 corners are extracted, upstream of refinement entirely. OpenCV
+  /// default 0.03. Too loose here is a plausible direct cause of a corner
+  /// that looks visibly pulled in/out of an otherwise-square marker.
+  double polygonal_approx_accuracy_rate = 0.03;
   /// Startup default for the "active" parameter (see class doc comment) —
   /// true = classical detection is the default detector on startup. This
   /// initial value is read once at construction; the LIVE value is always
@@ -151,6 +172,11 @@ private:
   /// Builds a cv::aruco::DetectorParameters from config_'s tunables.
   cv::Ptr<cv::aruco::DetectorParameters> buildDetectorParams() const;
 
+  /// Logs marker detection state transitions and (2026-08-03) a throttled
+  /// per-frame corner-squareness diagnostic (side/diagonal lengths of the
+  /// detected quadrilateral) whenever the marker is found — see the
+  /// corner_refinement_*/polygonal_approx_accuracy_rate fields on
+  /// ArucoDetectorConfig, added to be tuned against this measurement.
   void imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg);
   void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::ConstSharedPtr & msg);
 

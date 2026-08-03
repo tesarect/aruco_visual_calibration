@@ -204,21 +204,4 @@ calibration_broadcaster_node:
     # _errors/finetuning_modification_floor_plan.txt), not a proven fix
     # yet — flip to true to test live, compare max_spread_deg/
     # mean_spread_deg before vs. after with the same physical setup.
-    #
-    # Set to true (2026-08-03) to run the forced-value test below — real's
-    # mount yaw/roll are no longer "unmeasured" as the comment above says
-    # (that was true as of 2026-07-30; the mount has since been physically
-    # bolted-and-measured), see yaw_roll_clamp_forced_yaw_deg/
-    # forced_roll_deg just below.
-    yaw_roll_clamp_enabled: true
-
-    # Forced yaw/roll test bypass (2026-08-03, real-only, throwaway test
-    # hook — see CalibrationBroadcasterConfig::yaw_roll_clamp_forced_yaw_deg's
-    # own doc comment). Real's mount has now been physically bolted and
-    # measured at yaw=-180deg, roll=180deg — set here so clampYawRoll()
-    # uses these known-correct constants directly for this test run instead
-    # of re-deriving (possibly noisy) values from this run's own samples.
-    # Set either back to NaN (or remove) to revert to the original
-    # per-run circular-mean behavior.
-    yaw_roll_clamp_forced_yaw_deg: -180.0
-    yaw_roll_clamp_forced_roll_deg: 180.0
+    yaw_roll_clamp_enabled: false

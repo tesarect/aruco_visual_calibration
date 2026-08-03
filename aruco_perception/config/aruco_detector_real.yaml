@@ -12,6 +12,18 @@
 # it alone reached 25/25 (100%). Every other knob tested had no measurable
 # effect in this range, so they're left at sim's values to minimize
 # unnecessary drift from a known-working baseline.
+#
+# Second round (2026-08-03): the sweep above never touched the 4
+# corner_refinement_win_size/max_iterations/min_accuracy/polygonal_approx_
+# accuracy_rate params below — they weren't parameterized yet. Added after
+# observing real calibration runs with visibly non-square/non-parallelogram
+# corners in the overlay (one corner pulled in/out relative to the other
+# 3), suspected as the actual source of per-sample orientation noise/spread
+# seen downstream in calibration_broadcaster_node. Currently at OpenCV's
+# own defaults (true no-op vs. today's behavior) — see
+# aruco_detector_node.cpp's new corner-squareness diagnostic log
+# (imageCallback, "Marker corners: sides=...") for objective before/after
+# numbers while tuning these one at a time.
 aruco_detector_node:
   ros__parameters:
     image_topic: "/D415/color/image_raw"
@@ -54,3 +66,7 @@ aruco_detector_node:
     adaptive_thresh_constant: 3.0
     min_marker_perimeter_rate: 0.03
     corner_refinement_method: 1
+    corner_refinement_win_size: 5
+    corner_refinement_max_iterations: 30
+    corner_refinement_min_accuracy: 0.1
+    polygonal_approx_accuracy_rate: 0.03

@@ -60,6 +60,10 @@ cv::Ptr<cv::aruco::DetectorParameters> ArucoDetectorNode::buildDetectorParams() 
   params->adaptiveThreshConstant = config_.adaptive_thresh_constant;
   params->minMarkerPerimeterRate = config_.min_marker_perimeter_rate;
   params->cornerRefinementMethod = config_.corner_refinement_method;
+  params->cornerRefinementWinSize = config_.corner_refinement_win_size;
+  params->cornerRefinementMaxIterations = config_.corner_refinement_max_iterations;
+  params->cornerRefinementMinAccuracy = config_.corner_refinement_min_accuracy;
+  params->polygonalApproxAccuracyRate = config_.polygonal_approx_accuracy_rate;
   return params;
 }
 
@@ -148,6 +152,31 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
     marker_was_visible_ = true;
 
     single_marker_corners = {marker_corners[idx]};
+
+    // Corner/squareness diagnostic (2026-08-03) — a physically square
+    // marker's 4 detected corners should form 4 equal side lengths and 2
+    // equal diagonal lengths; logging these numbers (rather than only the
+    // overlay image) gives an objective, comparable-across-tuning-attempts
+    // measure of "how square are the corners actually landing" — see
+    // ArucoDetectorConfig's new corner_refinement_*/polygonal_approx_
+    // accuracy_rate fields, added specifically to be tuned against this.
+    // Corner order is corners[0..3] going around the marker (OpenCV
+    // convention: top-left, top-right, bottom-right, bottom-left).
+    {
+      const std::vector<cv::Point2f> & c = single_marker_corners[0];
+      const double side01 = cv::norm(c[0] - c[1]);
+      const double side12 = cv::norm(c[1] - c[2]);
+      const double side23 = cv::norm(c[2] - c[3]);
+      const double side30 = cv::norm(c[3] - c[0]);
+      const double diag02 = cv::norm(c[0] - c[2]);
+      const double diag13 = cv::norm(c[1] - c[3]);
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "Marker corners: sides=(%.2f, %.2f, %.2f, %.2f)px diagonals=(%.2f, %.2f)px "
+        "— a perfect square has all 4 sides equal and both diagonals equal",
+        side01, side12, side23, side30, diag02, diag13);
+    }
+
     cv::aruco::estimatePoseSingleMarkers(
       single_marker_corners, config_.marker_length_m, camera_matrix_, distortion_coeffs_,
       rvecs, tvecs);
@@ -296,6 +325,14 @@ ArucoDetectorConfig ArucoDetectorNode::loadConfigFromParams() const
   config.min_marker_perimeter_rate = get_parameter("min_marker_perimeter_rate").as_double();
   config.corner_refinement_method =
     static_cast<int>(get_parameter("corner_refinement_method").as_int());
+  config.corner_refinement_win_size =
+    static_cast<int>(get_parameter("corner_refinement_win_size").as_int());
+  config.corner_refinement_max_iterations =
+    static_cast<int>(get_parameter("corner_refinement_max_iterations").as_int());
+  config.corner_refinement_min_accuracy =
+    get_parameter("corner_refinement_min_accuracy").as_double();
+  config.polygonal_approx_accuracy_rate =
+    get_parameter("polygonal_approx_accuracy_rate").as_double();
   return config;
 }
 

@@ -59,3 +59,11 @@ aruco_detector_node:
     adaptive_thresh_constant: 7.0
     min_marker_perimeter_rate: 0.03
     corner_refinement_method: 1
+    # OpenCV's own defaults (2026-08-03) — added for struct/param-
+    # declaration consistency with aruco_detector_real.yaml; sim's
+    # synthetic marker doesn't have real-world corner-detection noise to
+    # tune against, so these aren't expected to need changing here.
+    corner_refinement_win_size: 5
+    corner_refinement_max_iterations: 30
+    corner_refinement_min_accuracy: 0.1
+    polygonal_approx_accuracy_rate: 0.03
