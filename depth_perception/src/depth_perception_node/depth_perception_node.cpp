@@ -170,7 +170,12 @@ void DepthPerceptionNode::detections2dCallback(
       continue;
     }
 
-    const BackProjectedPoint point = backProjectDetection(detection.cx, detection.cy);
+    const std::array<double, 4> bbox = {
+      detection.bbox[0], detection.bbox[1], detection.bbox[2], detection.bbox[3]};
+    double radius_px = 0.0;
+    int patch_half_px = 0;
+    const BackProjectedPoint point =
+      backProjectDetection(detection.cx, detection.cy, bbox, radius_px, patch_half_px);
 
     // hole_number is only meaningful for "hole" (see Detection2D.msg's own
     // doc comment) — cup_holder always uses 0, matching the message's own
@@ -193,10 +198,10 @@ void DepthPerceptionNode::detections2dCallback(
       std::snprintf(
         line, sizeof(line),
         "\n  %s: frame(x=%.3f, y=%.3f, z=%.3f) stable(x=%.3f, y=%.3f, z=%.3f) "
-        "m, n=%zu/%d, %s, confidence=%.2f",
+        "m, n=%zu/%d, %s, confidence=%.2f, radius_px=%.2f, patch_half_px=%d",
         instance_desc, point.x, point.y, point.z, stable.x, stable.y, stable.z,
         window_size, config_.rolling_window_size, drifted ? "DRIFT" : "held",
-        detection.confidence);
+        detection.confidence, radius_px, patch_half_px);
     } else {
       // A single frame's failed back-projection does NOT touch that
       // instance's rolling window — see updateRollingWindow's doc
@@ -329,6 +334,21 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
   get_parameter_or(
     "instance_tf_max_horizontal_dist_m", instance_tf_max_horizontal_dist_m, 0.0);
 
+  // instance_tf_xy_offset_m (2026-08-03) — see this param's own doc
+  // comment on DepthPerceptionConfig for the full rationale (compensates
+  // cup_holder's 2D pixel centroid bias). Read LIVE, same convention as
+  // the two params above. Declared as a 2-element double array
+  // ([x_offset_m, y_offset_m]); get_parameter_or's array overload requires
+  // the default argument's type to already match, hence the explicit
+  // std::vector<double> default here.
+  std::vector<double> instance_tf_xy_offset_m;
+  get_parameter_or(
+    "instance_tf_xy_offset_m", instance_tf_xy_offset_m, std::vector<double>{0.0, 0.0});
+  const double instance_tf_x_offset_m =
+    instance_tf_xy_offset_m.size() > 0 ? instance_tf_xy_offset_m[0] : 0.0;
+  const double instance_tf_y_offset_m =
+    instance_tf_xy_offset_m.size() > 1 ? instance_tf_xy_offset_m[1] : 0.0;
+
   if (cup_holder_valid) {
     const auto & cup_holder_point = cup_holder_it->second.last_stable;
     tf2::Transform camera_to_cup_holder(
@@ -336,8 +356,10 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
       tf2::Vector3(cup_holder_point.x, cup_holder_point.y, cup_holder_point.z));
     const tf2::Transform known_to_cup_holder = known_to_camera * camera_to_cup_holder;
 
-    double cup_holder_x = known_to_cup_holder.getOrigin().x();
-    double cup_holder_y = known_to_cup_holder.getOrigin().y();
+    const double cup_holder_raw_x = known_to_cup_holder.getOrigin().x();
+    const double cup_holder_raw_y = known_to_cup_holder.getOrigin().y();
+    double cup_holder_x = cup_holder_raw_x + instance_tf_x_offset_m;
+    double cup_holder_y = cup_holder_raw_y + instance_tf_y_offset_m;
 
     if (instance_tf_max_horizontal_dist_m > 0.0) {
       const double horizontal_dist = std::sqrt(
@@ -348,6 +370,24 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
         cup_holder_y *= scale;
       }
     }
+
+    const double cup_holder_raw_z = known_to_cup_holder.getOrigin().z();
+    const double cup_holder_z = cup_holder_raw_z + instance_tf_z_offset_m;
+
+    // Diagnostic logging (2026-08-03) — supports confirming/ruling out
+    // Bug 1 (cup_holder's 2D centroid bias) per-environment from a single
+    // log capture, without needing a screenshot. Raw vs. offset-applied,
+    // so a future comparison against ground truth (sim's own
+    // base_link -> wrist_rgbd_camera_link chain, or a real-world
+    // measurement) doesn't require re-running with print-debugging — see
+    // the fix's plan doc for the full log-first-then-tune rationale.
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "cup_holder TF: raw(x=%.4f, y=%.4f, z=%.4f) offset_applied(x=%.4f, y=%.4f, z=%.4f) "
+      "in '%s' [xy_offset=(%.4f, %.4f), z_offset=%.4f]",
+      cup_holder_raw_x, cup_holder_raw_y, cup_holder_raw_z, cup_holder_x, cup_holder_y,
+      cup_holder_z, config_.known_chain_frame.c_str(), instance_tf_x_offset_m,
+      instance_tf_y_offset_m, instance_tf_z_offset_m);
 
     geometry_msgs::msg::TransformStamped cup_holder_tf;
     cup_holder_tf.header.stamp = header.stamp;
@@ -361,8 +401,7 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     // automatically since they're parented to cup_holder, not
     // known_chain_frame, directly (see this function's own comment on
     // that re-anchoring) — no separate offset needed for them.
-    cup_holder_tf.transform.translation.z =
-      known_to_cup_holder.getOrigin().z() + instance_tf_z_offset_m;
+    cup_holder_tf.transform.translation.z = cup_holder_z;
     cup_holder_tf.transform.rotation.w = 1.0;
     instance_tf_broadcaster_.sendTransform(cup_holder_tf);
   }
@@ -396,6 +435,11 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
       window.last_stable.y - cup_holder_point.y,
       window.last_stable.z - cup_holder_point.z);
     const tf2::Vector3 cup_holder_to_hole = known_to_camera.getBasis() * camera_offset;
+
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 5000,
+      "hole_%d TF: offset_from_cup_holder(x=%.4f, y=%.4f, z=%.4f)",
+      key.hole_number, cup_holder_to_hole.x(), cup_holder_to_hole.y(), cup_holder_to_hole.z());
 
     geometry_msgs::msg::TransformStamped hole_tf;
     hole_tf.header.stamp = header.stamp;
@@ -529,9 +573,27 @@ BackProjectedPoint DepthPerceptionNode::updateRollingWindow(
   return window.last_stable;
 }
 
-BackProjectedPoint DepthPerceptionNode::backProjectDetection(double cx, double cy) const
+BackProjectedPoint DepthPerceptionNode::backProjectDetection(
+  double cx, double cy, const std::array<double, 4> & bbox,
+  double & out_radius_px, int & out_patch_half_px) const
 {
   BackProjectedPoint result;
+
+  // Radius-scaled patch half-size (2026-08-03) — see this function's own
+  // doc comment in the header for the full rationale. bbox is
+  // [x1, y1, x2, y2]; width/height can legitimately differ (real's YOLO
+  // box is a true axis-aligned box, not a synthesized square), so `max`
+  // rather than assuming a square. Computed unconditionally, even on the
+  // early-return paths below, so the caller's diagnostic log always has a
+  // real value to report — not just on a successful back-projection.
+  const double radius_px = std::max(bbox[2] - bbox[0], bbox[3] - bbox[1]) / 2.0;
+  const double scaled_half = config_.depth_patch_radius_scale_factor * radius_px;
+  const int half = static_cast<int>(std::lround(
+    std::clamp(
+      scaled_half, static_cast<double>(config_.depth_patch_min_half_size_px),
+      static_cast<double>(config_.depth_patch_half_size_px))));
+  out_radius_px = radius_px;
+  out_patch_half_px = half;
 
   std::lock_guard<std::mutex> lock(depth_mutex_);
   if (latest_depth_.empty()) {
@@ -540,7 +602,6 @@ BackProjectedPoint DepthPerceptionNode::backProjectDetection(double cx, double c
 
   const int u = static_cast<int>(std::lround(cx));
   const int v = static_cast<int>(std::lround(cy));
-  const int half = config_.depth_patch_half_size_px;
 
   const int u0 = std::max(0, u - half);
   const int v0 = std::max(0, v - half);
@@ -599,6 +660,10 @@ DepthPerceptionConfig DepthPerceptionNode::loadConfigFromParams() const
   config.depth_scale_to_meters = get_parameter("depth_scale_to_meters").as_double();
   config.depth_patch_half_size_px =
     static_cast<int>(get_parameter("depth_patch_half_size_px").as_int());
+  config.depth_patch_radius_scale_factor =
+    get_parameter("depth_patch_radius_scale_factor").as_double();
+  config.depth_patch_min_half_size_px =
+    static_cast<int>(get_parameter("depth_patch_min_half_size_px").as_int());
   config.pause_while_calibration = get_parameter("pause_while_calibration").as_bool();
   if (config.pause_while_calibration) {
     config.auto_calibrate_status_topic =

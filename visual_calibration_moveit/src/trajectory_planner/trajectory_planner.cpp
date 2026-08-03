@@ -757,6 +757,46 @@ double distanceFromPlanningOrigin(const geometry_msgs::msg::Pose & pose)
     pose.position.x * pose.position.x + pose.position.y * pose.position.y +
     pose.position.z * pose.position.z);
 }
+
+/// Fixed goal orientation for ~/move_to_instance's hover/descend poses
+/// (2026-08-02) — replaces the earlier identity-quaternion goal, which
+/// forced end_effector_frame into a physically arbitrary orientation
+/// (zero rotation relative to the planning frame's own axes, unrelated to
+/// how a gripper should actually approach a hole/holder) and correlated
+/// directly with live OMPL failures ("Unable to find solution", zero
+/// collision reported — not blocked by an obstacle, just an unnecessarily
+/// hard-to-satisfy target). Per explicit request: constrain ONLY
+/// end_effector_frame's own local +X axis (its "palm-facing" axis, per
+/// this project's REP-103 convention — confirmed via the rg2_gripper/
+/// robotiq_85 mount joint chains from tool0) to point straight down
+/// (world/planning-frame -Z), leaving roll about that axis and every
+/// other rotational DOF free — deliberately NOT trying to also match
+/// yaw/pitch of tool0 or anything else, since cup_holder/hole TFs carry
+/// no real orientation data to match in the first place (position-only
+/// detection — see broadcastInstanceTfs's own doc comment).
+///
+/// Constructed directly (not via any TF or tool0 mount-chain math) so the
+/// SAME quaternion is correct regardless of which link end_effector_frame
+/// actually is (rg2_gripper_aruco_link on sim, robotiq_85_base_link on
+/// real — their tool0 mount rotations differ, but this goal doesn't
+/// reference tool0 at all): pick local X -> world (0,0,-1), local Y ->
+/// world (0,1,0) (arbitrary valid completion — this is the "roll" choice
+/// left unconstrained, picked once for determinism, not because it's
+/// special), local Z -> world (1,0,0) via cross product to keep the frame
+/// right-handed. This is ONE valid fixed choice among infinitely many
+/// (any roll about the down axis would equally satisfy "palm facing
+/// down") — a genuinely free/tolerance-based orientation constraint
+/// (moveit_msgs::OrientationConstraint via setPathConstraints) would let
+/// OMPL pick whichever roll is easiest to reach, but was explicitly
+/// deferred in favor of this simpler fixed-quaternion approach as a first
+/// thing to try (no existing precedent for path constraints anywhere in
+/// this codebase yet).
+geometry_msgs::msg::Quaternion gripperFacingDownOrientation()
+{
+  tf2::Quaternion q;
+  q.setValue(0.0, 0.7071067811865475, 0.0, 0.7071067811865476);  // x,y,z,w
+  return tf2::toMsg(q);
+}
 }  // namespace
 
 void TrajectoryPlanner::handleMoveToInstance(
@@ -821,7 +861,12 @@ void TrajectoryPlanner::handleMoveToInstance(
   hover_pose.position.x = cup_holder_tf.transform.translation.x;
   hover_pose.position.y = cup_holder_tf.transform.translation.y;
   hover_pose.position.z = cup_holder_tf.transform.translation.z + hover_config_.hover_offset_m;
-  hover_pose.orientation = cup_holder_tf.transform.rotation;  // identity — position-only TF
+  // gripperFacingDownOrientation() (2026-08-02), NOT cup_holder_tf's own
+  // rotation (always identity — position-only TF, see
+  // broadcastInstanceTfs's own doc comment) — see that function's own
+  // doc comment for why identity was a bad goal orientation and what
+  // this replaces it with.
+  hover_pose.orientation = gripperFacingDownOrientation();
 
   logReachability("hover", hover_pose);
 
@@ -864,10 +909,9 @@ void TrajectoryPlanner::handleMoveToInstance(
   descend_pose.position.x = instance_tf.transform.translation.x;
   descend_pose.position.y = instance_tf.transform.translation.y;
   descend_pose.position.z = hover_pose.position.z - hover_config_.descend_offset_m;
-  // Same orientation as the hover leg (identity, matching the
-  // position-only instance TFs — see broadcastInstanceTfs()'s own doc
-  // comment) — keeps the descent a straight vertical drop rather than
-  // also reorienting mid-approach.
+  // Same orientation as the hover leg (gripperFacingDownOrientation() —
+  // see that function's own doc comment) — keeps the descent a straight
+  // vertical drop rather than also reorienting mid-approach.
   descend_pose.orientation = hover_pose.orientation;
 
   logReachability(request->instance_name, descend_pose);

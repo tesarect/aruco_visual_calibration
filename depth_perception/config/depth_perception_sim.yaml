@@ -24,8 +24,25 @@ depth_perception_node:
     depth_scale_to_meters: 1.0
 
     # 5x5 pixel patch (half-size 2) sampled around each detection's
-    # centroid before taking the median depth.
+    # centroid before taking the median depth. Also the ceiling for the
+    # radius-scaled patch below.
     depth_patch_half_size_px: 2
+
+    # --- radius-scaled depth-sampling patch (2026-08-03) ---
+    # Investigating a possible bias where a small hole's fixed-size depth
+    # patch straddles its rim, pulling the sampled depth toward the rim
+    # instead of the true floor (see DepthPerceptionConfig's own doc
+    # comment on these params, in depth_perception_node.hpp, for the full
+    # rationale). Defaulted here so every detection's computed patch
+    # half-size clamps to depth_patch_half_size_px above regardless of its
+    # actual radius — i.e. NO behavior change from before these params
+    # existed. Per the fix's plan: capture backProjectDetection's new
+    # diagnostic log line (radius_px vs. patch_half_px used) first, THEN
+    # tune radius_scale_factor down (e.g. toward 0.4-0.5) only if the log
+    # actually shows small holes' radius_px close to/below the fixed 2px
+    # half-size.
+    depth_patch_radius_scale_factor: 1.0
+    depth_patch_min_half_size_px: 1
 
     # Published by calibration_orchestrator_node — see
     # DepthPerceptionConfig::pause_while_calibration's doc comment.
@@ -67,10 +84,35 @@ depth_perception_node:
     # until a ~/calibrate run has completed at least once this session.
     broadcast_instance_tfs: true
 
-    # [Change the comment as this lift up is used to compensate to 
-    # place tf on surface of the holder]
+    # Sim use (2026-08-02, see DepthPerceptionConfig's own doc comment for
+    # the full two-environment explanation): corrects a real depth-
+    # perception artifact where the raw back-projected TF lands slightly
+    # BELOW the holder/hole's true surface — this lift places the
+    # broadcast TF at the actual physical surface instead. A genuine
+    # position correction here, NOT a reachability workaround (unlike
+    # real's original use of this same param). Live-tunable via
+    # `ros2 param set /depth_perception_node instance_tf_z_offset_m <value>`,
+    # no restart needed.
     instance_tf_z_offset_m: 0.05
 
-    # [Change the comment as this lift up is used to compensate to 
-    # place tf on surface of the holder]
+    # Horizontal reachability clamp — kept OFF (0.0) on sim; the surface
+    # correction above is the only adjustment sim currently needs. See
+    # DepthPerceptionConfig::instance_tf_z_offset_m's doc comment (in
+    # depth_perception_node.hpp) for what this would do if enabled.
     instance_tf_max_horizontal_dist_m: 0.0
+
+    # X/Y fine-tune offset for cup_holder only (2026-08-03) — compensates
+    # a 2D pixel centroid bias confirmed via screenshot on sim (cv::fitEllipse
+    # on the rim contour pulls cup_holder's cx,cy away from the true visual
+    # center — see cup_holder_detector_node's own refineCupHolderCircle doc
+    # comment, and DepthPerceptionConfig::instance_tf_xy_offset_m's own doc
+    # comment in depth_perception_node.hpp for the full rationale).
+    # hole_1..hole_4 inherit this automatically (parented to cup_holder, not
+    # base_link, directly) — no separate per-hole offset needed. Read LIVE
+    # every broadcastInstanceTfs() call, tunable via
+    # `ros2 param set /depth_perception_node instance_tf_xy_offset_m [x, y]`
+    # with no restart needed. [0.0, 0.0] = no change from today's raw
+    # detected position — tune only after comparing the new per-instance
+    # diagnostic log (broadcastInstanceTfs's raw vs. offset_applied line)
+    # against the true holder center in RViz/overlay.
+    instance_tf_xy_offset_m: [0.0, 0.0]

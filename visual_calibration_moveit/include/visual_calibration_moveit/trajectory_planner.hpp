@@ -488,22 +488,25 @@ private:
   /// HoverConfig's doc comment for the tuning fields):
   ///   1. Looks up move_group_interface_.getPlanningFrame() -> "cup_holder"
   ///      via tf_buffer_ (fresh every call), builds a hover pose directly
-  ///      above it (same X/Y/orientation as cup_holder, Z raised by
-  ///      hover_config_.hover_offset_m). Reached via planAndExecuteCartesian()
-  ///      FIRST (straight-line, preferred when it works), falling back to
-  ///      joint-space planAndExecute() if the Cartesian attempt fails
-  ///      (2026-08-02 — was joint-space-only before; this shared hover
-  ///      point needs to be reliably reachable regardless of which
-  ///      instance was requested or where the arm started, so a
-  ///      free-space fallback exists for when a straight line isn't
-  ///      achievable from the current pose).
+  ///      above it (same X/Y as cup_holder, Z raised by
+  ///      hover_config_.hover_offset_m; orientation is NOT taken from
+  ///      cup_holder's own TF — see gripperFacingDownOrientation()'s doc
+  ///      comment in trajectory_planner.cpp for why and what's used
+  ///      instead: a fixed orientation with end_effector_frame's local +X
+  ///      pointing straight down, roll left unconstrained). Reached via
+  ///      planAndExecuteCartesian() FIRST (straight-line, preferred when
+  ///      it works), falling back to joint-space planAndExecute() if the
+  ///      Cartesian attempt fails (2026-08-02 — was joint-space-only
+  ///      before; this shared hover point needs to be reliably reachable
+  ///      regardless of which instance was requested or where the arm
+  ///      started, so a free-space fallback exists for when a straight
+  ///      line isn't achievable from the current pose).
   ///   2. Looks up move_group_interface_.getPlanningFrame() ->
   ///      request->instance_name (same as step 1, but for the ACTUAL
   ///      target — cup_holder itself, or a specific hole_N). Builds a
   ///      descend pose: the instance's own X/Y, Z = hover pose's Z minus
-  ///      hover_config_.descend_offset_m, same orientation as the hover
-  ///      pose (identity, matching the position-only instance TFs — see
-  ///      broadcastInstanceTfs's own doc comment) — reached via
+  ///      hover_config_.descend_offset_m, same fixed facing-down
+  ///      orientation as the hover pose — reached via
   ///      planAndExecuteCartesian(), a straight-line descent from directly
   ///      above the target.
   ///   3. Blocks for hover_config_.instance_stay_seconds (plain

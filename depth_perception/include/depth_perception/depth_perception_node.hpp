@@ -1,6 +1,7 @@
 #ifndef DEPTH_PERCEPTION__DEPTH_PERCEPTION_NODE_HPP_
 #define DEPTH_PERCEPTION__DEPTH_PERCEPTION_NODE_HPP_
 
+#include <array>
 #include <deque>
 #include <map>
 #include <mutex>
@@ -68,8 +69,48 @@ struct DepthPerceptionConfig
   // A single pixel's depth reading can be invalid/noisy, especially near
   // a cavity rim (see Detection2D.msg's doc comment), so a small
   // neighborhood is sampled and reduced (median) instead of trusting one
-  // pixel.
+  // pixel. Also serves as the ceiling (depth_patch_max_half_size_px is not
+  // a separate field — see backProjectDetection's own doc comment) for the
+  // radius-scaled patch size computed per-detection below, so a large
+  // detection (e.g. cup_holder) never samples a bigger neighborhood than
+  // this proven-safe value.
   int depth_patch_half_size_px = 2;
+
+  // --- radius-scaled depth-sampling patch (2026-08-03) ---
+  // See backProjectDetection's own doc comment for the full rationale: a
+  // FIXED patch half-size (depth_patch_half_size_px above) can straddle a
+  // small hole's rim, biasing its sampled depth toward the rim/wall rather
+  // than the true floor. These three params scale the patch actually used
+  // down to a fraction of each detection's own bbox-derived radius instead,
+  // while a hole/cup_holder large enough for the fixed size to be safe
+  // simply gets clamped back up to it (see depth_patch_half_size_px above,
+  // reused here as the max clamp — not duplicated as its own field).
+  //
+  // Defaulted so that, out of the box, EVERY detection's computed patch
+  // half-size clamps to depth_patch_half_size_px regardless of its actual
+  // radius — i.e. byte-identical behavior to the old fixed-size-only code.
+  // Tune radius_scale_factor/min down only after the new diagnostic log
+  // lines (see backProjectDetection) confirm this bug is actually present
+  // in a given environment — see the fix's plan doc for the full
+  // log-first-then-tune sequencing rationale.
+
+  // Fraction of a detection's own bbox-derived radius to use as its patch
+  // half-size, before clamping to [depth_patch_min_half_size_px,
+  // depth_patch_half_size_px]. Default 1.0 is a deliberate placeholder,
+  // NOT a considered "good" scale factor — it's set specifically so the
+  // clamp below (max = depth_patch_half_size_px = 2px) is what actually
+  // constrains every real detection's patch size at startup, keeping this
+  // param a true no-op until tuned. A real fix will very likely want this
+  // well below 1.0 (e.g. 0.4-0.5), so a small hole's patch stays safely
+  // inside its own radius instead of merely being capped at today's fixed
+  // value.
+  double depth_patch_radius_scale_factor = 1.0;
+
+  // Floor on the computed patch half-size (pixels) — never shrinks below
+  // this even for a very small detected radius, so the sampled patch is
+  // never a single, individually-unstable pixel. 1 means at minimum a 3x3
+  // patch.
+  int depth_patch_min_half_size_px = 1;
 
   // Topic carrying calibration_orchestrator_node's
   // visual_calibration_msgs/AutoCalibrateStatus — this node watches it
@@ -154,23 +195,57 @@ struct DepthPerceptionConfig
 // DepthPerceptionConfig above, unlike every other setting in this struct —
 // read LIVE via get_parameter() at the top of broadcastInstanceTfs() every
 // call instead, so it can be tuned via `ros2 param set` with no node
-// restart (explicit request, under time pressure). Same "live, not
-// cached" convention calibration_broadcaster_node's use_clustering_average
-// already established for exactly this reason — see that node's own
-// comments contrasting live vs. cached params. Added straight to
-// cup_holder's broadcast translation.z; hole_1..hole_4 inherit it
-// automatically since they're parented to cup_holder, not
+// restart. Same "live, not cached" convention calibration_broadcaster_node's
+// use_clustering_average already established for exactly this reason — see
+// that node's own comments contrasting live vs. cached params. Added
+// straight to cup_holder's broadcast translation.z; hole_1..hole_4 inherit
+// it automatically since they're parented to cup_holder, not
 // known_chain_frame, directly (see broadcastInstanceTfs's own comment on
-// that re-anchoring). Default 0.0 = no change from the real measured
-// position. THIS DOES NOT MAKE THE HOLDER ACTUALLY CLOSER TO base_link —
-// it only changes the reported/broadcast Z coordinate, which the arm will
-// then try to reach; measured on the real cell 2026-07-30, cup_holder's
-// HORIZONTAL (X/Y) distance from base_link alone is already ~0.64m, past
-// the UR3e's ~0.5m datasheet reach, so no amount of Z-only offset makes
-// the actual position reachable (distance is dominated by the horizontal
-// leg, which this offset never touches). Added anyway per explicit
-// request as a fast, reversible thing to try — set to 0.0 (or leave
-// undeclared) to fully undo.
+// that re-anchoring). Default 0.0 = no change from the raw detected
+// position.
+//
+// Two distinct, independently-valid uses, per environment:
+// - Sim (2026-08-02): corrects a real depth-perception artifact — the raw
+//   back-projected TF lands slightly BELOW the holder/hole's true surface
+//   (effectively "buried" a little into the cavity, not sitting on top of
+//   it), so a small positive lift (e.g. 0.05m) places the broadcast TF at
+//   the actual physical surface. This is a genuine position correction,
+//   not a reachability workaround, on sim.
+// - Real (2026-07-30, original motivation): was added as a fast,
+//   explicitly-requested reachability workaround under time pressure —
+//   real's cup_holder HORIZONTAL (X/Y) distance from base_link alone was
+//   measured at ~0.64m, past the UR3e's ~0.5m datasheet reach, so a
+//   Z-only offset alone cannot make that position actually reachable
+//   (distance there is dominated by the horizontal leg, which this offset
+//   never touches) — kept OFF (0.0) on real as of 2026-07-30 while the
+//   accuracy investigation in
+//   _errors/finetuning_modification_floor_plan.txt is ongoing, since it
+//   masks rather than fixes bad TF placement; re-enable there only if
+//   reachability becomes the immediate blocker again, independent of the
+//   accuracy work.
+// Set to 0.0 (or leave undeclared) to fully undo either use.
+
+// instance_tf_xy_offset_m (2026-08-03) — same "live, not cached" convention
+// as instance_tf_z_offset_m directly above (read via get_parameter_or every
+// broadcastInstanceTfs() call, no restart needed), but for X/Y instead of
+// Z. Added straight to cup_holder's broadcast translation.x/y ONLY;
+// hole_1..hole_4 inherit any shift automatically since they're parented to
+// cup_holder, not known_chain_frame, directly (same reasoning as
+// instance_tf_z_offset_m — no separate per-hole X/Y offset is needed).
+//
+// Motivation: cup_holder's 2D pixel centroid (cv::fitEllipse on the rim
+// contour, sim's classical detector only — see cup_holder_detector_node's
+// own refineCupHolderCircle doc comment) is pulled slightly toward the rim
+// geometry rather than landing exactly on the true visual/physical center,
+// confirmed via a live screenshot showing the fitted TF offset from center
+// (2026-08-02). This offset is a manual, tunable compensation for that
+// bias, NOT a change to the CV algorithm itself.
+// Default (0.0, 0.0) — a 2-element array, [x_offset_m, y_offset_m] — no
+// change from today's raw detected position until tuned.
+// NOT yet confirmed present on real (real's cup_holder centroid comes from
+// YOLO, a completely different detector with no fitEllipse step at all —
+// see the fix's plan doc's Context section) — left at (0.0, 0.0) there
+// until a real-side measurement actually shows a comparable bias.
 
 /*
  * One detection's computed 3D position, expressed in the camera's own
@@ -360,7 +435,41 @@ private:
   // ready yet, the pixel falls outside the depth image, or every pixel in
   // the sampled patch is invalid (e.g. NaN/zero, meaning "no depth
   // return" — a real possibility right at a cavity's rim).
-  BackProjectedPoint backProjectDetection(double cx, double cy) const;
+  //
+  // bbox (2026-08-03, [x1, y1, x2, y2] pixels, straight from
+  // Detection2D.msg — see that message's own doc comment) is used to
+  // derive this specific detection's own radius
+  // (max(bbox[2]-bbox[0], bbox[3]-bbox[1]) / 2.0 — max, not assumed square,
+  // since real's YOLO-published bbox is a true axis-aligned box, not a
+  // synthesized square the way sim's classical detector's is) and scale
+  // the patch half-size sampled around (cx, cy) to
+  // clamp(depth_patch_radius_scale_factor * radius_px,
+  // depth_patch_min_half_size_px, depth_patch_half_size_px) instead of
+  // unconditionally using the fixed depth_patch_half_size_px for every
+  // detection regardless of size.
+  //
+  // Motivation: a small hole's radius can be close to or smaller than the
+  // fixed patch half-size, so that fixed patch straddles the cavity's
+  // inner wall — some sampled pixels land on the RIM (shallower depth)
+  // instead of the true FLOOR (farther depth), biasing the median Z
+  // toward the rim even though (cx, cy) itself is the correct centroid
+  // (confirmed via full pipeline trace, 2026-08-02/03 — the 2D centroid is
+  // NOT the bug for holes, this patch-averaging step is). Scaling the
+  // patch to the hole's own radius keeps it inside the true floor.
+  //
+  // out_radius_px/out_patch_half_px (2026-08-03) report exactly what this
+  // call computed/used, purely so detections2dCallback can log them for
+  // diagnostic purposes (see this class's own doc comment on the fix's
+  // logging-first-then-tune approach) — this function itself stays a
+  // logically-const geometry computation with no logging inside it
+  // (RCLCPP_INFO_THROTTLE cannot be called from a const method: it needs
+  // Clock::now(), which is non-const, and get_clock() const only returns a
+  // ConstSharedPtr). Set on every call, including early-return paths (no
+  // depth frame yet, pixel outside the image, empty patch), so the
+  // caller's log always has a real value even when back-projection fails.
+  BackProjectedPoint backProjectDetection(
+    double cx, double cy, const std::array<double, 4> & bbox,
+    double & out_radius_px, int & out_patch_half_px) const;
 
   // Pushes `point` into the rolling window for (class_name, hole_number)
   // — creating a new, empty window on first sight of that instance — then

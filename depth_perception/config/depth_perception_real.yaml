@@ -30,6 +30,21 @@ depth_perception_node:
 
     depth_patch_half_size_px: 2
 
+    # --- radius-scaled depth-sampling patch (2026-08-03) ---
+    # Same mechanism as sim (see depth_perception_sim.yaml's own comment,
+    # and DepthPerceptionConfig's own doc comment in
+    # depth_perception_node.hpp) — this code path is identical for both
+    # environments, only the depth topic/encoding differs, so it's
+    # plausible real's holes have the same fixed-patch rim bias, but this
+    # has NOT been visually/numerically confirmed on real yet (only sim
+    # has been observed so far). Defaulted here to the same no-op as sim
+    # (clamps to depth_patch_half_size_px regardless of actual radius) —
+    # capture backProjectDetection's new diagnostic log line from a real
+    # run FIRST, then tune radius_scale_factor down only if real's log
+    # actually shows the same symptom sim did.
+    depth_patch_radius_scale_factor: 1.0
+    depth_patch_min_half_size_px: 1
+
     # Published by calibration_orchestrator_node — see
     # DepthPerceptionConfig::pause_while_calibration's doc comment.
     pause_while_calibration: true
@@ -118,3 +133,17 @@ depth_perception_node:
     # Turned OFF (2026-07-30) — same reasoning as instance_tf_z_offset_m
     # above; 0.0 disables the clamp entirely.
     instance_tf_max_horizontal_dist_m: 0.0
+
+    # X/Y fine-tune offset for cup_holder only (2026-08-03) — see
+    # DepthPerceptionConfig::instance_tf_xy_offset_m's own doc comment (in
+    # depth_perception_node.hpp) for the full rationale. Diagnosed so far
+    # ONLY on sim: sim's cup_holder centroid comes from cv::fitEllipse on a
+    # classical-CV rim contour, a fundamentally different detector from
+    # real's YOLO-based cx,cy (bbox-center, no fitEllipse step at all) — so
+    # this specific bias is NOT confirmed to apply to real's cup_holder at
+    # all. Left at [0.0, 0.0] (no-op) until a real-side measurement/
+    # screenshot actually shows a comparable offset — do not assume real
+    # needs this just because sim did. Same live-tunable convention as sim
+    # if it ever turns out to be needed here:
+    # `ros2 param set /depth_perception_node instance_tf_xy_offset_m [x, y]`.
+    instance_tf_xy_offset_m: [0.0, 0.0]
