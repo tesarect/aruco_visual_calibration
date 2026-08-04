@@ -183,12 +183,57 @@ struct CalibrationBroadcasterConfig
   //
   // Default false — a deliberate opt-in, "flip of a switch" alternative to
   // today's classical/continuous-hybrid behavior, not a replacement.
-  // Restart-only (cached here like every other field in this struct).
   //
-  // NOT wired into sim's yaml at all — sim's classical detector has no
-  // real-world corner-detection noise to address, and hasn't been tested
-  // with this mode.
-  bool hybrid_per_waypoint_enabled = false;
+  // NOT a field on this struct (2026-08-04, changed from restart-only) —
+  // deliberately read LIVE via get_parameter_or() at the point of use
+  // (sampleOnceAtCurrentWaypoint), same "live, not cached" convention
+  // use_clustering_average below already established, so the web app's
+  // repurposed "Hybrid ArUco Detection" switch (SetDetectorMode.srv,
+  // mode="hybrid") can flip this mid-session via a plain set_parameters
+  // call, with no calibration_broadcaster_node restart needed — matches
+  // Auto-center's own already-live UX. get_parameter_or (not
+  // get_parameter) specifically because it's still absent from sim's yaml
+  // entirely — sim's classical detector has no real-world corner-
+  // detection noise to address with this, so no declared default there.
+
+  // Bounded wait (2026-08-04, fixed a KNOWN GAP — see
+  // sampleOnceAtCurrentWaypoint's own doc comment) on the
+  // ~/detect_marker_once future — previously unconditional (future.get()
+  // could block forever if the underlying request hung). Default 30.0s
+  // chosen from real observed per-call timing across several test runs
+  // (4.30s-10.51s measured, including model warm-up-from-SIGSTOP cost) —
+  // well above that range plus a safety margin, not the tightest possible
+  // value. A timeout here is treated as a failed sample for THIS waypoint
+  // only (soft-fail behavior same as a "no marker found" result — see
+  // min_samples_to_finish above for the overall-run consequence), NOT a
+  // hard abort by itself.
+  double detect_call_timeout_sec = 30.0;
+
+  // --- Discard-and-continue on a failed waypoint sample (2026-08-04) ---
+  // Previously (and still, when 0 — see below): a single failed sample AT
+  // THE FIRST ATTEMPT of any waypoint (s==0 in runPolygonPhase/
+  // runRandomPhase's inner loop — losing a LATER dual-sample already
+  // soft-fails, see samples_per_waypoint's own doc comment) hard-aborted
+  // the ENTIRE calibration run, discarding every sample already collected
+  // from every prior waypoint. Confirmed live this hurts real usage: a
+  // hybrid_per_waypoint_enabled run with 6/7 waypoints succeeding still
+  // aborted with zero usable result over the one miss.
+  //
+  // When min_samples_to_finish > 0: a failed s==0 sample is now ALSO
+  // soft-failed (logged, skipped, move to the next waypoint) — the run
+  // only hard-fails if, by the time all polygon+random waypoints have
+  // been attempted, FEWER than this many total samples were actually
+  // collected. This turns "one bad frame ends the whole run" into "the
+  // run finishes with whatever succeeded, unless too little succeeded to
+  // be meaningful."
+  //
+  // Default 0 = today's original strict behavior preserved exactly (any
+  // s==0 failure still hard-aborts immediately) — this is an opt-in
+  // relaxation, not a default behavior change. Real-only in practice (not
+  // added to sim's yaml) since it's primarily meant to compensate for
+  // real-world detection misses; nothing prevents enabling it on sim too
+  // if ever useful there.
+  int min_samples_to_finish = 0;
 
   // --- Clustering-based position+orientation averaging (2026-07-29) ---
   // clustering_bucket_size_cm/clustering_bucket_angle_deg are cached in
@@ -342,11 +387,12 @@ public:
 
 private:
   /// Grants the small RAII guard in calibration_broadcaster_node.cpp
-  /// (2026-08-04, guarantees saveDebugImageGrid() runs on every
-  /// executeCalibration exit path — see that guard's own doc comment)
-  /// access to the otherwise-private saveDebugImageGrid() below, without
-  /// making it callable from anywhere else.
-  friend struct DebugGridSaveGuard;
+  /// (2026-08-04, guarantees saveDebugImageGrid() AND — if this run was in
+  /// hybrid mode — a resuming SIGCONT both run on every executeCalibration
+  /// exit path — see that guard's own doc comment) access to the
+  /// otherwise-private saveDebugImageGrid()/signalInferenceServerViaOrchestrator()
+  /// below, without making them callable from anywhere else.
+  friend struct EndOfRunCleanupGuard;
 
   CalibrationBroadcasterConfig loadConfigFromParams() const;
 
@@ -547,8 +593,36 @@ private:
   ///   success in this mode, also appends the returned crop image +
   ///   variant label to debug_grid_images_ for the end-of-run combined
   ///   grid (see accumulateDebugGridImage/saveDebugImageGrid).
+  ///
+  /// The ~/detect_marker_once call in the hybrid branch is bounded by
+  /// config_.detect_call_timeout_sec (2026-08-04, fixed a previously-
+  /// unbounded future.get() — see that field's own doc comment for the
+  /// full history/rationale). A timeout there returns std::nullopt, same
+  /// as any other failed detection — the caller (runPolygonPhase/
+  /// runRandomPhase) already treats that uniformly via
+  /// config_.min_samples_to_finish's discard-and-continue behavior.
   std::optional<geometry_msgs::msg::PoseStamped> sampleOnceAtCurrentWaypoint(
     const rclcpp::Time & after, const std::string & waypoint_label);
+
+  /// Sends SIGSTOP (stop=true) or SIGCONT (stop=false) to inference_server.py
+  /// via ~/signal_inference_server on calibration_orchestrator_node — the
+  /// SAME cross-package bridge sampleOnceAtCurrentWaypoint's per-waypoint
+  /// bracketing already uses (factored out here, 2026-08-04, so
+  /// executeCalibration's own end-of-run resume — see that function's own
+  /// doc comment on resuming continuous cup_holder/hole detection after a
+  /// hybrid_per_waypoint_enabled run — doesn't duplicate this logic).
+  /// Best-effort: logs (does not throw/abort) if the service isn't
+  /// reachable.
+  void signalInferenceServerViaOrchestrator(bool stop);
+
+  /// Live read (2026-08-04, NOT cached — see this project's whole
+  /// "hybrid_per_waypoint_enabled is a live param" doc comment on
+  /// CalibrationBroadcasterConfig for the full rationale) of whether
+  /// per-waypoint hybrid detection is currently active. Small helper so
+  /// every call site (sampleOnceAtCurrentWaypoint, and the
+  /// isMarkerVisibleNow guards in runPolygonPhase/runRandomPhase) shares
+  /// one get_parameter_or call instead of repeating it.
+  bool isHybridPerWaypointEnabled() const;
 
   /// Assembles debug_grid_images_ into one labeled grid image (tiles
   /// arranged row-by-row via cv::hconcat/cv::vconcat, each waypoint's

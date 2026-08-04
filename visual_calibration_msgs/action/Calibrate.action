@@ -23,6 +23,16 @@ bool is_high_confidence
 # Feedback: published after each accepted sample.
 uint32 samples_collected
 uint32 samples_total
+# Short, human-readable status text for the CURRENT event (2026-08-04) —
+# e.g. "Sample 6 skipped: marker not found (no_yolo_bbox)" or
+# "Waypoint 7: detect call timed out after 30.0s". Empty string for the
+# normal "sample recorded successfully" feedback (samples_collected/
+# samples_total already convey that case fully — this field exists
+# specifically for the discard-and-continue/timeout events
+# min_samples_to_finish's soft-fail path introduces, which previously had
+# no user-visible signal at all outside calibration_broadcaster_node's own
+# server-side log). Not cumulative/history — always just the latest event.
+string current_status
 # The just-recorded sample's known_chain_frame -> camera candidate pose
 # (2026-07-29) — the SAME per-sample transform recordSample() already
 # computes into collected_positions_/collected_orientations_ internally,

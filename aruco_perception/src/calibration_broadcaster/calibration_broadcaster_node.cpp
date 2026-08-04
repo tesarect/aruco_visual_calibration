@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cmath>
 #include <functional>
+#include <future>
 #include <map>
 #include <stdexcept>
 #include <thread>
@@ -50,8 +51,8 @@ CalibrationBroadcasterNode::CalibrationBroadcasterNode()
   trace_path_client_ = create_client<visual_calibration_msgs::srv::TracePath>(
     "/trajectory_planner/trace_path");
 
-  // Only ever called when config_.hybrid_per_waypoint_enabled is true —
-  // see that field's own doc comment. Constructed unconditionally anyway,
+  // Only ever called when isHybridPerWaypointEnabled() is true — see that
+  // method's own doc comment. Constructed unconditionally anyway,
   // matching get_polygon_waypoints_client_/trace_path_client_'s own
   // always-constructed convention (cheap, no harm sitting unused).
   detect_marker_once_client_ = create_client<visual_calibration_msgs::srv::DetectMarkerOnce>(
@@ -115,15 +116,28 @@ void CalibrationBroadcasterNode::handleAccepted(
     goal_handle}.detach();
 }
 
-// Guarantees saveDebugImageGrid() runs on every exit path out of
-// executeCalibration (2026-08-04) — that function has several early
-// `return`s on failure (service unavailable, sample timeout, phase
-// failure, cancellation) in addition to its normal success path ending in
-// finishCalibration(); per hybrid_per_waypoint_enabled's design ("whatever
-// was collected before a failure is still worth saving"), inserting the
-// save call before every individual return would be fragile (easy to miss
-// one on a future edit) — a destructor-based guard makes it structurally
-// impossible to skip instead.
+// Guarantees two things run on EVERY exit path out of executeCalibration
+// (2026-08-04) — that function has several early `return`s on failure
+// (service unavailable, sample timeout, phase failure, cancellation) in
+// addition to its normal success path ending in finishCalibration();
+// inserting cleanup calls before every individual return would be fragile
+// (easy to miss one on a future edit) — a destructor-based guard makes it
+// structurally impossible to skip instead:
+// 1. saveDebugImageGrid() — per hybrid_per_waypoint_enabled's design
+//    ("whatever was collected before a failure is still worth saving").
+// 2. Resume inference_server.py if THIS run itself was in hybrid mode
+//    (isHybridPerWaypointEnabled(), captured at construction time — see
+//    that flag's own comment on why a captured snapshot, not a live
+//    re-check, is used here) — per-waypoint bracketing always leaves the
+//    model SIGSTOPped after its last sample; without this, continuous
+//    cup_holder/hole detection (yolo_marker_bridge_node's own
+//    image_callback, independent of this hybrid mechanism) would silently
+//    stop working after every hybrid calibration run, since it keeps
+//    calling into a paused process. Not gated behind
+//    isHybridPerWaypointEnabled() again here (a live re-check) — the web
+//    switch could have flipped mid-run; this guard's job is to clean up
+//    whatever state THIS run itself left behind, not to reflect
+//    whatever the CURRENT live setting happens to be by the time it runs.
 //
 // Declared directly in namespace aruco_perception (NOT an anonymous
 // namespace, unlike this file's other local helpers) so its friend
@@ -132,26 +146,47 @@ void CalibrationBroadcasterNode::handleAccepted(
 // definition here would be a distinct type from the one the friend
 // declaration forward-declares in the enclosing namespace, silently
 // failing to grant access (confirmed via a live compile error).
-struct DebugGridSaveGuard
+struct EndOfRunCleanupGuard
 {
-  explicit DebugGridSaveGuard(CalibrationBroadcasterNode * node)
-  : node_(node) {}
-  ~DebugGridSaveGuard() {node_->saveDebugImageGrid();}
+  EndOfRunCleanupGuard(CalibrationBroadcasterNode * node, bool was_hybrid_this_run)
+  : node_(node), was_hybrid_this_run_(was_hybrid_this_run) {}
+  ~EndOfRunCleanupGuard()
+  {
+    node_->saveDebugImageGrid();
+    if (was_hybrid_this_run_) {
+      node_->signalInferenceServerViaOrchestrator(false);  // SIGCONT
+    }
+  }
   CalibrationBroadcasterNode * node_;
+  bool was_hybrid_this_run_;
 };
 
 void CalibrationBroadcasterNode::executeCalibration(
   const std::shared_ptr<GoalHandleCalibrate> goal_handle)
 {
-  // Only actually writes anything if debug_grid_images_ is non-empty (see
-  // saveDebugImageGrid's own doc comment) — a no-op guard whenever
-  // hybrid_per_waypoint_enabled is false (the default).
-  DebugGridSaveGuard debug_grid_save_guard(this);
+  // Captured ONCE here, at the very start — see EndOfRunCleanupGuard's own
+  // doc comment for why this snapshot (not a live re-check in the
+  // destructor) is what decides whether to resume inference_server.py at
+  // the end.
+  EndOfRunCleanupGuard end_of_run_cleanup_guard(this, isHybridPerWaypointEnabled());
 
   collected_positions_.clear();
   collected_orientations_.clear();
   debug_grid_images_.clear();
   stable_agreement_count_ = 0;
+
+  // Logged once, up front, for this run (2026-08-04) — isHybridPerWaypointEnabled()
+  // is checked many times over a run (once per sample), which would be
+  // noisy to log every time; this single line at the start gives a clear,
+  // easy-to-find answer to "was this particular run in hybrid mode" when
+  // inspecting a captured log, without needing to infer it indirectly
+  // from whether sampleOnceAtCurrentWaypoint's own per-sample timing
+  // lines happen to appear.
+  RCLCPP_INFO(
+    get_logger(), "executeCalibration starting: hybrid_per_waypoint_enabled=%s, "
+    "min_samples_to_finish=%d, samples_per_waypoint=%d",
+    isHybridPerWaypointEnabled() ? "true" : "false", config_.min_samples_to_finish,
+    config_.samples_per_waypoint);
 
   if (!get_polygon_waypoints_client_->wait_for_service(std::chrono::seconds(5))) {
     auto result = std::make_shared<Calibrate::Result>();
@@ -199,7 +234,7 @@ void CalibrationBroadcasterNode::executeCalibration(
   {
     const rclcpp::Time now = get_clock()->now();
     const std::optional<geometry_msgs::msg::PoseStamped> center_marker_pose =
-      waitForFreshMarkerPose(now);
+      sampleOnceAtCurrentWaypoint(now, "center pose");
 
     if (!center_marker_pose.has_value()) {
       auto result = std::make_shared<Calibrate::Result>();
@@ -269,6 +304,26 @@ void CalibrationBroadcasterNode::executeCalibration(
   if (config_.orientation_sweep_enabled) {
     runOrientationSweepPhase(
       goal_handle, center_pose, static_cast<int>(collected_positions_.size()));
+  }
+
+  // Discard-and-continue's actual pass/fail gate (2026-08-04) — see
+  // config_.min_samples_to_finish's own doc comment. Only checked when
+  // opted in (> 0); at the default 0, every prior s==0 failure already
+  // hard-aborted via runPolygonPhase/runRandomPhase's own early return, so
+  // execution would never reach here with too few samples in the first
+  // place — this check is a no-op in that case, not redundant with it.
+  if (config_.min_samples_to_finish > 0 &&
+    static_cast<int>(collected_positions_.size()) < config_.min_samples_to_finish)
+  {
+    auto result = std::make_shared<Calibrate::Result>();
+    result->success = false;
+    result->message = "Only " + std::to_string(collected_positions_.size()) +
+      " sample(s) collected, below min_samples_to_finish (" +
+      std::to_string(config_.min_samples_to_finish) + ") — too few waypoints succeeded to "
+      "produce a meaningful calibration";
+    goal_handle->abort(result);
+    RCLCPP_ERROR(get_logger(), "%s", result->message.c_str());
+    return;
   }
 
   finishCalibration(goal_handle);
@@ -342,18 +397,38 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
           sample_boundary, "waypoint " + std::to_string(i + 1) + " (polygon)");
 
       if (!marker_pose.has_value()) {
-        if (s > 0) {
-          // Soft-fail (2026-07-29) — see runRandomPhase's identical fix/
-          // comment for the full rationale: the marker can genuinely drop
-          // out of view between sample s=0 and a later s at the SAME
-          // waypoint (confirmed live), and hard-failing the entire
-          // calibration run over losing only the extra dual-sample (while
-          // already-collected samples from every prior waypoint are fine)
-          // throws away far more good data than it protects.
+        if (s > 0 || config_.min_samples_to_finish > 0) {
+          // Soft-fail (2026-07-29 for s>0; extended 2026-08-04 to s==0
+          // too, when config_.min_samples_to_finish is opted in — see
+          // that field's own doc comment for the full rationale). The
+          // marker can genuinely drop out of view/fail detection at any
+          // single waypoint — for s>0 that was already known to be
+          // non-fatal (samples from every prior waypoint are unaffected);
+          // for s==0 (this waypoint's ONLY attempt failing, the common
+          // case under hybrid_per_waypoint_enabled with
+          // samples_per_waypoint=1) it's now equally non-fatal whenever
+          // the opt-in is active, deferring the actual pass/fail decision
+          // to executeCalibration's own end-of-run min_samples_to_finish
+          // check instead of aborting immediately on the first miss.
           RCLCPP_WARN(
             get_logger(), "Polygon-phase sample %d: marker lost after %d/%d samples at this "
             "waypoint — keeping what was collected, moving to the next waypoint",
             i + 1, s, config_.samples_per_waypoint);
+
+          // Web-UI-visible status (2026-08-04) — samples_collected/
+          // samples_total unchanged (this event didn't add a sample), but
+          // current_status carries the skip so an operator watching the
+          // left panel sees WHY progress isn't advancing on this
+          // waypoint, instead of the UI looking silently stuck. See
+          // Calibrate.action's own doc comment on this field.
+          {
+            auto skip_feedback = std::make_shared<Calibrate::Feedback>();
+            skip_feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
+            skip_feedback->samples_total = static_cast<uint32_t>(total_samples);
+            skip_feedback->current_status = "Waypoint " + std::to_string(i + 1) +
+              " (polygon): sample skipped — marker not found";
+            goal_handle->publish_feedback(skip_feedback);
+          }
           break;
         }
         out_result = std::make_shared<Calibrate::Result>();
@@ -459,7 +534,12 @@ bool CalibrationBroadcasterNode::runRandomPhase(
       continue;
     }
 
-    if (!isMarkerVisibleNow(before_move)) {
+    // isMarkerVisibleNow polls the continuous marker_pose topic —
+    // meaningless under hybrid_per_waypoint_enabled (nothing publishes
+    // that topic in this mode; see runOrientationSweepPhase's identical
+    // fix/comment). Skipped there; sampleOnceAtCurrentWaypoint's own
+    // std::nullopt return in the loop below already covers "not visible."
+    if (!isHybridPerWaypointEnabled() && !isMarkerVisibleNow(before_move)) {
       // Discarded, not counted — return to center immediately (no point
       // probing further out when not visible at all here) and try a new
       // candidate.
@@ -502,24 +582,35 @@ bool CalibrationBroadcasterNode::runRandomPhase(
           sample_boundary,
           "waypoint " + std::to_string(samples_already_collected + i + 1) + " (random)");
       if (!marker_pose.has_value()) {
-        if (s > 0) {
-          // Soft-fail (2026-07-29): isMarkerVisibleNow() above only checks
-          // visibility ONCE, before this loop starts — it does not
-          // guarantee the marker stays visible across every sample of the
-          // pair. Confirmed live, repeatedly: the marker can genuinely
+        if (s > 0 || config_.min_samples_to_finish > 0) {
+          // Soft-fail (2026-07-29 for s>0; extended 2026-08-04 to s==0
+          // too, when config_.min_samples_to_finish is opted in — see
+          // that field's own doc comment, and runPolygonPhase's identical
+          // extension, for the full rationale). isMarkerVisibleNow() above
+          // only checks visibility ONCE, before this loop starts — it does
+          // not guarantee the marker stays visible/detectable across every
+          // sample. Confirmed live, repeatedly: the marker can genuinely
           // drop out of view between sample s=0 and s=1 at a random-phase
           // candidate (position offset from cal_ready can be enough to
-          // lose it, even at a tightened random_phase_max_offset_m), and
-          // previously this hard-failed the ENTIRE calibration run over
-          // losing just the 2nd of 2 samples at ONE candidate — discarding
-          // 21+ good samples already collected. s==0 timing out is still a
-          // hard failure below (the pre-move isMarkerVisibleNow check
-          // passing but the very first sample then timing out would be a
-          // genuine anomaly worth surfacing, not routine mid-pair drift).
+          // lose it), and previously this hard-failed the ENTIRE
+          // calibration run over losing just the 2nd of 2 samples at ONE
+          // candidate — discarding 21+ good samples already collected.
           RCLCPP_WARN(
             get_logger(), "Random-phase sample %d: marker lost after %d/%d samples at this "
             "candidate — keeping what was collected, moving to the next candidate",
             samples_already_collected + i + 1, s, config_.samples_per_waypoint);
+
+          // Web-UI-visible status (2026-08-04) — see runPolygonPhase's
+          // identical addition/comment for the full rationale.
+          {
+            auto skip_feedback = std::make_shared<Calibrate::Feedback>();
+            skip_feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
+            skip_feedback->samples_total = static_cast<uint32_t>(total_samples);
+            skip_feedback->current_status = "Waypoint " +
+              std::to_string(samples_already_collected + i + 1) +
+              " (random): sample skipped — marker not found";
+            goal_handle->publish_feedback(skip_feedback);
+          }
           break;
         }
         out_result = std::make_shared<Calibrate::Result>();
@@ -605,7 +696,13 @@ void CalibrationBroadcasterNode::runOrientationSweepPhase(
       continue;
     }
 
-    if (!isMarkerVisibleNow(before_move)) {
+    // isMarkerVisibleNow polls the continuous marker_pose topic, same as
+    // waitForFreshMarkerPose below — meaningless under
+    // hybrid_per_waypoint_enabled (nothing publishes that topic in this
+    // mode), so this pre-check is skipped there; sampleOnceAtCurrentWaypoint
+    // below already returns std::nullopt on a failed/absent detection,
+    // which this loop already treats identically to "not visible."
+    if (!isHybridPerWaypointEnabled() && !isMarkerVisibleNow(before_move)) {
       RCLCPP_INFO(
         get_logger(), "Orientation sweep: marker not visible at '%s' probe — skipping this "
         "probe", label);
@@ -613,7 +710,7 @@ void CalibrationBroadcasterNode::runOrientationSweepPhase(
     }
 
     const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
-      waitForFreshMarkerPose(before_move);
+      sampleOnceAtCurrentWaypoint(before_move, std::string("orientation sweep: ") + label);
     if (!marker_pose.has_value()) {
       RCLCPP_INFO(
         get_logger(), "Orientation sweep: timed out waiting for a fresh marker_pose at '%s' "
@@ -787,36 +884,53 @@ std::vector<uchar> decodeBase64(const std::string & encoded)
 }
 }  // namespace
 
+bool CalibrationBroadcasterNode::isHybridPerWaypointEnabled() const
+{
+  bool enabled = false;
+  get_parameter_or("hybrid_per_waypoint_enabled", enabled, false);
+  return enabled;
+}
+
+void CalibrationBroadcasterNode::signalInferenceServerViaOrchestrator(bool stop)
+{
+  // Best-effort: logs (doesn't abort the caller) if the orchestrator's
+  // service isn't reachable — a missing/late SIGCONT just means
+  // inference_server.py takes its normal startup-from-stopped time on the
+  // next actual request, not a hard failure by itself.
+  if (!signal_inference_server_client_->wait_for_service(std::chrono::seconds(1))) {
+    RCLCPP_WARN(
+      get_logger(),
+      "signalInferenceServerViaOrchestrator(%s): ~/signal_inference_server not "
+      "reachable — is calibration_orchestrator_node running?", stop ? "SIGSTOP" : "SIGCONT");
+    return;
+  }
+  auto request = std::make_shared<visual_calibration_msgs::srv::SignalInferenceServer::Request>();
+  request->stop = stop;
+  signal_inference_server_client_->async_send_request(request).wait();
+}
+
 std::optional<geometry_msgs::msg::PoseStamped>
 CalibrationBroadcasterNode::sampleOnceAtCurrentWaypoint(
   const rclcpp::Time & after, const std::string & waypoint_label)
 {
-  if (!config_.hybrid_per_waypoint_enabled) {
+  if (!isHybridPerWaypointEnabled()) {
     return waitForFreshMarkerPose(after);
   }
 
   // Per-waypoint SIGCONT/SIGSTOP bracketing (2026-08-04) — see
-  // config_.hybrid_per_waypoint_enabled's own doc comment. Best-effort:
-  // logs (doesn't abort the run) if the orchestrator's service isn't
-  // reachable, since a missing/late SIGCONT just means inference_server.py
-  // takes its normal startup-from-stopped time on the actual detect call
-  // below, not a hard failure — the detection itself is what actually
-  // matters.
-  auto send_signal = [this](bool stop) {
-      if (!signal_inference_server_client_->wait_for_service(std::chrono::seconds(1))) {
-        RCLCPP_WARN(
-          get_logger(),
-          "sampleOnceAtCurrentWaypoint: ~/signal_inference_server not reachable — "
-          "continuing without SIGCONT/SIGSTOP bracketing for this waypoint");
-        return;
-      }
-      auto request =
-        std::make_shared<visual_calibration_msgs::srv::SignalInferenceServer::Request>();
-      request->stop = stop;
-      signal_inference_server_client_->async_send_request(request).wait();
-    };
+  // signalInferenceServerViaOrchestrator's own doc comment.
+  auto send_signal = [this](bool stop) {signalInferenceServerViaOrchestrator(stop);};
+
+  // Timing (2026-08-04) — no timeout enforced yet on the detect call below
+  // (future.get() blocks unconditionally), per explicit request: measure
+  // real per-sample cost first, THEN pick a bounded timeout value/param on
+  // a later change once actual numbers are known, rather than guessing a
+  // number now. Logged unconditionally (not just on failure) so a full
+  // run's log gives a real distribution to look at, not just outliers.
+  const rclcpp::Time call_start = get_clock()->now();
 
   send_signal(false);  // SIGCONT — resume inference_server.py for this one call
+  const rclcpp::Time after_sigcont = get_clock()->now();
 
   if (!detect_marker_once_client_->wait_for_service(std::chrono::seconds(2))) {
     RCLCPP_ERROR(
@@ -829,9 +943,48 @@ CalibrationBroadcasterNode::sampleOnceAtCurrentWaypoint(
 
   auto request = std::make_shared<visual_calibration_msgs::srv::DetectMarkerOnce::Request>();
   auto future = detect_marker_once_client_->async_send_request(request);
-  const auto response = future.get();
+
+  // Bounded wait (2026-08-04, was previously an unbounded future.get() —
+  // see config_.detect_call_timeout_sec's own doc comment) — real timing
+  // logs across several test runs showed 4.30s-10.51s per call; this
+  // param defaults well above that observed range plus a safety margin,
+  // not tuned to the tightest possible value.
+  const auto wait_status = future.wait_for(
+    std::chrono::duration<double>(config_.detect_call_timeout_sec));
+  const rclcpp::Time after_detect = get_clock()->now();
 
   send_signal(true);  // SIGSTOP — done with this waypoint's single call
+  const rclcpp::Time after_sigstop = get_clock()->now();
+
+  if (wait_status != std::future_status::ready) {
+    RCLCPP_ERROR(
+      get_logger(),
+      "sampleOnceAtCurrentWaypoint (%s): ~/detect_marker_once call exceeded "
+      "detect_call_timeout_sec (%.1fs) — treating this waypoint as failed "
+      "(sigcont=%.2fs, gave up after=%.2fs, sigstop=%.2fs)",
+      waypoint_label.c_str(), config_.detect_call_timeout_sec,
+      (after_sigcont - call_start).seconds(), (after_detect - after_sigcont).seconds(),
+      (after_sigstop - after_detect).seconds());
+    // NOTE: the underlying yolo_marker_bridge_node-side request is NOT
+    // cancelled by giving up on the future here — it may still complete
+    // and its result will simply be discarded when this rclcpp::Client
+    // eventually receives it. Accepted trade-off: cancelling an in-flight
+    // ROS2 service call cleanly is nontrivial, and this is already the
+    // rare/timeout case, not the common path.
+    return std::nullopt;
+  }
+
+  const auto response = future.get();
+
+  RCLCPP_INFO(
+    get_logger(),
+    "sampleOnceAtCurrentWaypoint (%s) timing: sigcont=%.2fs detect=%.2fs sigstop=%.2fs "
+    "total=%.2fs",
+    waypoint_label.c_str(),
+    (after_sigcont - call_start).seconds(),
+    (after_detect - after_sigcont).seconds(),
+    (after_sigstop - after_detect).seconds(),
+    (after_sigstop - call_start).seconds());
 
   if (!response->success) {
     RCLCPP_WARN(
@@ -869,34 +1022,54 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
     return;
   }
 
-  // Normalize every tile to a common width (the first tile's own width) so
-  // hconcat/vconcat below don't require identical dimensions across
-  // waypoints — cascade crops can differ slightly in size (a smaller
-  // marker-bbox crop, or a different upscale variant). Aspect ratio is
-  // preserved (uniform width, proportional height) rather than force-
-  // squashing to a fixed size, so each tile still looks like an
-  // undistorted crop of the marker.
+  // Normalize every tile to a common FIXED width AND height (2026-08-04,
+  // fixed a live crash) — the original version only forced a common width
+  // and let each tile's height scale proportionally to its own source
+  // image's aspect ratio, which meant real tiles could legitimately end up
+  // with DIFFERENT heights from each other (not just from the blank
+  // padding tile) — hconcat requires every image in a row to share the
+  // exact same height, and any row mixing differently-scaled tiles crashed
+  // with "Assertion failed: src[i].rows == src[0].rows" (confirmed live).
+  // Fix: letterbox every tile into an identical kTileWidth x kTileHeight
+  // canvas (preserving each source image's own aspect ratio via uniform
+  // scale-to-fit, centered, black bars on the short axis) rather than
+  // trusting proportional resize to ever coincidentally match.
   const int kTileWidth = debug_grid_images_.front().first.cols;
+  const int kTileHeight = debug_grid_images_.front().first.rows;
   const int kTilesPerRow = 4;
   const cv::Scalar kLabelBgColor(0, 0, 0);
   const cv::Scalar kLabelTextColor(0, 255, 0);
+  const int kLabelStripHeight = 22;
 
   std::vector<cv::Mat> tiles;
   tiles.reserve(debug_grid_images_.size());
   for (const auto & [image, label] : debug_grid_images_) {
-    cv::Mat resized;
-    const double scale = static_cast<double>(kTileWidth) / image.cols;
-    cv::resize(image, resized, cv::Size(kTileWidth, static_cast<int>(image.rows * scale)));
+    // Scale-to-fit within kTileWidth x kTileHeight, preserving aspect
+    // ratio, then center on a black canvas of EXACTLY that size — every
+    // tile this loop produces has identical dimensions, regardless of its
+    // source image's own size/aspect ratio.
+    const double scale = std::min(
+      static_cast<double>(kTileWidth) / image.cols,
+      static_cast<double>(kTileHeight) / image.rows);
+    cv::Mat scaled;
+    cv::resize(
+      image, scaled,
+      cv::Size(std::max(1, static_cast<int>(image.cols * scale)),
+        std::max(1, static_cast<int>(image.rows * scale))));
+
+    cv::Mat canvas(kTileHeight, kTileWidth, image.type(), kLabelBgColor);
+    const int x_offset = (kTileWidth - scaled.cols) / 2;
+    const int y_offset = (kTileHeight - scaled.rows) / 2;
+    scaled.copyTo(canvas(cv::Rect(x_offset, y_offset, scaled.cols, scaled.rows)));
 
     // Label strip burned in at the bottom of each tile (2026-08-04) — self-
     // contained labeling per user's explicit request ("just for visual
     // inspection, or even to show during presentation"), so the single
     // saved grid image needs no separate caption file to be meaningful.
-    const int label_strip_height = 22;
-    cv::Mat labeled(resized.rows + label_strip_height, resized.cols, resized.type(), kLabelBgColor);
-    resized.copyTo(labeled(cv::Rect(0, 0, resized.cols, resized.rows)));
+    cv::Mat labeled(kTileHeight + kLabelStripHeight, kTileWidth, canvas.type(), kLabelBgColor);
+    canvas.copyTo(labeled(cv::Rect(0, 0, kTileWidth, kTileHeight)));
     cv::putText(
-      labeled, label, cv::Point(4, resized.rows + label_strip_height - 6),
+      labeled, label, cv::Point(4, kTileHeight + kLabelStripHeight - 6),
       cv::FONT_HERSHEY_SIMPLEX, 0.4, kLabelTextColor, 1, cv::LINE_AA);
     tiles.push_back(labeled);
   }
@@ -904,7 +1077,9 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
   // Pad the tile count up to a full multiple of kTilesPerRow with blank
   // tiles of matching size — hconcat below requires every image in a row
   // to share the same height, and a ragged final row would otherwise need
-  // special-casing.
+  // special-casing. Safe now: every real tile above is already the exact
+  // same (kTileWidth, kTileHeight + kLabelStripHeight) size, so this blank
+  // tile matches all of them, not just the first.
   const cv::Mat blank_tile(tiles.front().rows, tiles.front().cols, tiles.front().type(), kLabelBgColor);
   while (tiles.size() % kTilesPerRow != 0) {
     tiles.push_back(blank_tile);
@@ -1533,12 +1708,22 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
   config.samples_per_waypoint =
     static_cast<int>(get_parameter("samples_per_waypoint").as_int());
 
-  // get_parameter_or (not get_parameter) since this is absent from sim's
+  // hybrid_per_waypoint_enabled deliberately NOT read here (2026-08-04,
+  // changed from restart-only) — see CalibrationBroadcasterConfig's own
+  // doc comment on this: it's read LIVE via isHybridPerWaypointEnabled()
+  // at the point of use instead, same convention as use_clustering_average.
+
+  // get_parameter_or since detect_call_timeout_sec is absent from sim's
   // yaml entirely (real-only, see this field's own doc comment) and
   // automatically_declare_parameters_from_overrides(true) means
   // get_parameter() on an undeclared key would throw.
-  get_parameter_or(
-    "hybrid_per_waypoint_enabled", config.hybrid_per_waypoint_enabled, false);
+  get_parameter_or("detect_call_timeout_sec", config.detect_call_timeout_sec, 30.0);
+
+  // get_parameter_or (not get_parameter) — same reasoning as
+  // hybrid_per_waypoint_enabled directly above: absent from sim's yaml,
+  // real-only. Default 0 = today's original strict behavior (see this
+  // field's own doc comment).
+  get_parameter_or("min_samples_to_finish", config.min_samples_to_finish, 0);
 
   config.clustering_bucket_size_cm =
     get_parameter("clustering_bucket_size_cm").as_double();

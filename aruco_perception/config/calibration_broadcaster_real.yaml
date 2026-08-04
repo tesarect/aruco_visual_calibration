@@ -20,11 +20,15 @@ calibration_broadcaster_node:
     # result never collides with any frame name the real camera driver
     # might independently publish under the same base name.
     broadcast_frame_suffix: "_calibrated"
-    # PLACEHOLDER — not re-tuned for the real cell yet. Same default as
-    # sim; lower this first if a real calibration run is timing out or
-    # spending too long per attempt before the other real-specific knobs
-    # below are suspected.
-    num_samples: 10
+    # Reduced 10 -> 4 (2026-08-04, hybrid_per_waypoint_enabled testing) —
+    # one full polygon pass (4 corners, no repeats) instead of 2.5 passes.
+    # Each hybrid sample costs ~5-8s (confirmed via
+    # sampleOnceAtCurrentWaypoint's own timing log), so a smaller total
+    # keeps one test run's wall-clock time reasonable. Revert to 10 (or
+    # tune further) once hybrid mode's actual behavior is well understood
+    # — this value is shared with sim and non-hybrid real runs too, not
+    # hybrid-specific.
+    num_samples: 4
     # This node orchestrates trajectory_planner directly (fetches waypoints
     # via ~/get_polygon_waypoints, moves one at a time via ~/trace_path,
     # waits for a fresh marker_pose after each settled move) rather than
@@ -84,7 +88,9 @@ calibration_broadcaster_node:
     # Raised 8 -> 10 (2026-07-29, live-validated on real) — set via
     # ros2 param set during testing, now persisted here so it survives a
     # node restart.
-    random_phase_samples: 10
+    # Halved 10 -> 5 (2026-08-04, hybrid_per_waypoint_enabled testing) —
+    # same wall-clock-time reasoning as num_samples above.
+    random_phase_samples: 5
     # Maximum straight-line distance (m) a random candidate may be from
     # the center pose — checked before moving there. Tightened 0.10 -> 0.06
     # (2026-07-29, live-validated on real) — same reasoning as above.
@@ -161,13 +167,37 @@ calibration_broadcaster_node:
 
     # --- Per-waypoint on-demand hybrid detection (2026-08-04) ---
     # See CalibrationBroadcasterConfig::hybrid_per_waypoint_enabled's own
-    # doc comment for the full mechanism/rationale. Default false — an
-    # opt-in alternative to today's classical/continuous-hybrid detection,
-    # not a replacement. Set samples_per_waypoint to 1 above when testing
-    # this (see that param's own note). NOT present in sim's yaml at all —
-    # sim's classical detector has no real-world corner-detection noise to
+    # doc comment for the full mechanism/rationale. This is now a LIVE
+    # param (read via isHybridPerWaypointEnabled(), not cached) — the web
+    # app's "Hybrid ArUco Detection" switch flips it mid-session via
+    # ~/set_detector_mode (repurposed 2026-08-04 — see
+    # SetDetectorMode.srv's own doc comment), no restart needed. The value
+    # here is just the STARTUP default before the switch is ever touched.
+    # Set samples_per_waypoint to 1 above when testing this (see that
+    # param's own note). NOT present in sim's yaml at all — sim's
+    # classical detector has no real-world corner-detection noise to
     # address with this.
     hybrid_per_waypoint_enabled: false
+
+    # Bounded wait on each ~/detect_marker_once call (2026-08-04) — see
+    # CalibrationBroadcasterConfig::detect_call_timeout_sec's own doc
+    # comment. 30.0s default chosen from real observed per-call timing
+    # (4.30s-10.51s measured across several test runs, including
+    # model-warm-up-from-SIGSTOP cost) — well above that range with a
+    # safety margin. A timeout here fails just that ONE waypoint's sample
+    # (soft-fail, same as any other detection miss), not the whole run.
+    detect_call_timeout_sec: 30.0
+
+    # Discard-and-continue (2026-08-04) — see
+    # CalibrationBroadcasterConfig::min_samples_to_finish's own doc
+    # comment. Default 0 = strict (any single missed sample aborts the
+    # whole run); set > 0 to instead skip a failed waypoint and keep
+    # going, only failing the run if fewer than this many total samples
+    # were collected by the end. Tune alongside num_samples/
+    # random_phase_samples below (e.g. a smaller num_samples for a single
+    # polygon pass + reduced/zero random_phase_samples, with this set to
+    # roughly half of whatever the new total attempted waypoints is).
+    min_samples_to_finish: 3
 
     # --- Clustering-based position+orientation averaging (2026-07-29) ---
     # When true, finishCalibration() computes the final broadcast POSITION

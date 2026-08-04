@@ -2,16 +2,19 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
-#include <csignal>
 #include <cstdlib>
+#include <cstring>
+#include <csignal>
 #include <dirent.h>
 #include <fstream>
 #include <stdexcept>
 #include <thread>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Transform.h>
@@ -206,6 +209,7 @@ void CalibrationOrchestratorNode::publishStatusFeedback(const AutoCalibrate::Fee
   status.samples_collected = feedback.samples_collected;
   status.samples_total = feedback.samples_total;
   status.latest_sample_pose = feedback.latest_sample_pose;
+  status.current_status = feedback.current_status;
   auto_calibrate_status_pub_->publish(status);
 }
 
@@ -215,7 +219,16 @@ void CalibrationOrchestratorNode::publishStatusResult(const AutoCalibrate::Resul
   // handles both PHASE_SUCCEEDED and PHASE_FAILED terminal transitions, so
   // calibration ending for any reason (success or failure) resumes YOLO.
   // See the matching SIGSTOP call/comment at the top of executeAutoCalibrate().
-  signalInferenceServer(SIGCONT);
+  //
+  // SKIPPED when this run itself skipped the whole-run SIGSTOP (2026-08-04
+  // — see current_run_skipped_whole_run_sigstop_'s own doc comment and
+  // executeAutoCalibrate's matching SIGSTOP-skip comment for the full
+  // SIGSTOP-race rationale) — the per-waypoint code already leaves the
+  // model SIGSTOPped after its own last sample; this SIGCONT would
+  // needlessly resume it right as the run is ending, for no consumer.
+  if (!current_run_skipped_whole_run_sigstop_) {
+    signalInferenceServer(SIGCONT);
+  }
 
   auto status = visual_calibration_msgs::msg::AutoCalibrateStatus();
   status.phase = result.success ?
@@ -250,7 +263,23 @@ void CalibrationOrchestratorNode::signalInferenceServer(int signal)
     return;
   }
 
-  bool matched_any = false;
+  // Diagnostic logging (2026-08-04) — added after a live failure where a
+  // ~/detect_marker_once call (calibration_broadcaster_node's
+  // hybrid_per_waypoint_enabled mode) immediately got "Read timed out"
+  // from inference_server.py, and it was unclear from the existing logs
+  // alone whether this function had ever actually reached/signaled the
+  // process (this call site previously logged NOTHING on the successful-
+  // match path — only RCLCPP_DEBUG, easy to miss, on the no-match path).
+  // Now logs at INFO unconditionally: every PID actually found+signaled,
+  // whether each individual kill() syscall itself reported success (it CAN
+  // fail — e.g. the process exited between readdir() and kill(), or a
+  // permissions issue — and the old code never checked its return value at
+  // all), and the zero-matched case explicitly. This turns "was the model
+  // actually paused/resumed just now" from a guess into a directly
+  // readable log line for the next test run.
+  const char * signal_name = (signal == SIGSTOP) ? "SIGSTOP" : (signal == SIGCONT ? "SIGCONT" : "?");
+
+  std::vector<pid_t> matched_pids;
   struct dirent * entry;
   while ((entry = readdir(proc_dir)) != nullptr) {
     // Only interested in numeric entries (PIDs) — /proc also contains
@@ -280,18 +309,38 @@ void CalibrationOrchestratorNode::signalInferenceServer(int signal)
     if (cmdline.find("python3 inference_server.py") != std::string::npos) {
       pid_t pid = static_cast<pid_t>(std::strtol(name.c_str(), nullptr, 10));
       if (pid > 0) {
-        kill(pid, signal);
-        matched_any = true;
+        const int kill_result = kill(pid, signal);
+        if (kill_result == 0) {
+          matched_pids.push_back(pid);
+        } else {
+          RCLCPP_ERROR(
+            get_logger(), "signalInferenceServer: kill(pid=%d, %s) FAILED (errno %d: %s) — "
+            "the process was found but the signal itself was not delivered",
+            pid, signal_name, errno, strerror(errno));
+        }
       }
     }
   }
   closedir(proc_dir);
 
-  if (!matched_any) {
+  if (matched_pids.empty()) {
     // Fine if it's not running (e.g. sim-only testing) — same "no-op if no
     // matching process" convention as start_inference_server.sh's own
-    // pkill call.
-    RCLCPP_DEBUG(get_logger(), "signalInferenceServer: no matching inference_server.py process found");
+    // pkill call. Raised from DEBUG to INFO (2026-08-04) — this is exactly
+    // the "did SIGCONT/SIGSTOP actually do anything" signal worth always
+    // seeing, not just when debug verbosity happens to be enabled.
+    RCLCPP_INFO(
+      get_logger(), "signalInferenceServer(%s): no matching inference_server.py process found",
+      signal_name);
+  } else {
+    std::string pid_list;
+    for (size_t i = 0; i < matched_pids.size(); ++i) {
+      pid_list += std::to_string(matched_pids[i]);
+      if (i + 1 < matched_pids.size()) {pid_list += ", ";}
+    }
+    RCLCPP_INFO(
+      get_logger(), "signalInferenceServer(%s): delivered to pid(s) [%s]",
+      signal_name, pid_list.c_str());
   }
 }
 
@@ -405,6 +454,65 @@ CalibrationOrchestratorNode::getHybridDetectorParamClient()
   return hybrid_detector_param_client_;
 }
 
+rclcpp::AsyncParametersClient::SharedPtr
+CalibrationOrchestratorNode::getCalibrationBroadcasterParamClient()
+{
+  if (!calibration_broadcaster_param_client_) {
+    calibration_broadcaster_param_client_ = std::make_shared<rclcpp::AsyncParametersClient>(
+      shared_from_this(), "calibration_broadcaster_node");
+  }
+  return calibration_broadcaster_param_client_;
+}
+
+bool CalibrationOrchestratorNode::isCalibrationBroadcasterInHybridMode()
+{
+  auto client = getCalibrationBroadcasterParamClient();
+  static constexpr auto kServiceWaitTimeout = std::chrono::seconds(2);
+  if (!client->wait_for_service(kServiceWaitTimeout)) {
+    RCLCPP_WARN(
+      get_logger(),
+      "isCalibrationBroadcasterInHybridMode: calibration_broadcaster_node's parameter "
+      "service not reachable — assuming classical (false), so the whole-run SIGSTOP "
+      "bracket below still runs (safe default)");
+    return false;
+  }
+
+  static constexpr double kGetParamTimeoutSec = 2.0;
+  auto future = client->get_parameters({"hybrid_per_waypoint_enabled"});
+  const auto result = waitForParametersFuture(future, kGetParamTimeoutSec);
+  if (!result.has_value() || result->empty()) {
+    RCLCPP_WARN(
+      get_logger(),
+      "isCalibrationBroadcasterInHybridMode: could not read hybrid_per_waypoint_enabled "
+      "(timed out, or the param isn't declared — real-only, absent from sim entirely) — "
+      "assuming classical (false)");
+    return false;
+  }
+
+  // PARAMETER_NOT_SET is the type get_parameters returns for an undeclared
+  // key (sim never declares this param at all — see
+  // CalibrationBroadcasterConfig's own doc comment) — treat that the same
+  // as "false", not an error, since it's the expected/correct state there.
+  const rclcpp::Parameter & param = result->front();
+  if (param.get_type() == rclcpp::ParameterType::PARAMETER_NOT_SET) {
+    RCLCPP_INFO(
+      get_logger(),
+      "isCalibrationBroadcasterInHybridMode: hybrid_per_waypoint_enabled is undeclared "
+      "on calibration_broadcaster_node (expected on sim) — treating as false");
+    return false;
+  }
+
+  // Logged unconditionally (2026-08-04) — this exact value is what decides
+  // whether executeAutoCalibrate's whole-run SIGSTOP runs or is skipped,
+  // so a captured log should always show it, not just the failure paths
+  // above.
+  const bool enabled = param.as_bool();
+  RCLCPP_INFO(
+    get_logger(), "isCalibrationBroadcasterInHybridMode: read hybrid_per_waypoint_enabled=%s",
+    enabled ? "true" : "false");
+  return enabled;
+}
+
 void CalibrationOrchestratorNode::handleSetDetectorMode(
   const std::shared_ptr<visual_calibration_msgs::srv::SetDetectorMode::Request> request,
   std::shared_ptr<visual_calibration_msgs::srv::SetDetectorMode::Response> response)
@@ -484,6 +592,62 @@ void CalibrationOrchestratorNode::handleSetDetectorMode(
     return;
   }
 
+  // Repurposed (2026-08-04): mode="hybrid" ALSO sets
+  // calibration_broadcaster_node's hybrid_per_waypoint_enabled, so
+  // flipping this switch fully wires up the new per-waypoint
+  // SIGCONT/detect-once/SIGSTOP mechanism, not just the old continuous
+  // active-flip above (which still runs unchanged — it governs the
+  // classical/continuous fallback used whenever hybrid_per_waypoint_
+  // enabled is false, and yolo_marker_bridge_node's own continuous
+  // cup_holder/hole detection, both unrelated to this repurposing). See
+  // CalibrationBroadcasterConfig::hybrid_per_waypoint_enabled's own doc
+  // comment for why this is a live get_parameter_or() read on that node's
+  // side, not cached — this set_parameters call takes effect on that
+  // node's very next sample, no restart needed.
+  //
+  // Best-effort: logged (not a response->success=false) if this specific
+  // sub-step fails — the classical/hybrid active-flip above already fully
+  // succeeded by this point, and is itself a real, complete, valid
+  // detector-mode switch on its own; failing the whole response here
+  // would incorrectly imply that switch was rolled back too, when it
+  // wasn't.
+  const bool new_hybrid_per_waypoint_value = !classical_should_be_active;
+  auto broadcaster_client = getCalibrationBroadcasterParamClient();
+  static constexpr auto kBroadcasterServiceWaitTimeout = std::chrono::seconds(2);
+  if (!broadcaster_client->wait_for_service(kBroadcasterServiceWaitTimeout)) {
+    RCLCPP_WARN(
+      get_logger(),
+      "handleSetDetectorMode: calibration_broadcaster_node's parameter service not "
+      "reachable — hybrid_per_waypoint_enabled NOT updated (classical/hybrid detector "
+      "active-flip above still succeeded)");
+  } else {
+    auto broadcaster_future = broadcaster_client->set_parameters_atomically(
+      {rclcpp::Parameter("hybrid_per_waypoint_enabled", new_hybrid_per_waypoint_value)});
+    const auto broadcaster_result =
+      waitForParametersFuture(broadcaster_future, kSetParamTimeoutSec);
+    if (!broadcaster_result.has_value() || !broadcaster_result->successful) {
+      RCLCPP_WARN(
+        get_logger(),
+        "handleSetDetectorMode: failed to set hybrid_per_waypoint_enabled=%s on "
+        "calibration_broadcaster_node: %s",
+        new_hybrid_per_waypoint_value ? "true" : "false",
+        broadcaster_result.has_value() ? broadcaster_result->reason.c_str() :
+        "timed out waiting for response");
+    } else {
+      // Confirms the set actually landed (2026-08-04, closes the same
+      // "no log line on the success path" gap signalInferenceServer's own
+      // logging fix addressed earlier) — this is the direct answer to
+      // "did flipping the web switch actually engage per-waypoint hybrid
+      // mode," visible without needing to separately query the parameter
+      // back afterward.
+      RCLCPP_INFO(
+        get_logger(),
+        "handleSetDetectorMode: hybrid_per_waypoint_enabled set to %s on "
+        "calibration_broadcaster_node",
+        new_hybrid_per_waypoint_value ? "true" : "false");
+    }
+  }
+
   response->success = true;
   response->message = std::string("Switched to ") + request->mode + " (" + incoming_name +
     " active, " + outgoing_name + " inactive)";
@@ -536,7 +700,29 @@ void CalibrationOrchestratorNode::executeAutoCalibrate(
   // yolo_marker_bridge_node.py (existing request_timeout_sec handling) —
   // confirmed live, no crash/hang. See signalInferenceServer()'s doc
   // comment for why this is a direct kill(), not std::system("pkill ...").
-  signalInferenceServer(SIGSTOP);
+  //
+  // SKIPPED when calibration_broadcaster_node's own
+  // hybrid_per_waypoint_enabled is true (2026-08-04, fixed a live bug) —
+  // that mode already does its own SIGCONT/SIGSTOP bracketing PER
+  // WAYPOINT inside its ~/calibrate call (Stage 4 below). Doing BOTH this
+  // whole-run bracket AND the per-waypoint one meant two independent
+  // pieces of code fought over the same process's pause/resume state —
+  // confirmed live: a real test run's very first sample instantly failed
+  // with the model still SIGSTOPped, ~4ms after this SIGSTOP fired and
+  // right as the per-waypoint code's own SIGCONT/SIGSTOP pair was also
+  // executing. current_run_skipped_whole_run_sigstop_ remembers this
+  // run's decision so publishStatusResult()'s matching SIGCONT stays
+  // paired with it (see that member's own doc comment).
+  current_run_skipped_whole_run_sigstop_ = isCalibrationBroadcasterInHybridMode();
+  if (!current_run_skipped_whole_run_sigstop_) {
+    signalInferenceServer(SIGSTOP);
+  } else {
+    RCLCPP_INFO(
+      get_logger(),
+      "executeAutoCalibrate: calibration_broadcaster_node is in hybrid_per_waypoint_enabled "
+      "mode — skipping this node's own whole-run SIGSTOP, deferring entirely to that "
+      "mode's per-waypoint SIGCONT/SIGSTOP bracketing instead");
+  }
 
   auto publish_stage = [this, &goal_handle](const std::string & stage) {
       auto feedback = std::make_shared<AutoCalibrate::Feedback>();
@@ -1401,6 +1587,7 @@ CalibrationOrchestratorNode::runCalibrate(
       relayed->samples_collected = feedback->samples_collected;
       relayed->samples_total = feedback->samples_total;
       relayed->latest_sample_pose = feedback->latest_sample_pose;
+      relayed->current_status = feedback->current_status;
       goal_handle->publish_feedback(relayed);
     };
 

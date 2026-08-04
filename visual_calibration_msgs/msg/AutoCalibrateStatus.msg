@@ -28,6 +28,10 @@ uint32 samples_total
 # the full rationale. Zero-valued (default Pose) for every non-
 # "Calibrating" stage feedback.
 geometry_msgs/Pose latest_sample_pose
+# Relayed from AutoCalibrate.action's own current_status feedback field
+# (2026-08-04) — see Calibrate.action's current_status doc comment for the
+# full rationale. Empty except for discard-and-continue/timeout events.
+string current_status
 
 # Result fields — meaningful once phase != PHASE_RUNNING (zero-valued
 # while running). Mirrors AutoCalibrate.action's Result exactly.

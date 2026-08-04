@@ -622,6 +622,30 @@ private:
   rclcpp::AsyncParametersClient::SharedPtr hybrid_detector_param_client_;
   rclcpp::AsyncParametersClient::SharedPtr getClassicalDetectorParamClient();
   rclcpp::AsyncParametersClient::SharedPtr getHybridDetectorParamClient();
+  /// calibration_broadcaster_node's own parameter service (2026-08-04) —
+  /// separate from the two detector clients above (those target
+  /// aruco_detector_node/yolo_marker_bridge_node, this targets a THIRD
+  /// node). Used for two purposes: (1) handleSetDetectorMode's mode=
+  /// "hybrid" branch now ALSO sets hybrid_per_waypoint_enabled=true here
+  /// (repurposed switch — see SetDetectorMode.srv's own doc comment), and
+  /// (2) executeAutoCalibrate reads it back before deciding whether to do
+  /// its own whole-run SIGSTOP/SIGCONT bracket at all — see that
+  /// function's own doc comment on the SIGSTOP race this avoids. Same
+  /// lazy-construction-via-shared_from_this()/AsyncParametersClient-not-
+  /// Sync reasoning as the two clients above.
+  rclcpp::AsyncParametersClient::SharedPtr calibration_broadcaster_param_client_;
+  rclcpp::AsyncParametersClient::SharedPtr getCalibrationBroadcasterParamClient();
+
+  /// Live read (2026-08-04) of calibration_broadcaster_node's
+  /// hybrid_per_waypoint_enabled param via
+  /// getCalibrationBroadcasterParamClient() — see that member's own doc
+  /// comment. Defaults to false (today's classical/continuous behavior)
+  /// if the target node/service isn't reachable or the read times out —
+  /// a conservative fallback: if we can't confirm hybrid mode is on, this
+  /// node's own whole-run SIGSTOP still runs, matching today's proven
+  /// behavior rather than silently skipping it and risking the model
+  /// process never getting paused at all.
+  bool isCalibrationBroadcasterInHybridMode();
 
   /// Polls (does NOT spin any executor) a parameters-client future until
   /// it's ready or timeout_sec elapses. Safe to call from within a
@@ -719,6 +743,16 @@ private:
   /// abandoning whatever manual fine-tune was in progress. In-memory
   /// only, lost on node restart, same as session_centered_cal_ready_pose_.
   bool pending_manual_adjustment_ = false;
+
+  /// SIGSTOP-race fix (2026-08-04) — see executeAutoCalibrate's own doc
+  /// comment for the full rationale. Set once, at the start of
+  /// executeAutoCalibrate, from isCalibrationBroadcasterInHybridMode(),
+  /// and read again by publishStatusResult() at the END of the same run —
+  /// checking ONCE and remembering the answer (rather than re-checking
+  /// live at both ends) guarantees the SIGSTOP-skip and the matching
+  /// SIGCONT-skip stay paired for a given run, even in the unlikely case
+  /// hybrid_per_waypoint_enabled gets toggled mid-run.
+  bool current_run_skipped_whole_run_sigstop_ = false;
 
   /// Guards latest_marker_pose_stamp_, notified by markerPoseCallback and
   /// read by isMarkerVisibleAfter. Deliberately separate from

@@ -38,7 +38,14 @@ yolo_marker_bridge_node:
     # further tuning once actual per-frame inference latency is measured
     # directly on this machine.
     # request_timeout_sec: 3.0
-    request_timeout_sec: 8.0
+    # TEMPORARY DIAGNOSTIC (2026-08-04): bumped 8.0 -> 60.0 to test whether
+    # model 9 (aruco_cupholder-9/weights/best.pt, swapped in via
+    # YOLO-pipeline/config/server_real.yaml for a one-off comparison test)
+    # eventually responds at all, or genuinely hangs — model 9's first
+    # hybrid_per_waypoint_enabled request exceeded the old 8.0s timeout
+    # with no result. REVERT to 8.0 once this specific test is done; not
+    # meant as a new steady-state value.
+    request_timeout_sec: 60.0
     confidence_threshold: 0.25
     jpeg_quality: 90
 

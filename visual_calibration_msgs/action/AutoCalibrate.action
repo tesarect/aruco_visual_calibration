@@ -45,3 +45,10 @@ uint32 samples_total
 # for every non-"Calibrating" stage feedback (cal_ready/auto_center have
 # no per-sample pose to relay).
 geometry_msgs/Pose latest_sample_pose
+# Relayed from Calibrate.action's own current_status feedback field
+# (2026-08-04) — see that field's doc comment. Empty for every
+# non-"Calibrating" stage feedback and for normal successful-sample
+# feedback during Calibrating; populated only for discard-and-continue/
+# timeout events (e.g. "Waypoint 6 (polygon): sample skipped — marker not
+# found") that samples_collected/samples_total alone don't explain.
+string current_status

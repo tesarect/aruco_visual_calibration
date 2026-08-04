@@ -927,8 +927,18 @@ class YoloMarkerBridgeNode(Node):
             return response
 
         if "aruco_marker" not in result:
+            # aruco_marker_failure_reason (2026-08-04) distinguishes WHY --
+            # "no_yolo_bbox" (YOLO never found a candidate box at all) vs.
+            # "no_classical_match" (YOLO found a box, but classical
+            # detection failed on every enhancement variant tried within
+            # it) -- see inference_server.py's own /detect handler and
+            # estimate_marker_pose_cascade's doc comment for the full
+            # rationale. Falls back to "unknown" only if inference_server.py
+            # is running an older version that doesn't send this field yet.
+            failure_reason = result.get("aruco_marker_failure_reason", "unknown")
             response.success = False
-            response.message = "No aruco_marker detected in this frame."
+            response.message = "No aruco_marker detected in this frame (%s)." % failure_reason
+            response.failure_reason = failure_reason
             return response
 
         marker_result = result["aruco_marker"]
