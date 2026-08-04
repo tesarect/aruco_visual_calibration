@@ -59,7 +59,7 @@ aruco_detector_node:
     marker_length_m: 0.045
     dictionary_name: "DICT_4X4_50"
 
-    # marker_id: 0
+    marker_id: 0
     # adaptive_thresh_win_size_min: 3
     # adaptive_thresh_win_size_max: 23
     # adaptive_thresh_win_size_step: 4
@@ -70,7 +70,6 @@ aruco_detector_node:
     # corner_refinement_max_iterations: 30
     # corner_refinement_min_accuracy: 0.1
     # polygonal_approx_accuracy_rate: 0.03
-
     # kind of had a stable but still not perfect corner detection
     adaptive_thresh_win_size_min: 3
     adaptive_thresh_win_size_max: 40

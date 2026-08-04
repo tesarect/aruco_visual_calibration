@@ -823,14 +823,24 @@ private:
   std::vector<tf2::Quaternion> collected_orientations_;
 
   /// One entry per successful hybrid_per_waypoint_enabled detection this
-  /// run (2026-08-04) — the decoded crop image + a label ("waypoint 3
-  /// (polygon): gamma_0.7") for accumulateDebugGridImage/
-  /// saveDebugImageGrid's combined-grid capture. Cleared at the start of
-  /// each ~/calibrate run (executeCalibration) alongside
+  /// run (2026-08-04) — the decoded, corner-annotated crop image (see
+  /// aruco_pose.py's draw_detected_corners) plus the waypoint label
+  /// ("waypoint 3 (polygon)") and cascade variant ("gamma_0.7") as SEPARATE
+  /// strings (was one combined "label: variant" string until 2026-08-04 —
+  /// split so saveDebugImageGrid can render them as two distinct lines
+  /// instead of one that got truncated/overrun by the next tile at small
+  /// tile sizes) for saveDebugImageGrid's combined-grid capture. Cleared at
+  /// the start of each ~/calibrate run (executeCalibration) alongside
   /// collected_positions_/collected_orientations_ — this is per-run state,
   /// not persisted across runs. Empty entirely when
   /// config_.hybrid_per_waypoint_enabled is false.
-  std::vector<std::pair<cv::Mat, std::string>> debug_grid_images_;
+  struct DebugGridTile
+  {
+    cv::Mat image;
+    std::string waypoint_label;
+    std::string cascade_variant;
+  };
+  std::vector<DebugGridTile> debug_grid_images_;
   /// The most recent sample's camera frame_id — carried through to the
   /// final broadcast's child_frame_id.
   geometry_msgs::msg::PoseStamped last_sample_;

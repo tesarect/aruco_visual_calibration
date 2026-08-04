@@ -120,4 +120,4 @@ calibration_orchestrator_node:
     # Hole N move via ~/move_to_instance) instead of auto-moving to "home"
     # first. Re-enable by setting this back to a preset name if the
     # auto-move-to-home behavior is wanted again later.
-    post_calibrate_preset_name: ""
+    post_calibrate_preset_name: "home"

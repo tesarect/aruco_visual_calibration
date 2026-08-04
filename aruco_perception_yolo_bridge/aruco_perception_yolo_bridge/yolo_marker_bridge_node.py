@@ -887,9 +887,16 @@ class YoloMarkerBridgeNode(Node):
         to bound CONTINUOUS load, which is irrelevant here since this is
         already a single on-demand call).
 
-        Does NOT publish to marker_pose/detections_2d/overlay_image at
-        all -- per-waypoint hybrid mode's whole point is bypassing those
-        continuous-topic consumers, not feeding them an extra sample.
+        Does NOT publish to marker_pose/detections_2d at all -- per-waypoint
+        hybrid mode's whole point is bypassing those continuous-topic
+        consumers, not feeding them an extra sample. DOES publish a
+        picture-in-picture update to overlay_image on success (2026-08-04,
+        see _publish_hybrid_pip_overlay) -- that one exception exists
+        purely so a human watching the live overlay feed can actually see
+        what the hybrid cascade is detecting during a real run, since
+        publish_overlay_image_msg's own continuous-mode drawing is
+        suppressed for the whole run (see that function's calibration-
+        suppression doc comment).
         """
         # Reset before waiting -- a stale set() from a previous call (or
         # from _process_image running concurrently while no one was
@@ -947,7 +954,86 @@ class YoloMarkerBridgeNode(Node):
         response.marker_pose = pose_stamped_from_marker_result(image_msg, marker_result)
         response.cascade_variant_used = marker_result.get("cascade_variant", "")
         response.cascade_image_b64 = marker_result.get("cascade_image_b64", "")
+        self._publish_hybrid_pip_overlay(image_msg, cv_image, marker_result)
         return response
+
+    def _publish_hybrid_pip_overlay(self, image_msg, cv_image, marker_result):
+        """Picture-in-picture (2026-08-04): composites the SAME corner-
+        annotated cascade crop this call is about to return in
+        cascade_image_b64 (drawn once, at the actual moment of detection,
+        inside aruco_pose.py's estimate_marker_pose -- see that function's
+        own doc comment) into the top-right corner of the live
+        /aruco_perception/overlay_image
+        stream, so a viewer can actually SEE the hybrid cascade's
+        corner-detection quality during a real ~/calibrate run --
+        previously invisible entirely, since publish_overlay_image_msg
+        (the continuous-mode overlay path) unconditionally suppresses ALL
+        drawing while self._calibration_running is true (see that
+        function's own doc comment), and this on-demand path never
+        published to overlay_image at all before this change. Only ever
+        called from handle_detect_marker_once's success path -- one PiP
+        update per waypoint, not continuous; the box will visibly hold
+        between waypoints until the next detection replaces it, which is
+        expected given hybrid mode is inherently once-per-waypoint, not
+        per-frame.
+
+        Best-effort: any failure here is logged, never raised -- this is a
+        pure visualization aid, must never be able to fail the actual
+        ~/detect_marker_once response it's attached to.
+        """
+        if self.overlay_image_pub is None:
+            return
+        try:
+            cascade_b64 = marker_result.get("cascade_image_b64", "")
+            if not cascade_b64:
+                return
+            cascade_jpeg = base64.b64decode(cascade_b64)
+            cascade_img = cv2.imdecode(
+                np.frombuffer(cascade_jpeg, dtype=np.uint8), cv2.IMREAD_COLOR
+            )
+            if cascade_img is None:
+                return
+
+            overlay = cv_image.copy()
+            frame_h, frame_w = overlay.shape[:2]
+
+            # PiP box sized as a fraction of the live frame (not a fixed
+            # pixel size) so it scales sensibly across different camera
+            # resolutions -- capped at the cascade crop's own native size
+            # so a small crop never gets blown up/blurry just to fill a
+            # fixed box.
+            max_pip_w = frame_w // 3
+            max_pip_h = frame_h // 3
+            scale = min(
+                max_pip_w / cascade_img.shape[1], max_pip_h / cascade_img.shape[0], 1.0
+            )
+            pip_w = max(1, int(cascade_img.shape[1] * scale))
+            pip_h = max(1, int(cascade_img.shape[0] * scale))
+            pip = cv2.resize(cascade_img, (pip_w, pip_h))
+
+            margin = 8
+            x0 = frame_w - pip_w - margin
+            y0 = margin
+            # White border so the PiP box is visually distinct from
+            # whatever's directly behind it in the live frame.
+            cv2.rectangle(
+                overlay, (x0 - 2, y0 - 2), (x0 + pip_w + 2, y0 + pip_h + 2),
+                (255, 255, 255), 2,
+            )
+            overlay[y0:y0 + pip_h, x0:x0 + pip_w] = pip
+            cv2.putText(
+                overlay, "hybrid cascade", (x0, y0 - 6), cv2.FONT_HERSHEY_SIMPLEX,
+                0.4, (255, 255, 255), 1, cv2.LINE_AA,
+            )
+
+            overlay_msg = self.bridge.cv2_to_imgmsg(overlay, encoding="bgr8")
+            overlay_msg.header = image_msg.header
+            self.overlay_image_pub.publish(overlay_msg)
+        except Exception as e:  # noqa: BLE001 -- best-effort visualization, see doc comment
+            self.get_logger().warn(
+                "_publish_hybrid_pip_overlay failed (non-fatal): %s" % str(e),
+                throttle_duration_sec=5.0,
+            )
 
     def assign_hole_quadrants(self, hole_dicts):
         """Assigns each entry of `hole_dicts` (a list of the raw

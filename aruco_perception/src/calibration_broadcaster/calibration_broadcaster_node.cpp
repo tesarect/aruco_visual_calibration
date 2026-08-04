@@ -6,6 +6,7 @@
 #include <cmath>
 #include <functional>
 #include <future>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <thread>
@@ -1000,8 +1001,7 @@ CalibrationBroadcasterNode::sampleOnceAtCurrentWaypoint(
     const std::vector<uchar> jpeg_bytes = decodeBase64(response->cascade_image_b64);
     const cv::Mat decoded = cv::imdecode(jpeg_bytes, cv::IMREAD_COLOR);
     if (!decoded.empty()) {
-      const std::string label = waypoint_label + ": " + response->cascade_variant_used;
-      debug_grid_images_.emplace_back(decoded, label);
+      debug_grid_images_.push_back({decoded, waypoint_label, response->cascade_variant_used});
     } else {
       RCLCPP_WARN(
         get_logger(),
@@ -1034,16 +1034,33 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
   // canvas (preserving each source image's own aspect ratio via uniform
   // scale-to-fit, centered, black bars on the short axis) rather than
   // trusting proportional resize to ever coincidentally match.
-  const int kTileWidth = debug_grid_images_.front().first.cols;
-  const int kTileHeight = debug_grid_images_.front().first.rows;
+  //
+  // kTileWidth/kTileHeight (2026-08-04, bumped from the raw source crop's
+  // own tiny size, e.g. ~110x90px) — the un-scaled crop made every label
+  // ("waypoint 8 (random): upscale_4x+clahe") wider than the tile itself,
+  // so text ran into/behind the neighboring tile in the assembled grid
+  // (visually confirmed: "waypoi..." cut off mid-word). Fixed size instead
+  // of scaling off the source crop, so tile size no longer depends on
+  // whatever resolution the camera/crop happened to produce.
+  const int kTileWidth = 320;
+  const int kTileHeight = 240;
   const int kTilesPerRow = 4;
-  const cv::Scalar kLabelBgColor(0, 0, 0);
+  const int kTileMarginPx = 6;
+  const cv::Scalar kBgColor(0, 0, 0);
   const cv::Scalar kLabelTextColor(0, 255, 0);
-  const int kLabelStripHeight = 22;
+  const cv::Scalar kVariantTextColor(0, 200, 255);
+  // Two lines now (2026-08-04, was one combined "label: variant" line) —
+  // "wp: <waypoint label>" on its own line, cascade variant (which cascade
+  // stage's enhancement actually produced a successful classical detection
+  // — the whole point of comparing hybrid against classical) on the line
+  // below it, so both are readable at this tile size without truncation.
+  const int kLabelLineHeight = 20;
+  const int kLabelStripHeight = kLabelLineHeight * 2 + 6;
 
   std::vector<cv::Mat> tiles;
   tiles.reserve(debug_grid_images_.size());
-  for (const auto & [image, label] : debug_grid_images_) {
+  for (const auto & tile_data : debug_grid_images_) {
+    const cv::Mat & image = tile_data.image;
     // Scale-to-fit within kTileWidth x kTileHeight, preserving aspect
     // ratio, then center on a black canvas of EXACTLY that size — every
     // tile this loop produces has identical dimensions, regardless of its
@@ -1057,7 +1074,7 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
       cv::Size(std::max(1, static_cast<int>(image.cols * scale)),
         std::max(1, static_cast<int>(image.rows * scale))));
 
-    cv::Mat canvas(kTileHeight, kTileWidth, image.type(), kLabelBgColor);
+    cv::Mat canvas(kTileHeight, kTileWidth, CV_8UC3, kBgColor);
     const int x_offset = (kTileWidth - scaled.cols) / 2;
     const int y_offset = (kTileHeight - scaled.rows) / 2;
     scaled.copyTo(canvas(cv::Rect(x_offset, y_offset, scaled.cols, scaled.rows)));
@@ -1066,21 +1083,33 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
     // contained labeling per user's explicit request ("just for visual
     // inspection, or even to show during presentation"), so the single
     // saved grid image needs no separate caption file to be meaningful.
-    cv::Mat labeled(kTileHeight + kLabelStripHeight, kTileWidth, canvas.type(), kLabelBgColor);
+    cv::Mat labeled(kTileHeight + kLabelStripHeight, kTileWidth, CV_8UC3, kBgColor);
     canvas.copyTo(labeled(cv::Rect(0, 0, kTileWidth, kTileHeight)));
     cv::putText(
-      labeled, label, cv::Point(4, kTileHeight + kLabelStripHeight - 6),
-      cv::FONT_HERSHEY_SIMPLEX, 0.4, kLabelTextColor, 1, cv::LINE_AA);
-    tiles.push_back(labeled);
+      labeled, "wp: " + tile_data.waypoint_label,
+      cv::Point(4, kTileHeight + kLabelLineHeight - 4),
+      cv::FONT_HERSHEY_SIMPLEX, 0.42, kLabelTextColor, 1, cv::LINE_AA);
+    cv::putText(
+      labeled, "cascade: " + tile_data.cascade_variant,
+      cv::Point(4, kTileHeight + kLabelLineHeight * 2 - 2),
+      cv::FONT_HERSHEY_SIMPLEX, 0.42, kVariantTextColor, 1, cv::LINE_AA);
+
+    // Margin border around each tile (2026-08-04) — otherwise adjacent
+    // tiles sit flush against each other with no visual separation, which
+    // is part of what made the previous labels look like they ran into
+    // the next tile even before the two issues above.
+    cv::Mat bordered(
+      labeled.rows + kTileMarginPx * 2, labeled.cols + kTileMarginPx * 2, CV_8UC3, kBgColor);
+    labeled.copyTo(bordered(cv::Rect(kTileMarginPx, kTileMarginPx, labeled.cols, labeled.rows)));
+    tiles.push_back(bordered);
   }
 
   // Pad the tile count up to a full multiple of kTilesPerRow with blank
   // tiles of matching size — hconcat below requires every image in a row
   // to share the same height, and a ragged final row would otherwise need
   // special-casing. Safe now: every real tile above is already the exact
-  // same (kTileWidth, kTileHeight + kLabelStripHeight) size, so this blank
-  // tile matches all of them, not just the first.
-  const cv::Mat blank_tile(tiles.front().rows, tiles.front().cols, tiles.front().type(), kLabelBgColor);
+  // same size, so this blank tile matches all of them, not just the first.
+  const cv::Mat blank_tile(tiles.front().rows, tiles.front().cols, tiles.front().type(), kBgColor);
   while (tiles.size() % kTilesPerRow != 0) {
     tiles.push_back(blank_tile);
   }
@@ -1344,29 +1373,71 @@ std::vector<size_t> CalibrationBroadcasterNode::rejectOutliers() const
     return all_indices;
   }
 
-  geometry_msgs::msg::Vector3 mean_position;
+  // Per-axis median position (2026-08-04, was the arithmetic mean) — a
+  // single wild sample (e.g. a bad hybrid detection) can drag a mean far
+  // enough that EVERY other, genuinely-good sample's deviation from it
+  // exceeds threshold too, causing the "kept < 2, abort rejection"
+  // fallback below to discard the whole rejection pass and keep the
+  // outlier in the final average (confirmed against a real run: one
+  // 45cm/62deg-off sample among 10 pushed all 9 good samples' deviations
+  // to 4-9cm/4-8deg, all above the 2cm/5deg threshold). The median is
+  // unmoved by a single outlier — sorting is the standard, no third-party
+  // dependency needed for N=10-ish sample counts.
+  const auto median_of = [](std::vector<double> values) {
+    std::sort(values.begin(), values.end());
+    const size_t n = values.size();
+    return (n % 2 == 1) ?
+      values[n / 2] : (values[n / 2 - 1] + values[n / 2]) / 2.0;
+  };
+  std::vector<double> xs, ys, zs;
+  xs.reserve(count);
+  ys.reserve(count);
+  zs.reserve(count);
   for (const geometry_msgs::msg::Vector3 & position : collected_positions_) {
-    mean_position.x += position.x;
-    mean_position.y += position.y;
-    mean_position.z += position.z;
+    xs.push_back(position.x);
+    ys.push_back(position.y);
+    zs.push_back(position.z);
   }
-  mean_position.x /= static_cast<double>(count);
-  mean_position.y /= static_cast<double>(count);
-  mean_position.z /= static_cast<double>(count);
+  geometry_msgs::msg::Vector3 median_position;
+  median_position.x = median_of(xs);
+  median_position.y = median_of(ys);
+  median_position.z = median_of(zs);
 
-  const OrientationAveragingResult unfiltered_orientation =
-    averageQuaternions(collected_orientations_, averaging_method_);
+  // Orientation has no simple per-component median (SO(3) isn't a vector
+  // space), so use the geometric median/medoid instead: the ACTUAL sample
+  // whose summed angular deviation to every other sample is smallest.
+  // Like the position median above, one wild orientation can only ever
+  // pull this pick towards itself a little (via its own single deviation
+  // term) — it can never become the medoid itself unless most samples
+  // actually agree with it, unlike a mean/eigenvalue average which every
+  // sample (including the outlier) directly perturbs.
+  size_t medoid_index = 0;
+  double best_total_deviation_deg = std::numeric_limits<double>::infinity();
+  for (size_t i = 0; i < count; ++i) {
+    double total_deviation_deg = 0.0;
+    for (size_t j = 0; j < count; ++j) {
+      if (i != j) {
+        total_deviation_deg +=
+          angularDeviationDeg(collected_orientations_[i], collected_orientations_[j]);
+      }
+    }
+    if (total_deviation_deg < best_total_deviation_deg) {
+      best_total_deviation_deg = total_deviation_deg;
+      medoid_index = i;
+    }
+  }
+  const tf2::Quaternion & median_orientation = collected_orientations_[medoid_index];
 
   std::vector<size_t> kept_indices;
   for (size_t i = 0; i < count; ++i) {
     const geometry_msgs::msg::Vector3 & position = collected_positions_[i];
-    const double dx = position.x - mean_position.x;
-    const double dy = position.y - mean_position.y;
-    const double dz = position.z - mean_position.z;
+    const double dx = position.x - median_position.x;
+    const double dy = position.y - median_position.y;
+    const double dz = position.z - median_position.z;
     const double position_deviation_cm = std::sqrt(dx * dx + dy * dy + dz * dz) * 100.0;
 
     const double orientation_deviation_deg =
-      angularDeviationDeg(collected_orientations_[i], unfiltered_orientation.averaged);
+      angularDeviationDeg(collected_orientations_[i], median_orientation);
 
     const bool is_outlier =
       position_deviation_cm > config_.outlier_position_threshold_cm ||
@@ -1375,7 +1446,8 @@ std::vector<size_t> CalibrationBroadcasterNode::rejectOutliers() const
     if (is_outlier) {
       RCLCPP_INFO(
         get_logger(), "Outlier rejection: discarding sample %zu (position deviation %.2fcm, "
-        "orientation deviation %.2fdeg)", i, position_deviation_cm, orientation_deviation_deg);
+        "orientation deviation %.2fdeg, vs. median)", i, position_deviation_cm,
+        orientation_deviation_deg);
     } else {
       kept_indices.push_back(i);
     }
