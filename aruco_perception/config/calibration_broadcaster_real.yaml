@@ -27,6 +27,19 @@ calibration_broadcaster_node:
     # startup in loadConfigFromParams, not live). Not present in sim's own
     # yaml — sim's marker_frame (rg2_gripper_aruco_link) is already a
     # properly-measured child frame, no correction needed there.
+    #
+    # Tried [0.0, -88.0, 0.0] once, real hardware, 2026-08-05 — REVERTED,
+    # do not retry this approach as-is. Confirmed via live tf2_echo: this
+    # moved the CAMERA's own broadcast position by ~52cm (not just its
+    # orientation), because known_to_camera's position is
+    # known_to_marker.origin + known_to_marker.rotation * marker_to_camera.
+    # translation — rotating known_to_marker's orientation necessarily
+    # rotates that translation term too, coupling position and orientation
+    # together. A rotation-only correction applied THIS way (to
+    # known_to_marker before composing) cannot cleanly separate the two —
+    # any future attempt should instead correct known_to_camera's
+    # ROTATION directly, AFTER the position is already computed, if this
+    # approach is revisited.
     marker_frame_orientation_offset_rpy_deg: [0.0, 0.0, 0.0]
     # Appended to the detector's camera frame_id to form the broadcast TF's
     # child_frame_id, e.g. "camera_depth_optical_frame" becomes
