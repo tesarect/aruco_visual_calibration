@@ -1,6 +1,7 @@
 #ifndef ARUCO_PERCEPTION__CALIBRATION_BROADCASTER_NODE_HPP_
 #define ARUCO_PERCEPTION__CALIBRATION_BROADCASTER_NODE_HPP_
 
+#include <array>
 #include <condition_variable>
 #include <limits>
 #include <memory>
@@ -53,6 +54,32 @@ struct CalibrationBroadcasterConfig
   /// TF frame at the end of the already-known chain, matching the physical
   /// marker's mount (e.g. "rg2_gripper_aruco_link").
   std::string marker_frame;
+
+  /// Compensating ROTATION-ONLY offset applied to marker_frame's own
+  /// orientation in recordSample() (2026-08-05, branch
+  /// tf-construction-rebuild) — added specifically for real, where
+  /// marker_frame is "robotiq_85_base_link" directly (the gripper's OWN
+  /// base link) rather than a properly-measured child frame matching the
+  /// physical marker's true mounted orientation (unlike sim's RG2 gripper,
+  /// which has a real ${prefix}_aruco_joint with a measured rpy — see
+  /// rg2_gripper.urdf.xacro). Confirmed live this session:
+  /// robotiq_85_base_link's own orientation is itself pitched ~88deg
+  /// relative to base_link (a real, structural mount rotation, not
+  /// measurement noise), and the resulting calibrated camera orientation
+  /// lands ~134deg away from it — consistent with marker_frame's own wrong
+  /// orientation dragging the whole camera-orientation solve with it,
+  /// since known_to_marker (== marker_frame's orientation) feeds directly
+  /// into known_to_camera = known_to_marker * marker_to_camera.
+  ///
+  /// [roll, pitch, yaw] degrees, applied to known_to_marker's rotation
+  /// ONLY (translation untouched) before it's combined with
+  /// marker_to_camera in recordSample(). Default [0,0,0] — a true no-op,
+  /// matching today's original behavior exactly until tuned. This is a
+  /// best-estimate MANUAL correction (not a physical re-measurement), a
+  /// deliberately separate, clearly-labeled "patch" layer — see
+  /// recordSample()'s own comment at the point this is applied for the
+  /// exact composition order.
+  std::array<double, 3> marker_frame_orientation_offset_rpy_deg{0.0, 0.0, 0.0};
   /// Appended to the detector's camera frame_id to form the broadcast TF's
   /// child_frame_id (e.g. "wrist_rgbd_camera_depth_optical_frame" becomes
   /// "..._calibrated"). Required: broadcasting under the exact same name

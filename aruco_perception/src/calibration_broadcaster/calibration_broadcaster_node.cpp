@@ -1270,6 +1270,35 @@ bool CalibrationBroadcasterNode::recordSample(
 
   tf2::Transform known_to_marker;
   tf2::fromMsg(known_to_marker_tf.transform, known_to_marker);
+
+  // marker_frame_orientation_offset_rpy_deg (2026-08-05) — see this
+  // field's own doc comment on CalibrationBroadcasterConfig for the full
+  // rationale (real's marker_frame == robotiq_85_base_link directly, an
+  // unmeasured stand-in for the marker's true mounted orientation).
+  // Post-multiplied onto known_to_marker's ROTATION only, translation
+  // untouched — this rotates the marker frame's own LOCAL axes by the
+  // offset (i.e. "the physical marker actually sits rotated this much
+  // more, relative to robotiq_85_base_link's own axes, than we're
+  // otherwise assuming"), matching how a real fixed joint's own rpy would
+  // compose if one existed (see rg2_gripper.urdf.xacro's
+  // ${prefix}_aruco_joint for the sim equivalent this stands in for).
+  // [0,0,0] (default) is an exact no-op — today's original behavior,
+  // unchanged, until this is tuned.
+  const auto & offset_rpy = config_.marker_frame_orientation_offset_rpy_deg;
+  if (offset_rpy[0] != 0.0 || offset_rpy[1] != 0.0 || offset_rpy[2] != 0.0) {
+    tf2::Quaternion offset_q;
+    offset_q.setRPY(
+      offset_rpy[0] * M_PI / 180.0, offset_rpy[1] * M_PI / 180.0, offset_rpy[2] * M_PI / 180.0);
+    known_to_marker.setRotation(known_to_marker.getRotation() * offset_q);
+    RCLCPP_INFO_ONCE(
+      get_logger(),
+      "recordSample: applying marker_frame_orientation_offset_rpy_deg=[%.2f, %.2f, %.2f] to "
+      "'%s' -> '%s' before computing camera orientation (logged once per node lifetime, not "
+      "per sample)",
+      offset_rpy[0], offset_rpy[1], offset_rpy[2], config_.known_chain_frame.c_str(),
+      config_.marker_frame.c_str());
+  }
+
   const tf2::Transform known_to_camera = known_to_marker * marker_to_camera;
 
   geometry_msgs::msg::Vector3 sample_position;
@@ -1813,6 +1842,23 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
   config.marker_pose_topic = get_parameter("marker_pose_topic").as_string();
   config.known_chain_frame = get_parameter("known_chain_frame").as_string();
   config.marker_frame = get_parameter("marker_frame").as_string();
+
+  // marker_frame_orientation_offset_rpy_deg (2026-08-05) — see this
+  // field's own doc comment on CalibrationBroadcasterConfig. get_parameter_or
+  // (not get_parameter): absent from sim's yaml entirely (real-only —
+  // sim's marker_frame is a properly-measured rg2_gripper_aruco_link, no
+  // correction needed there), and automatically_declare_parameters_from_
+  // overrides(true) means get_parameter() on an undeclared key would
+  // otherwise throw.
+  std::vector<double> marker_frame_orientation_offset_rpy_deg_vec;
+  get_parameter_or(
+    "marker_frame_orientation_offset_rpy_deg", marker_frame_orientation_offset_rpy_deg_vec,
+    std::vector<double>{0.0, 0.0, 0.0});
+  for (size_t i = 0; i < 3 && i < marker_frame_orientation_offset_rpy_deg_vec.size(); ++i) {
+    config.marker_frame_orientation_offset_rpy_deg[i] =
+      marker_frame_orientation_offset_rpy_deg_vec[i];
+  }
+
   config.broadcast_frame_suffix = get_parameter("broadcast_frame_suffix").as_string();
   config.num_samples = static_cast<int>(get_parameter("num_samples").as_int());
   config.sample_wait_timeout_sec = get_parameter("sample_wait_timeout_sec").as_double();

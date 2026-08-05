@@ -14,6 +14,20 @@ calibration_broadcaster_node:
     marker_pose_topic: "/aruco_perception/marker_pose"
     known_chain_frame: "base_link"
     marker_frame: "robotiq_85_base_link"
+
+    # Compensating ROTATION-ONLY offset for marker_frame's own orientation
+    # (2026-08-05) — see CalibrationBroadcasterConfig::
+    # marker_frame_orientation_offset_rpy_deg's own doc comment for the
+    # full rationale (robotiq_85_base_link is an unmeasured stand-in for
+    # the marker's true mounted orientation, confirmed this session to be
+    # itself pitched ~88deg relative to base_link — a real, structural
+    # mismatch, not noise). [roll, pitch, yaw] degrees. [0.0, 0.0, 0.0] is
+    # an exact no-op — confirmed matching today's original behavior before
+    # this was tuned. Requires a node RESTART to take effect (read once at
+    # startup in loadConfigFromParams, not live). Not present in sim's own
+    # yaml — sim's marker_frame (rg2_gripper_aruco_link) is already a
+    # properly-measured child frame, no correction needed there.
+    marker_frame_orientation_offset_rpy_deg: [0.0, 0.0, 0.0]
     # Appended to the detector's camera frame_id to form the broadcast TF's
     # child_frame_id, e.g. "camera_depth_optical_frame" becomes
     # "camera_depth_optical_frame_calibrated" — required so our computed
