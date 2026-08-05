@@ -381,53 +381,71 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     instance_tf_xy_offset_m.size() > 1 ? instance_tf_xy_offset_m[1] : 0.0;
 
   // instance_tf_pitch_down_deg (2026-08-06) — explicitly-requested manual
-  // correction for a suspected camera pitch error: rotates the cup_holder's
-  // camera-frame point downward (about the camera optical frame's X axis,
-  // i.e. toward +Y) by this many degrees before converting to
-  // known_chain_frame. Rotating a ray about the camera origin changes its
-  // Z (depth) too, which would otherwise make the point appear closer to
-  // the camera than the real surface — so after rotating, the point is
-  // rescaled back out along the new ray until its Z matches the original,
-  // unrotated Z again (same depth plane the real reading was on). Live-read
-  // every call, same convention as instance_tf_z_offset_m above. 0.0
-  // (default) disables this entirely.
+  // correction for a suspected camera pitch error. Rotates the cup_holder's
+  // camera-frame ray downward (about the camera optical frame's X axis,
+  // i.e. toward +Y) by this many degrees, converts THAT rotated ray to
+  // known_chain_frame (base_link) via known_to_camera same as normal, then
+  // rescales the resulting known_chain_frame X/Y so its Z matches the
+  // ORIGINAL (unrotated) known_chain_frame Z — i.e. "pulled down" in the
+  // 2D image/camera-pitch sense, but still landing on the same real-world
+  // horizontal plane (the holder's own top surface) the unrotated reading
+  // already sat on, not sunk into the object. This MUST be done in
+  // known_chain_frame, not camera frame — rescaling in camera frame only
+  // preserves camera-frame Z, which is not the same plane once known_
+  // to_camera's own orientation error is factored in (confirmed bug: an
+  // earlier camera-frame-only version left the TF still buried in the
+  // object on real hardware). Live-read every call, same convention as
+  // instance_tf_z_offset_m above. 0.0 (default) disables this entirely.
   double instance_tf_pitch_down_deg = 0.0;
   get_parameter_or("instance_tf_pitch_down_deg", instance_tf_pitch_down_deg, 0.0);
 
   if (cup_holder_valid) {
     const auto & cup_holder_point = cup_holder_it->second.last_stable;
-    double camera_x = cup_holder_point.x;
-    double camera_y = cup_holder_point.y;
-    double camera_z = cup_holder_point.z;
+    tf2::Transform camera_to_cup_holder(
+      tf2::Quaternion::getIdentity(),
+      tf2::Vector3(cup_holder_point.x, cup_holder_point.y, cup_holder_point.z));
+    const tf2::Transform known_to_cup_holder_original = known_to_camera * camera_to_cup_holder;
 
-    if (instance_tf_pitch_down_deg != 0.0 && camera_z > 0.0) {
-      const double original_z = camera_z;
+    tf2::Transform known_to_cup_holder = known_to_cup_holder_original;
+
+    if (instance_tf_pitch_down_deg != 0.0) {
       const double angle_rad = instance_tf_pitch_down_deg * M_PI / 180.0;
       const double cos_a = std::cos(angle_rad);
       const double sin_a = std::sin(angle_rad);
       // Rotate (Y, Z) about the optical frame's X axis, pitching the ray
-      // downward (toward +Y) by angle_rad.
-      const double rotated_y = camera_y * cos_a - camera_z * sin_a;
-      const double rotated_z = camera_y * sin_a + camera_z * cos_a;
-      if (rotated_z > 0.0) {
-        // Push the point back out along the rotated ray so Z returns to
-        // the original depth — i.e. the point stays on the same physical
-        // plane the sensor actually measured, instead of sinking toward
-        // the camera.
-        const double rescale = original_z / rotated_z;
-        camera_y = rotated_y * rescale;
-        camera_z = rotated_z * rescale;
-        // camera_x is untouched by a rotation about the X axis, but still
-        // scales with the ray so the point remains on the same ray
-        // direction after the depth correction.
-        camera_x *= rescale;
+      // downward (toward +Y) by angle_rad — same ray-direction change as
+      // before, just no premature rescale here.
+      const double rotated_y =
+        cup_holder_point.y * cos_a - cup_holder_point.z * sin_a;
+      const double rotated_z =
+        cup_holder_point.y * sin_a + cup_holder_point.z * cos_a;
+
+      tf2::Transform camera_to_cup_holder_pitched(
+        tf2::Quaternion::getIdentity(),
+        tf2::Vector3(cup_holder_point.x, rotated_y, rotated_z));
+      const tf2::Transform known_to_cup_holder_pitched =
+        known_to_camera * camera_to_cup_holder_pitched;
+
+      const double original_known_z = known_to_cup_holder_original.getOrigin().z();
+      const double pitched_known_z = known_to_cup_holder_pitched.getOrigin().z();
+      const double camera_origin_z = known_to_camera.getOrigin().z();
+      // Rescale the pitched ray, as seen FROM THE CAMERA'S OWN ORIGIN in
+      // known_chain_frame, so it lands back on the original known_chain_
+      // frame Z plane — i.e. push/pull the point along the same pitched
+      // ray until its height matches the unpitched reading's height,
+      // rather than matching the unpitched reading's camera-frame depth.
+      const double denom = pitched_known_z - camera_origin_z;
+      if (std::abs(denom) > 1e-6) {
+        const double rescale = (original_known_z - camera_origin_z) / denom;
+        const double camera_origin_x = known_to_camera.getOrigin().x();
+        const double camera_origin_y = known_to_camera.getOrigin().y();
+        const double pitched_x = known_to_cup_holder_pitched.getOrigin().x();
+        const double pitched_y = known_to_cup_holder_pitched.getOrigin().y();
+        const double new_x = camera_origin_x + (pitched_x - camera_origin_x) * rescale;
+        const double new_y = camera_origin_y + (pitched_y - camera_origin_y) * rescale;
+        known_to_cup_holder.setOrigin(tf2::Vector3(new_x, new_y, original_known_z));
       }
     }
-
-    tf2::Transform camera_to_cup_holder(
-      tf2::Quaternion::getIdentity(),
-      tf2::Vector3(camera_x, camera_y, camera_z));
-    const tf2::Transform known_to_cup_holder = known_to_camera * camera_to_cup_holder;
 
     const double cup_holder_raw_x = known_to_cup_holder.getOrigin().x();
     const double cup_holder_raw_y = known_to_cup_holder.getOrigin().y();
