@@ -113,6 +113,20 @@ depth_perception_node:
     # blocker again.
     instance_tf_z_offset_m: 0.0
 
+    # Camera pitch-down correction for cup_holder only (2026-08-06,
+    # real-only — no entry in depth_perception_sim.yaml). Compensates a
+    # suspected camera pitch error by rotating cup_holder's camera-frame
+    # point downward (about the camera optical frame's X axis) by this many
+    # degrees, then rescaling the point back out along the new ray so its
+    # depth (Z) matches the original, unrotated depth — i.e. the corrected
+    # point still lies on the same physical plane the sensor actually
+    # measured, instead of sinking into the holder toward the camera. See
+    # broadcastInstanceTfs()'s own doc comment for the exact math.
+    # Live-read every call, tunable via
+    # `ros2 param set /depth_perception_node instance_tf_pitch_down_deg <value>`
+    # with NO node restart needed. 0.0 disables this entirely.
+    instance_tf_pitch_down_deg: 10.0
+
     # Horizontal (X/Y) reachability clamp (2026-07-30, real-only — no
     # entry in depth_perception_sim.yaml) — same "explicitly requested
     # cheat, not a real fix" spirit as instance_tf_z_offset_m above, same

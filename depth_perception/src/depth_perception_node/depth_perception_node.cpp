@@ -380,11 +380,53 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
   const double instance_tf_y_offset_m =
     instance_tf_xy_offset_m.size() > 1 ? instance_tf_xy_offset_m[1] : 0.0;
 
+  // instance_tf_pitch_down_deg (2026-08-06) — explicitly-requested manual
+  // correction for a suspected camera pitch error: rotates the cup_holder's
+  // camera-frame point downward (about the camera optical frame's X axis,
+  // i.e. toward +Y) by this many degrees before converting to
+  // known_chain_frame. Rotating a ray about the camera origin changes its
+  // Z (depth) too, which would otherwise make the point appear closer to
+  // the camera than the real surface — so after rotating, the point is
+  // rescaled back out along the new ray until its Z matches the original,
+  // unrotated Z again (same depth plane the real reading was on). Live-read
+  // every call, same convention as instance_tf_z_offset_m above. 0.0
+  // (default) disables this entirely.
+  double instance_tf_pitch_down_deg = 0.0;
+  get_parameter_or("instance_tf_pitch_down_deg", instance_tf_pitch_down_deg, 0.0);
+
   if (cup_holder_valid) {
     const auto & cup_holder_point = cup_holder_it->second.last_stable;
+    double camera_x = cup_holder_point.x;
+    double camera_y = cup_holder_point.y;
+    double camera_z = cup_holder_point.z;
+
+    if (instance_tf_pitch_down_deg != 0.0 && camera_z > 0.0) {
+      const double original_z = camera_z;
+      const double angle_rad = instance_tf_pitch_down_deg * M_PI / 180.0;
+      const double cos_a = std::cos(angle_rad);
+      const double sin_a = std::sin(angle_rad);
+      // Rotate (Y, Z) about the optical frame's X axis, pitching the ray
+      // downward (toward +Y) by angle_rad.
+      const double rotated_y = camera_y * cos_a - camera_z * sin_a;
+      const double rotated_z = camera_y * sin_a + camera_z * cos_a;
+      if (rotated_z > 0.0) {
+        // Push the point back out along the rotated ray so Z returns to
+        // the original depth — i.e. the point stays on the same physical
+        // plane the sensor actually measured, instead of sinking toward
+        // the camera.
+        const double rescale = original_z / rotated_z;
+        camera_y = rotated_y * rescale;
+        camera_z = rotated_z * rescale;
+        // camera_x is untouched by a rotation about the X axis, but still
+        // scales with the ray so the point remains on the same ray
+        // direction after the depth correction.
+        camera_x *= rescale;
+      }
+    }
+
     tf2::Transform camera_to_cup_holder(
       tf2::Quaternion::getIdentity(),
-      tf2::Vector3(cup_holder_point.x, cup_holder_point.y, cup_holder_point.z));
+      tf2::Vector3(camera_x, camera_y, camera_z));
     const tf2::Transform known_to_cup_holder = known_to_camera * camera_to_cup_holder;
 
     const double cup_holder_raw_x = known_to_cup_holder.getOrigin().x();
