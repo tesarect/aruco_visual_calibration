@@ -8,6 +8,7 @@
 #include <vector>
 
 #include <cv_bridge/cv_bridge.h>
+#include <opencv2/imgproc.hpp>
 #include <tf2/LinearMath/Transform.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
@@ -54,14 +55,21 @@ DepthPerceptionNode::DepthPerceptionNode()
   stable_positions_pub_ = create_publisher<visual_calibration_msgs::msg::StablePositionArray>(
     config_.stable_positions_topic, rclcpp::QoS(10));
 
+  if (config_.publish_depth_overlay_image) {
+    depth_overlay_image_pub_ =
+      image_transport::create_publisher(this, config_.depth_overlay_image_topic);
+  }
+
   RCLCPP_INFO(
     get_logger(),
     "depth_perception_node ready (rgb: '%s', depth: '%s', camera_info: '%s', "
-    "detections_2d: '%s', pause_while_calibration: %s, stable_positions: '%s')",
+    "detections_2d: '%s', pause_while_calibration: %s, stable_positions: '%s', "
+    "depth_overlay_image: %s)",
     config_.rgb_image_topic.c_str(), config_.depth_image_topic.c_str(),
     config_.camera_info_topic.c_str(), config_.detections_2d_topic.c_str(),
     config_.pause_while_calibration ? "true" : "false",
-    config_.stable_positions_topic.c_str());
+    config_.stable_positions_topic.c_str(),
+    config_.publish_depth_overlay_image ? config_.depth_overlay_image_topic.c_str() : "disabled");
 }
 
 void DepthPerceptionNode::rgbImageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
@@ -162,6 +170,14 @@ void DepthPerceptionNode::detections2dCallback(
   // present in /aruco_perception/detections_2d but never logged here).
   std::string log_lines;
 
+  // Collected alongside the main loop below (2026-08-04) so
+  // publishDepthOverlayImage can draw each detection's ACTUAL sampled
+  // patch (patch_half_px) without recomputing backProjectDetection's own
+  // radius-scaling logic a second time — one source of truth for what was
+  // actually sampled, not a duplicate/approximate copy for drawing.
+  std::vector<OverlayDetection> overlay_detections;
+  overlay_detections.reserve(msg->detections.size());
+
   for (const auto & detection : msg->detections) {
     // aruco_marker already gets a precise solvePnP-based 3D pose on
     // marker_pose — this node's job is cup_holder/hole only, per
@@ -172,10 +188,20 @@ void DepthPerceptionNode::detections2dCallback(
 
     const std::array<double, 4> bbox = {
       detection.bbox[0], detection.bbox[1], detection.bbox[2], detection.bbox[3]};
+    // use_max_depth (2026-08-04) — see backProjectDetection's own doc
+    // comment: "hole" is a real cavity that a median-of-patch read can
+    // still bias toward the near wall/rim even with a correctly-sized
+    // patch (an oblique VIEWING-ANGLE problem, distinct from the earlier
+    // patch-SIZE fix); "cup_holder" is a flat surface with no equivalent
+    // wall to graze past, so it keeps the noise-robust median.
+    const bool use_max_depth = (detection.class_name == "hole");
     double radius_px = 0.0;
     int patch_half_px = 0;
-    const BackProjectedPoint point =
-      backProjectDetection(detection.cx, detection.cy, bbox, radius_px, patch_half_px);
+    const BackProjectedPoint point = backProjectDetection(
+      detection.cx, detection.cy, bbox, use_max_depth, radius_px, patch_half_px);
+    overlay_detections.push_back(
+      {detection.class_name, detection.hole_number, detection.cx, detection.cy, patch_half_px,
+        point.valid, point.z});
 
     // hole_number is only meaningful for "hole" (see Detection2D.msg's own
     // doc comment) — cup_holder always uses 0, matching the message's own
@@ -198,10 +224,11 @@ void DepthPerceptionNode::detections2dCallback(
       std::snprintf(
         line, sizeof(line),
         "\n  %s: frame(x=%.3f, y=%.3f, z=%.3f) stable(x=%.3f, y=%.3f, z=%.3f) "
-        "m, n=%zu/%d, %s, confidence=%.2f, radius_px=%.2f, patch_half_px=%d",
+        "m, n=%zu/%d, %s, confidence=%.2f, radius_px=%.2f, patch_half_px=%d, "
+        "depth_reduction=%s",
         instance_desc, point.x, point.y, point.z, stable.x, stable.y, stable.z,
         window_size, config_.rolling_window_size, drifted ? "DRIFT" : "held",
-        detection.confidence, radius_px, patch_half_px);
+        detection.confidence, radius_px, patch_half_px, use_max_depth ? "max" : "median");
     } else {
       // A single frame's failed back-projection does NOT touch that
       // instance's rolling window — see updateRollingWindow's doc
@@ -231,6 +258,10 @@ void DepthPerceptionNode::detections2dCallback(
   // this specific frame — see StablePositionArray.msg's own doc comment
   // for why this is the continuous stream, unlike the log above.
   publishStablePositions(msg->header);
+
+  if (config_.publish_depth_overlay_image) {
+    publishDepthOverlayImage(msg->header, overlay_detections);
+  }
 }
 
 void DepthPerceptionNode::publishStablePositions(const std_msgs::msg::Header & header)
@@ -575,7 +606,7 @@ BackProjectedPoint DepthPerceptionNode::updateRollingWindow(
 
 BackProjectedPoint DepthPerceptionNode::backProjectDetection(
   double cx, double cy, const std::array<double, 4> & bbox,
-  double & out_radius_px, int & out_patch_half_px) const
+  bool use_max_depth, double & out_radius_px, int & out_patch_half_px) const
 {
   BackProjectedPoint result;
 
@@ -634,11 +665,24 @@ BackProjectedPoint DepthPerceptionNode::backProjectDetection(
     return result;
   }
 
-  // Median (not mean) — robust to a minority of outlier reads at a
-  // cavity's rim, where some pixels in the patch may see the tray's flat
-  // surface and others see the hole's true (farther) bottom.
-  std::sort(samples.begin(), samples.end());
-  const float depth_m = samples[samples.size() / 2];
+  // use_max_depth (2026-08-04, see this function's own header doc comment
+  // for the full rationale) — for a hole, a wall-grazing ray returns a
+  // SHORTER depth than one reaching the true (farther) floor, so the
+  // FARTHEST valid sample in the patch is the best available proxy for
+  // "the one ray that actually reached the floor." For cup_holder (a flat
+  // surface, no cavity to graze past), the median stays the noise-robust
+  // choice — max-of-patch there would just pick up a stray outlier spike
+  // instead of a real signal.
+  float depth_m;
+  if (use_max_depth) {
+    depth_m = *std::max_element(samples.begin(), samples.end());
+  } else {
+    // Median (not mean) — robust to a minority of outlier reads at a
+    // cavity's rim, where some pixels in the patch may see the tray's flat
+    // surface and others see the hole's true (farther) bottom.
+    std::sort(samples.begin(), samples.end());
+    depth_m = samples[samples.size() / 2];
+  }
 
   // Standard pinhole back-projection: a pixel (u, v) at known depth Z
   // corresponds to a 3D point (X, Y, Z) in the camera's optical frame
@@ -677,7 +721,78 @@ DepthPerceptionConfig DepthPerceptionNode::loadConfigFromParams() const
   config.broadcast_frame_suffix = get_parameter("broadcast_frame_suffix").as_string();
   config.broadcast_instance_tfs = get_parameter("broadcast_instance_tfs").as_bool();
 
+  get_parameter_or(
+    "publish_depth_overlay_image", config.publish_depth_overlay_image, true);
+  if (config.publish_depth_overlay_image) {
+    get_parameter_or(
+      "depth_overlay_image_topic", config.depth_overlay_image_topic,
+      std::string("/depth_perception/overlay_image"));
+  }
+
   return config;
+}
+
+void DepthPerceptionNode::publishDepthOverlayImage(
+  const std_msgs::msg::Header & header, const std::vector<OverlayDetection> & detections)
+{
+  cv::Mat depth_copy;
+  {
+    std::lock_guard<std::mutex> lock(depth_mutex_);
+    if (latest_depth_.empty()) {
+      return;
+    }
+    depth_copy = latest_depth_.clone();
+  }
+
+  // Colorize for display: normalize the actual depth range present in
+  // THIS frame to 0-255 (not a fixed min/max — the scene's real depth
+  // range varies with camera distance/angle) then apply a perceptually
+  // distinct colormap. COLORMAP_JET (blue=near, red=far) is OpenCV's most
+  // common depth-visualization choice — no existing convention in this
+  // codebase to match, since no depth visualization existed before this.
+  cv::Mat normalized;
+  cv::normalize(depth_copy, normalized, 0, 255, cv::NORM_MINMAX, CV_8UC1);
+  cv::Mat overlay;
+  cv::applyColorMap(normalized, overlay, cv::COLORMAP_JET);
+
+  for (const OverlayDetection & detection : detections) {
+    const cv::Point center(
+      static_cast<int>(std::lround(detection.cx)), static_cast<int>(std::lround(detection.cy)));
+
+    // Centroid dot — same green-circle convention yolo_marker_bridge_node.py's
+    // publish_overlay_image_msg already uses for hole markers on the COLOR
+    // overlay, so the two overlay streams read consistently to a viewer
+    // comparing them side by side.
+    cv::circle(overlay, center, 4, cv::Scalar(0, 255, 0), -1);
+
+    // The ACTUAL sampled patch (2026-08-04) — the single most diagnostic
+    // thing this overlay can show: exactly which pixels
+    // backProjectDetection read to produce this instance's depth value,
+    // drawn directly on the depth image itself so a viewer can see
+    // whether that patch is actually landing on the true floor/surface or
+    // grazing a wall/rim (see this fix's plan doc for the full
+    // investigation this overlay exists to support).
+    cv::rectangle(
+      overlay,
+      cv::Point(center.x - detection.patch_half_px, center.y - detection.patch_half_px),
+      cv::Point(center.x + detection.patch_half_px, center.y + detection.patch_half_px),
+      cv::Scalar(255, 255, 255), 1);
+
+    char label[64];
+    const std::string instance_desc = (detection.class_name == "hole") ?
+      ("hole_" + std::to_string(detection.hole_number)) : detection.class_name;
+    if (detection.valid) {
+      std::snprintf(label, sizeof(label), "%s z=%.2fm", instance_desc.c_str(), detection.z);
+    } else {
+      std::snprintf(label, sizeof(label), "%s (no depth)", instance_desc.c_str());
+    }
+    cv::putText(
+      overlay, label, cv::Point(center.x + 8, center.y - 8), cv::FONT_HERSHEY_SIMPLEX, 0.4,
+      cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+  }
+
+  const cv_bridge::CvImage overlay_cv(header, "bgr8", overlay);
+  depth_overlay_image_pub_.publish(overlay_cv.toImageMsg());
 }
 
 }  // namespace depth_perception

@@ -116,3 +116,12 @@ depth_perception_node:
     # diagnostic log (broadcastInstanceTfs's raw vs. offset_applied line)
     # against the true holder center in RViz/overlay.
     instance_tf_xy_offset_m: [0.0, 0.0]
+
+    # --- Depth-view overlay (2026-08-04) ---
+    # Same feature as real (see depth_perception_real.yaml's own comment
+    # and DepthPerceptionConfig::publish_depth_overlay_image's doc comment)
+    # — sim's own placement was already reported as "near correct," so this
+    # is mainly useful for cross-checking, not as urgent a diagnostic here
+    # as on real, but kept enabled by default for consistency between envs.
+    publish_depth_overlay_image: true
+    depth_overlay_image_topic: "/depth_perception/overlay_image"

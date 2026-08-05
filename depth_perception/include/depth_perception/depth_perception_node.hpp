@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
@@ -189,6 +190,21 @@ struct DepthPerceptionConfig
   // fail/skip silently every time anyway, but this avoids the repeated
   // failed-lookup log noise in that case).
   bool broadcast_instance_tfs = true;
+
+  // --- Depth-view overlay (2026-08-04) ---
+  // A SEPARATE overlay stream from yolo_marker_bridge_node's own
+  // /aruco_perception/overlay_image (which always uses the COLOR image as
+  // its base) — this one uses the colorized DEPTH image as its base
+  // instead, with the same detection centroids (and the actual sampled
+  // patch circle backProjectDetection used) drawn on top. Added so a human
+  // can directly compare "where YOLO says a hole/cup_holder is" against
+  // "what the depth camera actually sees there" — the diagnostic the
+  // real-robot hole/cup_holder TF placement investigation needed (see this
+  // fix's own plan doc). Mirrors aruco_detector_node's own
+  // publish_overlay_image/overlay_image_topic param pair exactly, same
+  // image_transport::create_publisher pattern.
+  bool publish_depth_overlay_image = true;
+  std::string depth_overlay_image_topic = "/depth_perception/overlay_image";
 };
 
 // instance_tf_z_offset_m (2026-07-30) is deliberately NOT a field on
@@ -261,6 +277,24 @@ struct BackProjectedPoint
   bool valid = false;
   double x = 0.0;
   double y = 0.0;
+  double z = 0.0;
+};
+
+/*
+ * One detection's data as needed by publishDepthOverlayImage (2026-08-04)
+ * — collected alongside detections2dCallback's own main back-projection
+ * loop so the overlay draws the EXACT patch_half_px backProjectDetection
+ * actually used for that detection, rather than a second, possibly
+ * out-of-sync computation of the same radius-scaling logic.
+ */
+struct OverlayDetection
+{
+  std::string class_name;
+  int32_t hole_number = 0;
+  double cx = 0.0;
+  double cy = 0.0;
+  int patch_half_px = 0;
+  bool valid = false;
   double z = 0.0;
 };
 
@@ -425,9 +459,10 @@ private:
   void autoCalibrateStatusCallback(
     const visual_calibration_msgs::msg::AutoCalibrateStatus::ConstSharedPtr & msg);
 
-  // Reads a robust (median) depth value from a small square patch of
-  // latest_depth_ centered at (cx, cy), then converts the pixel + depth
-  // into a 3D point via the standard pinhole back-projection:
+  // Reads a depth value (median OR max, see use_max_depth below) from a
+  // small square patch of latest_depth_ centered at (cx, cy), then converts
+  // the pixel + depth into a 3D point via the standard pinhole
+  // back-projection:
   //   X = (u - cx_intrinsic) * depth / fx
   //   Y = (v - cy_intrinsic) * depth / fy
   //   Z = depth
@@ -448,14 +483,34 @@ private:
   // unconditionally using the fixed depth_patch_half_size_px for every
   // detection regardless of size.
   //
-  // Motivation: a small hole's radius can be close to or smaller than the
-  // fixed patch half-size, so that fixed patch straddles the cavity's
-  // inner wall — some sampled pixels land on the RIM (shallower depth)
-  // instead of the true FLOOR (farther depth), biasing the median Z
-  // toward the rim even though (cx, cy) itself is the correct centroid
-  // (confirmed via full pipeline trace, 2026-08-02/03 — the 2D centroid is
-  // NOT the bug for holes, this patch-averaging step is). Scaling the
-  // patch to the hole's own radius keeps it inside the true floor.
+  // Motivation (patch SIZE, 2026-08-03): a small hole's radius can be close
+  // to or smaller than the fixed patch half-size, so that fixed patch
+  // straddles the cavity's inner wall — some sampled pixels land on the RIM
+  // (shallower depth) instead of the true FLOOR (farther depth), biasing
+  // the median Z toward the rim even though (cx, cy) itself is the correct
+  // centroid (confirmed via full pipeline trace, 2026-08-02/03 — the 2D
+  // centroid is NOT the bug for holes, this patch-averaging step is).
+  // Scaling the patch to the hole's own radius keeps it inside the true
+  // floor. This alone does NOT fully solve the rim/wall bias, though — see
+  // use_max_depth below for the remaining case it doesn't cover.
+  //
+  // use_max_depth (2026-08-04) — a SEPARATE, ANGLE-related bias from the
+  // patch-SIZE fix above: even a patch correctly sized to stay inside a
+  // hole can be centered on a pixel whose straight-line ray to the camera
+  // grazes the cavity's near wall before ever reaching the true floor —
+  // an oblique viewing-angle problem, not a patch-size problem. A
+  // wall-grazing ray returns a SHORTER depth than one that reaches the true
+  // (farther) floor, so MEDIAN-of-patch can still pick a wall-biased value
+  // even with an appropriately-sized patch, if enough of the sampled pixels
+  // are also seeing wall rather than floor. When true, this function uses
+  // the FARTHEST (max) valid depth in the patch instead of the median — the
+  // best available proxy, from a single small patch, for "the one sample
+  // that actually made it to the true floor." Callers should pass true for
+  // "hole" detections (a real cavity, where the wall-grazing effect
+  // applies) and false for "cup_holder" (a raised, roughly flat rim/surface
+  // with no equivalent cavity to graze past — median stays the
+  // noise-robust choice there, since max-of-patch on a flat surface risks
+  // picking up a stray outlier spike instead of a real signal).
   //
   // out_radius_px/out_patch_half_px (2026-08-03) report exactly what this
   // call computed/used, purely so detections2dCallback can log them for
@@ -469,7 +524,7 @@ private:
   // caller's log always has a real value even when back-projection fails.
   BackProjectedPoint backProjectDetection(
     double cx, double cy, const std::array<double, 4> & bbox,
-    double & out_radius_px, int & out_patch_half_px) const;
+    bool use_max_depth, double & out_radius_px, int & out_patch_half_px) const;
 
   // Pushes `point` into the rolling window for (class_name, hole_number)
   // — creating a new, empty window on first sight of that instance — then
@@ -525,6 +580,25 @@ private:
   // publishStablePositions() (same header/instances, one call site).
   void broadcastInstanceTfs(const std_msgs::msg::Header & header);
 
+  // Depth-view overlay (2026-08-04) — see DepthPerceptionConfig::
+  // publish_depth_overlay_image's own doc comment for the full rationale.
+  // Colorizes the CURRENT latest_depth_ (cv::normalize + applyColorMap,
+  // COLORMAP_JET — standard depth-visualization convention) into a BGR
+  // image, draws every entry in `detections` (this callback's own
+  // msg->detections, so the overlay always matches exactly what this
+  // frame's back-projection loop actually processed) as a centroid dot +
+  // the ACTUAL sampled patch circle (patch_half_px, per-detection — the
+  // most direct way to see exactly what backProjectDetection looked at),
+  // and publishes the result on depth_overlay_image_pub_. No-op if
+  // config_.publish_depth_overlay_image is false or latest_depth_ is still
+  // empty (no depth frame received yet). Called once per
+  // detections2dCallback invocation, after that frame's own
+  // back-projection loop (so it has each detection's already-computed
+  // patch_half_px available, not a second independent computation).
+  void publishDepthOverlayImage(
+    const std_msgs::msg::Header & header,
+    const std::vector<OverlayDetection> & detections);
+
   DepthPerceptionConfig config_;
 
   tf2_ros::Buffer tf_buffer_;
@@ -548,6 +622,11 @@ private:
     auto_calibrate_status_sub_;
   rclcpp::Publisher<visual_calibration_msgs::msg::StablePositionArray>::SharedPtr
     stable_positions_pub_;
+  // Depth-view overlay (2026-08-04) — see DepthPerceptionConfig::
+  // publish_depth_overlay_image's own doc comment. Only created if that
+  // param is true, same "unset if the feature is off" convention as
+  // aruco_detector_node's own overlay_image_pub_.
+  image_transport::Publisher depth_overlay_image_pub_;
 
   bool camera_info_received_ = false;
 

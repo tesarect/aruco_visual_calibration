@@ -147,3 +147,14 @@ depth_perception_node:
     # if it ever turns out to be needed here:
     # `ros2 param set /depth_perception_node instance_tf_xy_offset_m [x, y]`.
     instance_tf_xy_offset_m: [0.0, 0.0]
+
+    # --- Depth-view overlay (2026-08-04) ---
+    # Separate overlay stream from yolo_marker_bridge_node's own
+    # /aruco_perception/overlay_image (color-image base) — this one uses
+    # the colorized DEPTH image as its base, with the same detection
+    # centroids + the actual sampled patch drawn on top. Added so the
+    # web app's camera view can directly show "what the depth camera sees"
+    # for the hole/cup_holder placement investigation — see
+    # DepthPerceptionConfig::publish_depth_overlay_image's own doc comment.
+    publish_depth_overlay_image: true
+    depth_overlay_image_topic: "/depth_perception/overlay_image"
