@@ -623,7 +623,19 @@ vccleanbuildsymlink() {
         install/robotiq_85_msgs
 
     fixscriptperms
-    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs --symlink-install
+    # --parallel-workers 1 (2026-08-06) — the rosject container has no swap
+    # configured (confirmed via `free -h`), so multiple packages compiling
+    # at once can exceed available RAM and get cc1plus OOM-killed outright
+    # instead of just slowing down. Building one package at a time trades
+    # speed for not getting killed mid-build.
+    # MAKEFLAGS=-j2 (2026-08-06) — --parallel-workers 1 alone only caps
+    # colcon's PACKAGE-level parallelism; a single package with multiple
+    # node targets (e.g. aruco_perception's image_subscriber_node,
+    # cup_holder_detector_node, calibration_broadcaster_node) still lets
+    # gmake compile all of them at once internally, which alone was enough
+    # to OOM-kill cc1plus on this 8-core/no-swap rosject. Capping gmake's
+    # own job count too is what actually bounds peak memory.
+    MAKEFLAGS="-j2" colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs --symlink-install --parallel-workers 1
     source install/setup.bash
 }
 
