@@ -954,6 +954,7 @@ class YoloMarkerBridgeNode(Node):
         response.marker_pose = pose_stamped_from_marker_result(image_msg, marker_result)
         response.cascade_variant_used = marker_result.get("cascade_variant", "")
         response.cascade_image_b64 = marker_result.get("cascade_image_b64", "")
+        response.detect_time_s = marker_result.get("detect_time_s", 0.0)
         self._publish_hybrid_pip_overlay(image_msg, cv_image, marker_result)
         return response
 

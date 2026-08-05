@@ -235,6 +235,22 @@ struct CalibrationBroadcasterConfig
   // if ever useful there.
   int min_samples_to_finish = 0;
 
+  // Number of attempts PER SAMPLE (2026-08-04) — see sampleWithRetry's own
+  // doc comment, which every sampling call site (the center-pose sample,
+  // and every polygon-phase/random-phase waypoint) now goes through.
+  // Originally center-pose-only (that sample's miss previously
+  // hard-aborted the whole run outright, unlike later waypoints, which
+  // already soft-fail via min_samples_to_finish above); widened to every
+  // waypoint after confirming live that "YOLO found no aruco_marker
+  // candidate" misses at ORDINARY waypoints (not just the center pose)
+  // were also clean, transient one-bad-frame issues — normal cascade
+  // timing, no lock contention, no resource starvation — not a real
+  // "marker not visible" situation, so a fresh retry frame recovers most
+  // of them before falling through to min_samples_to_finish's existing
+  // discard-and-continue handling. 1 = no retry, today's original
+  // per-sample behavior — default 3 is the opt-in relaxation.
+  int cal_ready_hybrid_marker_detection_retry = 3;
+
   // --- Clustering-based position+orientation averaging (2026-07-29) ---
   // clustering_bucket_size_cm/clustering_bucket_angle_deg are cached in
   // config_ like every other field above (tuning constants, fine to
@@ -604,6 +620,22 @@ private:
   std::optional<geometry_msgs::msg::PoseStamped> sampleOnceAtCurrentWaypoint(
     const rclcpp::Time & after, const std::string & waypoint_label);
 
+  /// Retries sampleOnceAtCurrentWaypoint up to
+  /// config_.cal_ready_hybrid_marker_detection_retry times (2026-08-04,
+  /// extended from center-pose-only to EVERY waypoint sample — see that
+  /// config field's own doc comment) before giving up, taking a genuinely
+  /// FRESH frame each attempt (a full new sampleOnceAtCurrentWaypoint
+  /// call, not a re-check of a stale result). Used by the center-pose
+  /// block, runPolygonPhase, and runRandomPhase alike, so all three share
+  /// one retry implementation instead of three copies of the same loop.
+  /// `after` is only meaningful for the FIRST attempt in classical
+  /// (non-hybrid) mode — each subsequent retry re-derives its own fresh
+  /// boundary via get_clock()->now(), same as the per-sample
+  /// sample_boundary advancement runPolygonPhase/runRandomPhase already
+  /// do between samples_per_waypoint iterations.
+  std::optional<geometry_msgs::msg::PoseStamped> sampleWithRetry(
+    const rclcpp::Time & after, const std::string & waypoint_label);
+
   /// Sends SIGSTOP (stop=true) or SIGCONT (stop=false) to inference_server.py
   /// via ~/signal_inference_server on calibration_orchestrator_node — the
   /// SAME cross-package bridge sampleOnceAtCurrentWaypoint's per-waypoint
@@ -839,6 +871,11 @@ private:
     cv::Mat image;
     std::string waypoint_label;
     std::string cascade_variant;
+    /// Seconds the YOLO+cascade detection call itself took for this
+    /// waypoint (2026-08-04) — see DetectMarkerOnce.srv's own
+    /// detect_time_s doc comment for exactly what this does/doesn't
+    /// include. Drawn as a third label line in saveDebugImageGrid.
+    double detect_time_s = 0.0;
   };
   std::vector<DebugGridTile> debug_grid_images_;
   /// The most recent sample's camera frame_id — carried through to the

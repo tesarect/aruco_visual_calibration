@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <functional>
 #include <future>
 #include <limits>
@@ -185,9 +186,10 @@ void CalibrationBroadcasterNode::executeCalibration(
   // lines happen to appear.
   RCLCPP_INFO(
     get_logger(), "executeCalibration starting: hybrid_per_waypoint_enabled=%s, "
-    "min_samples_to_finish=%d, samples_per_waypoint=%d",
+    "min_samples_to_finish=%d, samples_per_waypoint=%d, "
+    "cal_ready_hybrid_marker_detection_retry=%d",
     isHybridPerWaypointEnabled() ? "true" : "false", config_.min_samples_to_finish,
-    config_.samples_per_waypoint);
+    config_.samples_per_waypoint, config_.cal_ready_hybrid_marker_detection_retry);
 
   if (!get_polygon_waypoints_client_->wait_for_service(std::chrono::seconds(5))) {
     auto result = std::make_shared<Calibrate::Result>();
@@ -232,16 +234,32 @@ void CalibrationBroadcasterNode::executeCalibration(
   // this needs no additional move, just an immediate marker_pose wait +
   // record before the polygon phase's first corner move begins. Counted
   // toward the same running total as every other sample.
+  //
+  // Retried up to config_.cal_ready_hybrid_marker_detection_retry times
+  // before giving up, via sampleWithRetry (2026-08-04, originally
+  // center-pose-only, now shared with every waypoint in runPolygonPhase/
+  // runRandomPhase too — see that config field's and sampleWithRetry's own
+  // doc comments) — the center pose is this run's FIRST sample, so unlike
+  // every later waypoint (which already soft-fails-and-continues via
+  // min_samples_to_finish), a single miss here previously aborted the
+  // WHOLE run before it even started. Confirmed live on real: "Timed out
+  // waiting for a fresh marker_pose at the center pose" ended a run
+  // outright even though the marker was genuinely in view — a transient
+  // miss (e.g. one slow/bad frame), not a real "marker not visible"
+  // situation. Cached at startup like min_samples_to_finish (see this
+  // field's own doc comment on CalibrationBroadcasterConfig) — set to 1
+  // to fully restore today's original no-retry behavior.
   {
     const rclcpp::Time now = get_clock()->now();
     const std::optional<geometry_msgs::msg::PoseStamped> center_marker_pose =
-      sampleOnceAtCurrentWaypoint(now, "center pose");
+      sampleWithRetry(now, "center pose");
 
     if (!center_marker_pose.has_value()) {
       auto result = std::make_shared<Calibrate::Result>();
       result->success = false;
-      result->message = "Timed out waiting for a fresh marker_pose at the center pose "
-        "(is the marker still in view?)";
+      result->message = "Timed out waiting for a fresh marker_pose at the center pose after " +
+        std::to_string(std::max(1, config_.cal_ready_hybrid_marker_detection_retry)) +
+        " attempts (is the marker still in view?)";
       goal_handle->abort(result);
       RCLCPP_ERROR(get_logger(), "%s", result->message.c_str());
       return;
@@ -393,9 +411,8 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
     // bad) rather than adding real new information.
     rclcpp::Time sample_boundary = before_move;
     for (int s = 0; s < config_.samples_per_waypoint; ++s) {
-      const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
-        sampleOnceAtCurrentWaypoint(
-          sample_boundary, "waypoint " + std::to_string(i + 1) + " (polygon)");
+      const std::optional<geometry_msgs::msg::PoseStamped> marker_pose = sampleWithRetry(
+        sample_boundary, "waypoint " + std::to_string(i + 1) + " (polygon)");
 
       if (!marker_pose.has_value()) {
         if (s > 0 || config_.min_samples_to_finish > 0) {
@@ -578,10 +595,9 @@ bool CalibrationBroadcasterNode::runRandomPhase(
     // return the SAME still-cached message, confirmed live).
     rclcpp::Time sample_boundary = before_move;
     for (int s = 0; s < config_.samples_per_waypoint; ++s) {
-      const std::optional<geometry_msgs::msg::PoseStamped> marker_pose =
-        sampleOnceAtCurrentWaypoint(
-          sample_boundary,
-          "waypoint " + std::to_string(samples_already_collected + i + 1) + " (random)");
+      const std::optional<geometry_msgs::msg::PoseStamped> marker_pose = sampleWithRetry(
+        sample_boundary,
+        "waypoint " + std::to_string(samples_already_collected + i + 1) + " (random)");
       if (!marker_pose.has_value()) {
         if (s > 0 || config_.min_samples_to_finish > 0) {
           // Soft-fail (2026-07-29 for s>0; extended 2026-08-04 to s==0
@@ -1001,7 +1017,8 @@ CalibrationBroadcasterNode::sampleOnceAtCurrentWaypoint(
     const std::vector<uchar> jpeg_bytes = decodeBase64(response->cascade_image_b64);
     const cv::Mat decoded = cv::imdecode(jpeg_bytes, cv::IMREAD_COLOR);
     if (!decoded.empty()) {
-      debug_grid_images_.push_back({decoded, waypoint_label, response->cascade_variant_used});
+      debug_grid_images_.push_back(
+        {decoded, waypoint_label, response->cascade_variant_used, response->detect_time_s});
     } else {
       RCLCPP_WARN(
         get_logger(),
@@ -1011,6 +1028,36 @@ CalibrationBroadcasterNode::sampleOnceAtCurrentWaypoint(
   }
 
   return response->marker_pose;
+}
+
+std::optional<geometry_msgs::msg::PoseStamped> CalibrationBroadcasterNode::sampleWithRetry(
+  const rclcpp::Time & after, const std::string & waypoint_label)
+{
+  // Extended from center-pose-only to EVERY waypoint (2026-08-04) — see
+  // CalibrationBroadcasterConfig::cal_ready_hybrid_marker_detection_retry's
+  // own doc comment. A miss at ANY single waypoint is often a transient
+  // one-bad-frame issue (confirmed live: repeated "YOLO found no
+  // aruco_marker candidate" misses with normal cascade timing and no lock
+  // contention — a real detection-quality miss on that particular frame,
+  // not a systemic slowdown), so retrying with a fresh frame before
+  // falling through to the caller's own existing soft-fail/hard-fail
+  // handling gives each waypoint more than one chance at a genuinely new
+  // frame before being counted as lost.
+  const int max_attempts = std::max(1, config_.cal_ready_hybrid_marker_detection_retry);
+  std::optional<geometry_msgs::msg::PoseStamped> result;
+  for (int attempt = 1; attempt <= max_attempts; ++attempt) {
+    const rclcpp::Time boundary = (attempt == 1) ? after : get_clock()->now();
+    result = sampleOnceAtCurrentWaypoint(boundary, waypoint_label);
+    if (result.has_value()) {
+      break;
+    }
+    if (attempt < max_attempts) {
+      RCLCPP_WARN(
+        get_logger(), "%s: attempt %d/%d failed — retrying with a fresh frame",
+        waypoint_label.c_str(), attempt, max_attempts);
+    }
+  }
+  return result;
 }
 
 void CalibrationBroadcasterNode::saveDebugImageGrid()
@@ -1049,13 +1096,14 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
   const cv::Scalar kBgColor(0, 0, 0);
   const cv::Scalar kLabelTextColor(0, 255, 0);
   const cv::Scalar kVariantTextColor(0, 200, 255);
-  // Two lines now (2026-08-04, was one combined "label: variant" line) —
-  // "wp: <waypoint label>" on its own line, cascade variant (which cascade
-  // stage's enhancement actually produced a successful classical detection
-  // — the whole point of comparing hybrid against classical) on the line
-  // below it, so both are readable at this tile size without truncation.
+  const cv::Scalar kTimingTextColor(255, 200, 0);
+  // Three lines now (2026-08-04, was two: "label"/"variant") — "wp:
+  // <waypoint label>" / "cascade: <variant>" / "detect: <N.NNs>" (how long
+  // THIS waypoint's YOLO+cascade call took — see DetectMarkerOnce.srv's
+  // own detect_time_s doc comment for exactly what this measures), one per
+  // line so all three stay readable at this tile size without truncation.
   const int kLabelLineHeight = 20;
-  const int kLabelStripHeight = kLabelLineHeight * 2 + 6;
+  const int kLabelStripHeight = kLabelLineHeight * 3 + 6;
 
   std::vector<cv::Mat> tiles;
   tiles.reserve(debug_grid_images_.size());
@@ -1091,8 +1139,13 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
       cv::FONT_HERSHEY_SIMPLEX, 0.42, kLabelTextColor, 1, cv::LINE_AA);
     cv::putText(
       labeled, "cascade: " + tile_data.cascade_variant,
-      cv::Point(4, kTileHeight + kLabelLineHeight * 2 - 2),
+      cv::Point(4, kTileHeight + kLabelLineHeight * 2 - 4),
       cv::FONT_HERSHEY_SIMPLEX, 0.42, kVariantTextColor, 1, cv::LINE_AA);
+    char timing_line[32];
+    std::snprintf(timing_line, sizeof(timing_line), "detect: %.2fs", tile_data.detect_time_s);
+    cv::putText(
+      labeled, timing_line, cv::Point(4, kTileHeight + kLabelLineHeight * 3 - 2),
+      cv::FONT_HERSHEY_SIMPLEX, 0.42, kTimingTextColor, 1, cv::LINE_AA);
 
     // Margin border around each tile (2026-08-04) — otherwise adjacent
     // tiles sit flush against each other with no visual separation, which
@@ -1130,18 +1183,44 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
   // runtime log directory, per explicit user confirmation (NOT this local
   // checkout's own _errors/real/ archive convention, a separate thing).
   const std::string kOutputDir = "/home/user/ros2_ws/log/tmux/real";
-  const std::string output_path = kOutputDir + "/hybrid_per_waypoint_debug_grid.png";
+  const std::string kFilename = "hybrid_per_waypoint_debug_grid.png";
+  const std::string output_path = kOutputDir + "/" + kFilename;
   if (!cv::imwrite(output_path, grid)) {
     RCLCPP_ERROR(
       get_logger(),
       "saveDebugImageGrid: failed to write '%s' (%zu tiles) — does the directory exist?",
       output_path.c_str(), debug_grid_images_.size());
-    return;
+  } else {
+    RCLCPP_INFO(
+      get_logger(), "saveDebugImageGrid: wrote %zu waypoint tiles to '%s'",
+      debug_grid_images_.size(), output_path.c_str());
   }
 
-  RCLCPP_INFO(
-    get_logger(), "saveDebugImageGrid: wrote %zu waypoint tiles to '%s'",
-    debug_grid_images_.size(), output_path.c_str());
+  // Second write, to the web app's own static-asset directory (2026-08-04)
+  // — so the browser-side UI can show this same PNG directly as a plain
+  // static image URL (webpage_ws/app/public/ is Vite's static-asset dir,
+  // already used for other runtime-written, gitignored content like
+  // public/robot/ — see webpage_ws/app/.gitignore), with no rosbridge/
+  // base64-over-topic transport needed. Live-read (not cached in config_)
+  // so it can be pointed at a different path via `ros2 param set` without
+  // a restart. Empty string (default) disables this second write entirely
+  // — this stays purely additive to the log-directory write above, which
+  // always happens regardless. Best-effort: logs, does not fail the run.
+  std::string web_output_dir;
+  get_parameter_or("debug_grid_web_output_dir", web_output_dir, std::string(""));
+  if (!web_output_dir.empty()) {
+    const std::string web_output_path = web_output_dir + "/" + kFilename;
+    if (!cv::imwrite(web_output_path, grid)) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "saveDebugImageGrid: failed to write web-visible copy to '%s' — does the directory "
+        "exist? (debug_grid_web_output_dir)", web_output_path.c_str());
+    } else {
+      RCLCPP_INFO(
+        get_logger(), "saveDebugImageGrid: wrote web-visible copy to '%s'",
+        web_output_path.c_str());
+    }
+  }
 }
 
 bool CalibrationBroadcasterNode::isMarkerVisibleNow(const rclcpp::Time & after)
@@ -1796,6 +1875,13 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
   // real-only. Default 0 = today's original strict behavior (see this
   // field's own doc comment).
   get_parameter_or("min_samples_to_finish", config.min_samples_to_finish, 0);
+
+  // get_parameter_or, same reasoning as above — real-only in practice.
+  // Default 3 (see this field's own doc comment for why 1 == today's
+  // original no-retry behavior).
+  get_parameter_or(
+    "cal_ready_hybrid_marker_detection_retry",
+    config.cal_ready_hybrid_marker_detection_retry, 3);
 
   config.clustering_bucket_size_cm =
     get_parameter("clustering_bucket_size_cm").as_double();

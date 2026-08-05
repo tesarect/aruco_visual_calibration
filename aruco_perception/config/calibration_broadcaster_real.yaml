@@ -199,6 +199,34 @@ calibration_broadcaster_node:
     # roughly half of whatever the new total attempted waypoints is).
     min_samples_to_finish: 3
 
+    # Retry count PER SAMPLE (2026-08-04, widened from center-pose-only to
+    # EVERY waypoint) — see
+    # CalibrationBroadcasterConfig::cal_ready_hybrid_marker_detection_retry's
+    # own doc comment. Confirmed live on real: "YOLO found no aruco_marker
+    # candidate" misses (clean, transient one-bad-frame issues — no lock
+    # contention, no slow cascade) occurred at ordinary waypoints too, not
+    # just the center pose, so each waypoint sample now gets a fresh-frame
+    # retry before falling through to min_samples_to_finish's existing
+    # discard-and-continue handling. 1 = no retry, today's original
+    # per-sample behavior.
+    cal_ready_hybrid_marker_detection_retry: 3
+
+    # Second write destination for the hybrid_per_waypoint_debug_grid.png
+    # combined debug image (2026-08-04) — ALWAYS written to the rosject's
+    # own log dir (/home/user/ros2_ws/log/tmux/real, hardcoded, see
+    # saveDebugImageGrid) regardless of this param; this ADDITIONALLY
+    # writes the same file here, a path the web app's Vite dev/preview
+    # server can serve as a plain static image (webpage_ws/app/public/ is
+    # Vite's static-asset dir — see that directory's own .gitignore for the
+    # existing convention of runtime-written, gitignored content there).
+    # Live-tunable via `ros2 param set /calibration_broadcaster_node
+    # debug_grid_web_output_dir <path>` with no restart needed. Empty
+    # string disables this second write. Path assumes ros2_ws and
+    # webpage_ws are sibling directories under /home/user/ on the rosject,
+    # matching this project's actual layout — adjust if that's ever not
+    # the case for a given deployment.
+    debug_grid_web_output_dir: "/home/user/webpage_ws/app/public"
+
     # --- Clustering-based position+orientation averaging (2026-07-29) ---
     # When true, finishCalibration() computes the final broadcast POSITION
     # AND ORIENTATION by bucketing samples (pairwise position distance <=

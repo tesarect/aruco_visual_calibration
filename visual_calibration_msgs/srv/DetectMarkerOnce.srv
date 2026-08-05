@@ -48,3 +48,14 @@ string cascade_image_b64
 # putting it in the response means calibration_broadcaster_node's own,
 # reliably-captured ROS log can report it directly.
 string failure_reason
+
+# How long the YOLO+cascade detection call itself took, in seconds
+# (2026-08-04) — inference_server.py's own internal timer around
+# estimate_marker_pose_cascade, NOT this service call's full round-trip
+# and NOT the SIGCONT/SIGSTOP process-signal overhead bracketing it (see
+# calibration_broadcaster_node's own sampleOnceAtCurrentWaypoint timing
+# log for that separate, already-existing breakdown). Only meaningful
+# when success is true — 0.0 otherwise. Used by
+# calibration_broadcaster_node to label each tile in its combined-grid
+# debug image with how long that specific waypoint's detection took.
+float64 detect_time_s
