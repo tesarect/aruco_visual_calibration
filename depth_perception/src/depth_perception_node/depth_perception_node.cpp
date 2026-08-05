@@ -31,6 +31,19 @@
 // CMakeLists.txt, so it does not build) purely as a reference for porting
 // the remaining features back in, stage by stage, once this stage is
 // confirmed correct on real hardware.
+//
+// STAGE 2 (2026-08-05): adds the camera-frame -> base_link conversion +
+// TF broadcast for cup_holder, confirmed correct on real hardware in
+// Stage 1 first (valid_samples=25/25 every reading, stable/repeatable
+// camera_frame(x,y,z) once the arm settled — see this branch's commit
+// log). Still cup_holder ONLY — no holes, no rolling-window/stability
+// filtering, no overlay image (deliberately deferred to a later stage,
+// per explicit request to keep each stage minimal and testable on its
+// own). cameraFrameToBaseLink logs the FULL calibrated camera TF used
+// (translation + RPY) alongside the result, so this stage's own log line
+// answers "what did calibration_broadcaster_node's camera orientation
+// actually look like at the moment this TF was computed" without a
+// separate tf2_echo capture.
 
 #include "depth_perception/depth_perception_node.hpp"
 
@@ -39,6 +52,9 @@
 #include <vector>
 
 #include <cv_bridge/cv_bridge.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 namespace depth_perception
 {
@@ -47,7 +63,10 @@ DepthPerceptionNode::DepthPerceptionNode()
 : Node(
     "depth_perception_node",
     rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true)),
-  config_(loadConfigFromParams())
+  config_(loadConfigFromParams()),
+  tf_buffer_(get_clock()),
+  tf_listener_(tf_buffer_),
+  instance_tf_broadcaster_(this)
 {
   rgb_image_sub_ = image_transport::create_subscription(
     this, config_.rgb_image_topic,
@@ -69,11 +88,13 @@ DepthPerceptionNode::DepthPerceptionNode()
 
   RCLCPP_INFO(
     get_logger(),
-    "depth_perception_node ready [STAGE 1 REBUILD, cup_holder-only] (rgb: '%s', depth: '%s', "
-    "camera_info: '%s', detections_2d: '%s', depth_patch_half_size_px: %d)",
+    "depth_perception_node ready [STAGE 2 REBUILD, cup_holder-only] (rgb: '%s', depth: '%s', "
+    "camera_info: '%s', detections_2d: '%s', depth_patch_half_size_px: %d, "
+    "known_chain_frame: '%s', broadcast_frame_suffix: '%s')",
     config_.rgb_image_topic.c_str(), config_.depth_image_topic.c_str(),
     config_.camera_info_topic.c_str(), config_.detections_2d_topic.c_str(),
-    config_.depth_patch_half_size_px);
+    config_.depth_patch_half_size_px, config_.known_chain_frame.c_str(),
+    config_.broadcast_frame_suffix.c_str());
 }
 
 void DepthPerceptionNode::rgbImageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
@@ -196,6 +217,52 @@ CentroidBackProjection DepthPerceptionNode::backProjectCentroid(double cx_px, do
   return result;
 }
 
+CameraToBaseLinkResult DepthPerceptionNode::cameraFrameToBaseLink(
+  double cam_x, double cam_y, double cam_z, const std::string & header_frame_id) const
+{
+  CameraToBaseLinkResult result;
+  result.calibrated_camera_frame = header_frame_id + config_.broadcast_frame_suffix;
+
+  geometry_msgs::msg::TransformStamped known_to_camera_tf;
+  try {
+    known_to_camera_tf = tf_buffer_.lookupTransform(
+      config_.known_chain_frame, result.calibrated_camera_frame, tf2::TimePointZero,
+      tf2::durationFromSec(0.5));
+  } catch (const tf2::TransformException & ex) {
+    result.reason = std::string("camera TF lookup failed: ") + ex.what();
+    return result;
+  }
+
+  const auto & t = known_to_camera_tf.transform.translation;
+  const auto & q = known_to_camera_tf.transform.rotation;
+  result.cam_tx = t.x;
+  result.cam_ty = t.y;
+  result.cam_tz = t.z;
+
+  tf2::Quaternion tf_q(q.x, q.y, q.z, q.w);
+  double roll = 0.0, pitch = 0.0, yaw = 0.0;
+  tf2::Matrix3x3(tf_q).getRPY(roll, pitch, yaw);
+  result.cam_roll_deg = roll * 180.0 / M_PI;
+  result.cam_pitch_deg = pitch * 180.0 / M_PI;
+  result.cam_yaw_deg = yaw * 180.0 / M_PI;
+
+  // base_link_point = camera_translation + camera_rotation * camera_frame_point
+  // — standard rigid-transform composition, identical math to the old
+  // file's own known_to_camera * camera_to_cup_holder (confirmed this
+  // session to be arithmetically correct, just under-logged).
+  tf2::Vector3 p_cam(cam_x, cam_y, cam_z);
+  tf2::Transform known_to_camera;
+  known_to_camera.setOrigin(tf2::Vector3(t.x, t.y, t.z));
+  known_to_camera.setRotation(tf_q);
+  const tf2::Vector3 p_base = known_to_camera * p_cam;
+
+  result.x = p_base.x();
+  result.y = p_base.y();
+  result.z = p_base.z();
+  result.valid = true;
+  return result;
+}
+
 void DepthPerceptionNode::detections2dCallback(
   const visual_calibration_msgs::msg::Detection2DArray::ConstSharedPtr & msg)
 {
@@ -207,37 +274,76 @@ void DepthPerceptionNode::detections2dCallback(
   }
 
   for (const auto & detection : msg->detections) {
-    // Stage 1: cup_holder only. Holes/aruco_marker are skipped entirely
+    // Stage 1/2: cup_holder only. Holes/aruco_marker are skipped entirely
     // for now — see this file's own top-of-file doc comment for the
     // staged-rebuild plan.
     if (detection.class_name != "cup_holder") {
       continue;
     }
 
-    const CentroidBackProjection result = backProjectCentroid(detection.cx, detection.cy);
+    const CentroidBackProjection cam_result = backProjectCentroid(detection.cx, detection.cy);
 
-    if (result.valid) {
-      // Every intermediate quantity in ONE line — the whole point of this
-      // rebuild. A future debugging session can verify this by hand from
-      // this single line alone: no separate camera_info capture, no
-      // separate patch-sampling capture, nothing implicit.
-      RCLCPP_INFO(
-        get_logger(),
-        "cup_holder centroid: pixel(cx=%.2f, cy=%.2f) patch_half_px=%d "
-        "valid_samples=%d/%d depth_m=%.4f intrinsics(fx=%.4f, fy=%.4f, cx=%.4f, cy=%.4f) "
-        "-> camera_frame(x=%.4f, y=%.4f, z=%.4f)",
-        result.cx_px, result.cy_px, result.patch_half_px, result.patch_valid_sample_count,
-        (2 * result.patch_half_px + 1) * (2 * result.patch_half_px + 1), result.depth_m,
-        result.fx, result.fy, result.cx_intrinsic, result.cy_intrinsic, result.x, result.y,
-        result.z);
-    } else {
+    if (!cam_result.valid) {
       RCLCPP_WARN(
         get_logger(),
         "cup_holder centroid: pixel(cx=%.2f, cy=%.2f) patch_half_px=%d valid_samples=%d/%d "
         "-> NO VALID DEPTH in the sampled patch",
-        detection.cx, detection.cy, result.patch_half_px, result.patch_valid_sample_count,
-        (2 * result.patch_half_px + 1) * (2 * result.patch_half_px + 1));
+        detection.cx, detection.cy, cam_result.patch_half_px,
+        cam_result.patch_valid_sample_count,
+        (2 * cam_result.patch_half_px + 1) * (2 * cam_result.patch_half_px + 1));
+      continue;
     }
+
+    const CameraToBaseLinkResult base_result = cameraFrameToBaseLink(
+      cam_result.x, cam_result.y, cam_result.z, msg->header.frame_id);
+
+    if (!base_result.valid) {
+      // Every intermediate quantity still logged, even on failure — this
+      // is exactly the "camera-frame math is fine, base_link conversion
+      // couldn't run" case (e.g. no ~/calibrate run completed yet this
+      // session) that used to be invisible without cross-referencing a
+      // separate warning line.
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "cup_holder centroid: pixel(cx=%.2f, cy=%.2f) depth_m=%.4f -> "
+        "camera_frame(x=%.4f, y=%.4f, z=%.4f) -> base_link: FAILED (%s)",
+        cam_result.cx_px, cam_result.cy_px, cam_result.depth_m, cam_result.x, cam_result.y,
+        cam_result.z, base_result.reason.c_str());
+      continue;
+    }
+
+    // Every intermediate quantity, both stages, in ONE line — the whole
+    // point of this rebuild. A future debugging session can verify this
+    // by hand from this single line alone: no separate camera_info/TF
+    // capture, nothing implicit.
+    RCLCPP_INFO(
+      get_logger(),
+      "cup_holder centroid: pixel(cx=%.2f, cy=%.2f) patch_half_px=%d valid_samples=%d/%d "
+      "depth_m=%.4f intrinsics(fx=%.4f, fy=%.4f, cx=%.4f, cy=%.4f) -> "
+      "camera_frame(x=%.4f, y=%.4f, z=%.4f) -> camera_tf['%s'](t=[%.4f, %.4f, %.4f], "
+      "rpy_deg=[%.2f, %.2f, %.2f]) -> base_link(x=%.4f, y=%.4f, z=%.4f)",
+      cam_result.cx_px, cam_result.cy_px, cam_result.patch_half_px,
+      cam_result.patch_valid_sample_count,
+      (2 * cam_result.patch_half_px + 1) * (2 * cam_result.patch_half_px + 1),
+      cam_result.depth_m, cam_result.fx, cam_result.fy, cam_result.cx_intrinsic,
+      cam_result.cy_intrinsic, cam_result.x, cam_result.y, cam_result.z,
+      base_result.calibrated_camera_frame.c_str(), base_result.cam_tx, base_result.cam_ty,
+      base_result.cam_tz, base_result.cam_roll_deg, base_result.cam_pitch_deg,
+      base_result.cam_yaw_deg, base_result.x, base_result.y, base_result.z);
+
+    geometry_msgs::msg::TransformStamped cup_holder_tf;
+    cup_holder_tf.header.stamp = msg->header.stamp;
+    cup_holder_tf.header.frame_id = config_.known_chain_frame;
+    cup_holder_tf.child_frame_id = "cup_holder";
+    cup_holder_tf.transform.translation.x = base_result.x;
+    cup_holder_tf.transform.translation.y = base_result.y;
+    cup_holder_tf.transform.translation.z = base_result.z;
+    // Position-only — no orientation estimate exists for a bbox-centroid
+    // detection, so this TF's rotation is left as the identity quaternion
+    // rather than fabricating a meaningless one (same convention the old
+    // file used).
+    cup_holder_tf.transform.rotation.w = 1.0;
+    instance_tf_broadcaster_.sendTransform(cup_holder_tf);
   }
 }
 
@@ -251,6 +357,9 @@ DepthPerceptionConfig DepthPerceptionNode::loadConfigFromParams() const
   config.depth_scale_to_meters = get_parameter("depth_scale_to_meters").as_double();
   config.depth_patch_half_size_px =
     static_cast<int>(get_parameter("depth_patch_half_size_px").as_int());
+  get_parameter_or("known_chain_frame", config.known_chain_frame, std::string("base_link"));
+  get_parameter_or(
+    "broadcast_frame_suffix", config.broadcast_frame_suffix, std::string("_calibrated"));
   return config;
 }
 

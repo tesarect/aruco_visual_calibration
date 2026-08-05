@@ -7,8 +7,12 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <std_msgs/msg/header.hpp>
 #include <image_transport/image_transport.hpp>
 #include <opencv2/core.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_ros/transform_listener.h>
 #include <visual_calibration_msgs/msg/detection2_d_array.hpp>
 
 namespace depth_perception
@@ -53,6 +57,22 @@ struct DepthPerceptionConfig
   // patch. Stage 1: cup_holder only, always median (no per-class branch
   // yet — that returns in a later stage alongside hole support).
   int depth_patch_half_size_px = 2;
+
+  // --- Stage 2 additions (2026-08-05): camera-frame -> base_link TF ---
+  // TF frame calibration_broadcaster_node's own known_chain_frame names —
+  // MUST match calibration_broadcaster_{sim,real}.yaml's own value
+  // exactly ("base_link" in both envs, confirmed).
+  std::string known_chain_frame = "base_link";
+
+  // Appended to the incoming detections_2d message's own header.frame_id
+  // (the camera's own optical frame, e.g. "D415_color_optical_frame") to
+  // form the calibrated camera frame to look up — e.g.
+  // "D415_color_optical_frame_calibrated". MUST match
+  // calibration_broadcaster_node's own broadcast_frame_suffix exactly.
+  // Deliberately NOT hardcoding a per-env camera frame name here — the
+  // incoming message's own frame_id already tells us which camera is in
+  // play, sim or real.
+  std::string broadcast_frame_suffix = "_calibrated";
 };
 
 /*
@@ -90,6 +110,34 @@ struct CentroidBackProjection
   double z = 0.0;
 };
 
+/*
+ * Stage 2 (2026-08-05): the camera-frame -> base_link conversion result,
+ * INCLUDING the exact calibrated camera TF used to produce it — same
+ * "every intermediate quantity, not just the final number" philosophy as
+ * CentroidBackProjection. A single log line built from this struct lets a
+ * future debugging session verify the full chain (camera-frame point +
+ * camera calibration -> base_link point) by hand, from ROS log output
+ * alone, with no separate TF-echo capture needed.
+ */
+struct CameraToBaseLinkResult
+{
+  bool valid = false;
+  std::string reason;  // set when !valid, e.g. "camera TF lookup failed: <exception message>"
+
+  // The calibrated camera TF actually used (base_link -> calibrated
+  // camera frame) — translation + a full RPY breakdown (not just the raw
+  // quaternion) so a log line is directly human-readable without needing
+  // to run the quaternion through a converter by hand.
+  std::string calibrated_camera_frame;
+  double cam_tx = 0.0, cam_ty = 0.0, cam_tz = 0.0;
+  double cam_roll_deg = 0.0, cam_pitch_deg = 0.0, cam_yaw_deg = 0.0;
+
+  // Final result: the centroid's position in known_chain_frame (base_link).
+  double x = 0.0;
+  double y = 0.0;
+  double z = 0.0;
+};
+
 class DepthPerceptionNode : public rclcpp::Node
 {
 public:
@@ -106,6 +154,16 @@ private:
   // observable — see CentroidBackProjection's own doc comment for why
   // every field of the result (not just x/y/z) is populated and logged.
   CentroidBackProjection backProjectCentroid(double cx_px, double cy_px) const;
+
+  // Stage 2 (2026-08-05): looks up calibration_broadcaster_node's
+  // broadcast camera TF (known_chain_frame -> header_frame_id +
+  // broadcast_frame_suffix) and applies it to a camera-frame point,
+  // returning EVERY intermediate quantity (see CameraToBaseLinkResult's
+  // own doc comment) — not just the final base_link x/y/z.
+  // header_frame_id is the incoming detection message's own camera
+  // frame_id (e.g. "D415_color_optical_frame"), NOT hardcoded per-env.
+  CameraToBaseLinkResult cameraFrameToBaseLink(
+    double cam_x, double cam_y, double cam_z, const std::string & header_frame_id) const;
 
   DepthPerceptionConfig loadConfigFromParams() const;
 
@@ -126,6 +184,11 @@ private:
   bool depth_received_ = false;
   mutable std::mutex depth_mutex_;
   cv::Mat latest_depth_;  // CV_32FC1, meters, guarded by depth_mutex_
+
+  // Stage 2 additions
+  tf2_ros::Buffer tf_buffer_;
+  tf2_ros::TransformListener tf_listener_;
+  tf2_ros::TransformBroadcaster instance_tf_broadcaster_;
 };
 
 }  // namespace depth_perception
