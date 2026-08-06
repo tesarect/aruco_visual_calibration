@@ -127,6 +127,31 @@ depth_perception_node:
     # with NO node restart needed. 0.0 disables this entirely.
     instance_tf_pitch_down_deg: 10.0
 
+    # Hole diagonal-swap correction (2026-08-06, real-only — no entry in
+    # depth_perception_sim.yaml). Confirmed live: hole_1<->hole_4 and
+    # hole_2<->hole_3 swap positions in base_link — a 180-degree rotation
+    # about the camera's own optical Z axis, from known_to_camera's
+    # calibrated orientation landing near a half-turn (confirmed LOW
+    # CONFIDENCE calibration runs, 17-20deg spread). hole_number itself is
+    # assigned correctly upstream from 2D image quadrants — NOT a labeling
+    # bug. true negates the camera-frame X/Y offset (Z untouched) before
+    # rotating into base_link, exactly undoing the swap. See
+    # broadcastInstanceTfs()'s own doc comment for the exact math.
+    # Live-read every call, tunable via
+    # `ros2 param set /depth_perception_node instance_tf_hole_yaw_flip <true|false>`
+    # with NO node restart needed.
+    instance_tf_hole_yaw_flip: true
+
+    # Forces every hole's Z offset from cup_holder to 0.0 (2026-08-06,
+    # real-only — no entry in depth_perception_sim.yaml), so all 4 holes
+    # broadcast on the EXACT SAME Z plane as cup_holder itself (physically
+    # correct — the holder rim and its 4 holes are one rigid, flat-topped
+    # object) instead of each hole keeping its own small, independently-
+    # noisy Z offset. Live-read every call, tunable via
+    # `ros2 param set /depth_perception_node instance_tf_holes_flush_with_holder <true|false>`
+    # with NO node restart needed.
+    instance_tf_holes_flush_with_holder: true
+
     # Horizontal (X/Y) reachability clamp (2026-07-30, real-only — no
     # entry in depth_perception_sim.yaml) — same "explicitly requested
     # cheat, not a real fix" spirit as instance_tf_z_offset_m above, same

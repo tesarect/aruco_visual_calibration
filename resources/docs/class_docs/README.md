@@ -23,6 +23,10 @@ flowchart TD
         ORC["CalibrationOrchestratorNode"]
     end
 
+    subgraph DP["depth_perception"]
+        DPN["DepthPerceptionNode"]
+    end
+
     subgraph MV["visual_calibration_moveit"]
         TP["TrajectoryPlanner"]
         PSS["PlanningSceneSetup"]
@@ -52,6 +56,10 @@ flowchart TD
     TP -->|"uses"| PP
     TP -->|"MoveGroupInterface\nplan + execute"| ARM["UR3e arm"]
     PSS -->|"collision objects"| ARM
+
+    DET -->|"detections_2d (aruco_marker)"| DPN
+    YOLO -->|"detections_2d (cup_holder, hole)"| DPN
+    DPN -.->|"lookupTransform\nknown_chain_frame -> camera_..._calibrated"| CB
 ```
 
 > [Note] 
@@ -73,8 +81,9 @@ folder.
 ## Packages
 
 - [aruco_perception](./aruco_perception.md) — `ArucoDetectorNode`,
-  `ImageSubscriberNode`, `CalibrationBroadcasterNode`, plus the
-  `orientation_averaging` free functions. Per-parameter YAML references:
+  `ImageSubscriberNode`, `CupHolderDetectorNode`,
+  `CalibrationBroadcasterNode`, plus the `orientation_averaging` free
+  functions. Per-parameter YAML references:
   [aruco_detector_sim.md](./aruco_detector_sim.md),
   [calibration_broadcaster_sim.md](./calibration_broadcaster_sim.md),
   [image_subscriber_sim.md](./image_subscriber_sim.md).
@@ -95,11 +104,11 @@ folder.
   package (actions, services, and messages shared across the packages
   above), documented as field tables rather than class diagrams since there
   are no classes.
-- `depth_perception` — **skipped from class_docs**: its only node
-  (`DepthPerceptionNode`) is a plumbing-only camera-input smoke test with
-  no real algorithmic classes yet (see
-  [../depth_perception.md](../depth_perception.md) for its plain-language
-  page instead, which covers its one class inline).
+- `depth_perception` — `DepthPerceptionNode`, plus its `RollingWindow`
+  supporting type. No dedicated `class_docs/` page yet — documented inline
+  in [../depth_perception.md](../depth_perception.md) via its own doc
+  comments (back-projection math, rolling-window/hold-last-known
+  filtering, TF broadcast chaining).
 - `aruco_moveit_config`, `sim_ur3e_moveit_config`, `real_ur3e_moveit_config`
   — **skipped**: purely generated MoveIt2 config (SRDF, kinematics.yaml,
   joint_limits.yaml, launch files) with no hand-written C++ classes to

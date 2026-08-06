@@ -4,8 +4,8 @@
 
 Interfaces-only package — no C++ classes, just `.srv`/`.action`/`.msg`
 definitions shared between `aruco_perception`, `aruco_perception_yolo_bridge`,
-`orchestrator`, and `visual_calibration_moveit`. Documented here as field
-tables instead of class diagrams.
+`orchestrator`, `depth_perception`, and `visual_calibration_moveit`.
+Documented here as field tables instead of class diagrams.
 
 ---
 
@@ -27,6 +27,7 @@ matching the project's convention of tuning via YAML, not call sites.
 | `message` | `string` | Human-readable status/error detail. |
 | `max_spread_deg` | `float64` | Largest single-sample deviation from the averaged orientation. |
 | `mean_spread_deg` | `float64` | Average sample deviation from the averaged orientation. |
+| `is_high_confidence` | `bool` | Soft, informational signal — `true` if the post-outlier-rejection spread is within `position_spread_tolerance_cm`/`orientation_spread_tolerance_deg`. Never affects `success`; lets a caller (web UI) show a warning without blocking the workflow. |
 
 The computed `known_chain_frame → camera` transform itself isn't included
 here — it's already broadcast on `/tf` by the time the action completes;
@@ -38,6 +39,8 @@ read it from there.
 |---|---|---|
 | `samples_collected` | `uint32` | How many samples have been accepted so far. |
 | `samples_total` | `uint32` | Total samples this run will collect. |
+| `current_status` | `string` | Short human-readable text for the current event, e.g. a discard-and-continue/timeout message from `min_samples_to_finish`'s soft-fail path. Empty for a normal "sample recorded" event. |
+| `latest_sample_pose` | `geometry_msgs/Pose` | The just-recorded sample's `known_chain_frame → camera` candidate pose — lets a caller visualize the estimate converging sample by sample, not just the final average. |
 
 ---
 
@@ -195,6 +198,83 @@ this switch — see [aruco_perception_yolo_bridge.md](../aruco_perception_yolo_b
 
 ---
 
+## DetectMarkerOnce.srv
+
+On-demand, single-shot `~/detect_marker_once` service, served by
+`aruco_perception_yolo_bridge`'s `YoloMarkerBridgeNode`. Runs one YOLO
+crop + image-enhancement cascade + classical ArUco + `solvePnP` detection
+against the next fresh camera frame, for
+`calibration_broadcaster_node`'s `hybrid_per_waypoint_enabled` mode — see
+[aruco_perception_yolo_bridge.md](../aruco_perception_yolo_bridge.md)'s
+own section for the full mechanism.
+
+**Request** — empty.
+
+**Response**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `success` | `bool` | Whether a marker was found. |
+| `message` | `string` | Human-readable status/error detail. |
+| `marker_pose` | `geometry_msgs/PoseStamped` | The detected camera → marker pose, same shape `publish_marker_pose` builds for continuous mode. |
+| `cascade_variant_used` | `string` | Which enhancement cascade variant succeeded (e.g. `"gamma_0.7"`). Empty if `success` is `false`. |
+| `cascade_image_b64` | `string` | The winning crop image, JPEG/base64 — an inspection artifact `calibration_broadcaster_node` accumulates into one labeled debug grid per run. Empty if `success` is `false`. |
+| `failure_reason` | `string` | Set only when `success` is `false`: `"no_yolo_bbox"` (YOLO found no candidate box at all) or `"no_classical_match"` (YOLO found a box, but classical detection failed on every enhancement variant tried within it). |
+| `detect_time_s` | `float64` | How long the YOLO+cascade call itself took — excludes this service call's round-trip and any SIGCONT/SIGSTOP overhead. Only meaningful if `success` is `true`. |
+
+---
+
+## SignalInferenceServer.srv
+
+`~/signal_inference_server` service, served by
+`CalibrationOrchestratorNode`. Sends SIGSTOP or SIGCONT to the running
+`inference_server.py` process (a thin wrapper around
+`signalInferenceServer()`) — exposed as a service so
+`calibration_broadcaster_node` (a different package) can reuse the same
+`/proc`-scan-and-signal implementation at a per-waypoint grain for
+`hybrid_per_waypoint_enabled` mode, instead of a second, divergent
+implementation. See [orchestrator.md](../orchestrator.md)'s "Pausing YOLO
+inference during a run" section.
+
+**Request**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `stop` | `bool` | `true` = SIGSTOP (pause), `false` = SIGCONT (resume). |
+
+**Response**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `success` | `bool` | Whether the signal was sent. |
+| `message` | `string` | Human-readable status/error detail. |
+
+---
+
+## MoveToInstance.srv
+
+`~/move_to_instance` service. Moves the arm to a **live TF lookup** of a
+named cupholder/hole instance (`"cup_holder"`, `"hole_1".."hole_4"` — the
+exact `child_frame_id`s `depth_perception_node::broadcastInstanceTfs()`
+publishes on `/tf`), not a static preset — these positions are only known
+once calibration and depth-perception have actually run, and would go
+stale in a YAML file if the camera/table setup changes.
+
+**Request**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `instance_name` | `string` | `"cup_holder"` or `"hole_1".."hole_4"`. |
+
+**Response**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `success` | `bool` | Whether the move succeeded. |
+| `message` | `string` | Human-readable status/error detail — includes a clear failure if the TF doesn't exist yet (no `~/calibrate` run completed this session, or `depth_perception_node` hasn't detected this instance yet). |
+
+---
+
 ## AutoCalibrate.action
 
 Goal-driven `~/auto_calibrate` action, served by
@@ -296,6 +376,40 @@ message — unlike the ArUco marker (known 45 mm real-world size, solvable
 via `solvePnP`), there is no known real-world circle size to solve a 3D
 pose against from YOLO alone; that's left to `depth_perception`'s own
 downstream pipeline (back-projecting via depth + camera intrinsics).
+
+---
+
+## StablePosition.msg / StablePositionArray.msg
+
+Published by `depth_perception_node` on
+`/depth_perception/stable_positions`, every processed `detections_2d`
+callback — one `StablePosition` per tracked instance (`cup_holder`, or
+each `hole_1..hole_4`) **ever** successfully detected so far, regardless
+of whether that instance appeared in the frame that triggered this
+publish. Unlike `Detection2DArray` (raw, per-frame, unfiltered), this is
+`depth_perception_node`'s held/filtered output — a continuous, gap-free
+stream a consumer can always rely on having a usable position from,
+instead of handling "this instance vanished for a few frames" itself. See
+[depth_perception.md](../depth_perception.md) for the rolling-window +
+hold-last-known-position filtering that produces it.
+
+**StablePositionArray**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `header` | `std_msgs/Header` | Same convention as `Detection2DArray`/`marker_pose`: reuses the source image's own header. |
+| `positions` | `StablePosition[]` | One entry per tracked instance ever seen. |
+
+**StablePosition**
+
+| Field | Type | Meaning |
+|---|---|---|
+| `class_name` | `string` | `"cup_holder"` or `"hole"`. |
+| `hole_number` | `int32` | Meaningful only for `"hole"` (1–4); `0` for `"cup_holder"`. |
+| `x`, `y`, `z` | `float64` | Held 3D position, camera's own optical frame (meters) — `depth_perception_node`'s `last_stable`, not a single frame's raw back-projection. |
+| `px`, `py` | `float64` | The same position reprojected back to 2D pixel coordinates, so a consumer that only wants to draw it never needs its own camera-frame math. |
+| `drifted` | `bool` | `true` if this message's position was just updated (a genuine drift past `stable_drift_threshold_m`), `false` if still holding a previously-established position. |
+| `sample_count` | `int32` | Number of samples currently in this instance's rolling window — a rough confidence/maturity signal only. |
 
 ---
 

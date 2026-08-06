@@ -117,6 +117,34 @@ depth_perception_node:
     # against the true holder center in RViz/overlay.
     instance_tf_xy_offset_m: [0.0, 0.0]
 
+    # Camera pitch-down correction (2026-08-06) — see depth_perception_real
+    # .yaml's own comment and broadcastInstanceTfs()'s doc comment for the
+    # exact math. Explicitly declared here (uniform with real) even though
+    # sim doesn't need it: sim's calibration is consistently HIGH
+    # CONFIDENCE with no comparable camera-pitch artifact, so this stays
+    # 0.0 (disabled) rather than real's 10.0.
+    instance_tf_pitch_down_deg: 0.0
+
+    # Hole diagonal-swap correction (2026-08-06) — see depth_perception_real
+    # .yaml's own comment and broadcastInstanceTfs()'s doc comment.
+    # Explicitly declared here (uniform with real) even though sim doesn't
+    # need it: sim's calibration is consistently HIGH CONFIDENCE (~0.6deg
+    # orientation spread, no 180-degree-class error), so applying this flip
+    # would SWAP sim's otherwise-correctly-placed holes into the wrong
+    # position — confirmed live 2026-08-06. Stays false (disabled) here,
+    # unlike real's true.
+    instance_tf_hole_yaw_flip: false
+
+    # Flushes every hole's Z offset from cup_holder to 0.0 (2026-08-06) —
+    # see depth_perception_real.yaml's own comment and
+    # broadcastInstanceTfs()'s doc comment. Unlike the two params above,
+    # this one IS applicable to sim too — it's a physical-rigidity
+    # correction (the holder rim and its 4 holes are one rigid, flat-topped
+    # object, so they should share one Z plane), not a real-hardware-
+    # specific artifact. Explicitly declared here for uniformity with real,
+    # same value.
+    instance_tf_holes_flush_with_holder: true
+
     # --- Depth-view overlay (2026-08-04) ---
     # Same feature as real (see depth_perception_real.yaml's own comment
     # and DepthPerceptionConfig::publish_depth_overlay_image's doc comment)

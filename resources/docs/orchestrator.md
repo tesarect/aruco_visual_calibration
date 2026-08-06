@@ -122,6 +122,43 @@ detector nodes keep running and subscribed the whole time. The node coming
 both active (one harmless duplicate `marker_pose` sample) is preferred over
 briefly having neither active (a real, if brief, gap in the pose stream).
 
+## Pausing YOLO inference during a run
+
+`executeAutoCalibrate` SIGSTOPs `inference_server.py` (YOLO-pipeline) for
+the whole `~/auto_calibrate` sequence, cal_ready move included, and
+SIGCONTs it in `publishStatusResult()` — real's CPU has nothing to spare
+for continuous cupholder/hole inference while the arm is actively moving
+through calibration waypoints. SIGSTOP freezes the process (confirmed
+live: ~0% CPU, loaded model stays resident) rather than killing it, so the
+resume is instant with no model reload. This is skipped for a run whose
+`calibration_broadcaster_node` already has its own `hybrid_per_waypoint_enabled`
+mode on (checked once via `isCalibrationBroadcasterInHybridMode()` and
+remembered for the whole run, so the SIGSTOP-skip and its matching
+SIGCONT-skip stay paired) — that mode already does its own per-waypoint
+SIGCONT/SIGSTOP bracketing (see
+[aruco_perception.md](./aruco_perception.md)'s "Per-waypoint hybrid
+detection" bullet), and running both at once was confirmed live to fight
+over the same process's pause/resume state. `~/signal_inference_server`
+(`visual_calibration_msgs/SignalInferenceServer`) exposes the same
+SIGSTOP/SIGCONT mechanism as a service specifically so
+`calibration_broadcaster_node` (a different package) can reuse it at that
+per-waypoint grain.
+
+Both the SIGSTOP/SIGCONT itself and the running-process discovery use a
+direct `/proc` scan + `kill()` — never `std::system()`/`popen()`:
+fork()ing from this multithreaded `rclcpp` node risks the child inheriting
+a locked mutex with no thread alive to release it (confirmed live: an
+earlier `std::system("pkill ...")` call silently hung the whole
+calibration thread before it ever reached `moveToCalReady()`).
+
+## Post-calibration auto-move
+
+On a successful `~/auto_calibrate` run, the arm auto-moves to
+`post_calibrate_preset_name` (default `"home"`, empty string disables
+this) via `~/move_to_preset` — fire-and-forget: a failed move here is
+logged but does not retroactively turn the already-succeeded calibration
+result into a failure.
+
 ## Web/rosbridge facade
 
 This project's installed `rosbridge_suite` (1.3.1) has no ROS2 action

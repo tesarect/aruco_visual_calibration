@@ -48,3 +48,12 @@ in the live YAML).
 | `adaptive_thresh_constant` | double | `7.0` | Constant subtracted from the local mean during adaptive thresholding. |
 | `min_marker_perimeter_rate` | double | `0.03` | Minimum candidate marker perimeter, as a fraction of the image's largest dimension — filters out tiny false-positive squares. |
 | `corner_refinement_method` | int (enum) | `1` | Which OpenCV corner-refinement algorithm to run after initial detection: `0` = none, `1` = subpixel, `2` = contour, `3` = AprilTag-style. Default (`1`, subpixel) trades a little CPU time for more accurate corner localization, which matters since corner accuracy directly affects the estimated pose. |
+| `corner_refinement_win_size` | int | `5` | Pixel-radius neighborhood searched around each initial corner guess during refinement (OpenCV default). Added 2026-08-03 after observing non-square/non-parallelogram corners in the overlay on real; a real-only tuning pass swept this alongside the 3 fields below it. |
+| `corner_refinement_max_iterations` | int | `30` | Refinement stop criterion: max iterations before giving up (OpenCV default). |
+| `corner_refinement_min_accuracy` | double | `0.1` | Refinement stop criterion: minimum error to consider converged (OpenCV default). |
+| `polygonal_approx_accuracy_rate` | double | `0.03` | How loosely a candidate contour is approximated as a quadrilateral before its 4 corners are extracted, upstream of refinement entirely (OpenCV default). Too loose is a plausible direct cause of a corner visibly pulled in/out of an otherwise-square marker. |
+
+A per-frame corner-squareness diagnostic (side/diagonal lengths of the
+detected quadrilateral, throttled log) exists specifically to tune the 4
+params above against real hardware — see `aruco_detector_node.cpp`'s
+`imageCallback`.

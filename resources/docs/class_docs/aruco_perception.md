@@ -3,14 +3,16 @@
 # aruco_perception — class docs
 
 Classes documented here: `ArucoDetectorNode`, `ImageSubscriberNode`,
-`CalibrationBroadcasterNode`. Plus the free functions in
-`orientation_averaging.hpp`, covered under their own section since they're
-not a class.
+`CupHolderDetectorNode`, `CalibrationBroadcasterNode`. Plus the free
+functions in `orientation_averaging.hpp`, covered under their own section
+since they're not a class.
 
 Per-parameter YAML references:
 [image_subscriber_sim.md](./image_subscriber_sim.md),
 [aruco_detector_sim.md](./aruco_detector_sim.md),
-[calibration_broadcaster_sim.md](./calibration_broadcaster_sim.md).
+[calibration_broadcaster_sim.md](./calibration_broadcaster_sim.md). No
+parameter-reference page yet for `cup_holder_detector_sim.yaml` — see its
+own comments in `aruco_perception/config/cup_holder_detector_sim.yaml`.
 
 ---
 
@@ -187,6 +189,122 @@ Parameters: `msg`
 
 ---
 
+## CupHolderDetectorNode
+
+```mermaid
+classDiagram
+    class CupHolderDetectorNode {
+        +CupHolderDetectorNode()
+        -loadConfigFromParams() CupHolderDetectorConfig
+        -imageCallback(msg) void
+        -markerOverlayCallback(msg) void
+        -findCircularContours(binary, min_area, min_circularity)$ vector~CircleCandidate~
+        -refineCupHolderCircle(candidate)$ void
+        -assignHoleQuadrants(holes) void
+        -config_ CupHolderDetectorConfig
+        -previous_holes_ vector~Detection2D~
+        -latest_marker_overlay_ CvImageConstPtr
+    }
+    class CupHolderDetectorConfig {
+        +image_topic string
+        +detections_2d_topic string
+        +cup_holder_canny_low int
+        +cup_holder_canny_high int
+        +cup_holder_min_circularity double
+        +hole_thresh int
+        +hole_min_circularity double
+        +hole_reassign_max_dist_px double
+        +active bool
+    }
+    CupHolderDetectorNode ..> CupHolderDetectorConfig : uses
+```
+
+Sim-only classical OpenCV detector for the cupholder disc and its up to 4
+holes, publishing `Detection2D`/`Detection2DArray` on the same
+`detections_2d_topic` `ArucoDetectorNode`/`YoloMarkerBridgeNode` already
+publish `aruco_marker`/`cup_holder`/`hole` entries on — `depth_perception_node`
+(the actual consumer) has no awareness of which detector produced a given
+message. 2D pixel space only, no depth/3D pose. Exists because sim's
+CPU-only rosject cannot run YOLO fast enough alongside Gazebo/RViz/the web
+dashboard; real has no equivalent (YOLO only). Parameters:
+[../aruco_perception.md](../aruco_perception.md#cup_holder_detector_node)
+covers the detection-approach rationale (why Canny for the disc, threshold
+for holes, `fitEllipse` vs. `minEnclosingCircle`) at the plain-language
+level — not repeated here.
+
+### CupHolderDetectorNode
+
+Constructs the node: subscribes to the camera image, creates the
+`detections_2d` publisher, and (if `publish_overlay_image`) subscribes to
+`aruco_detector_node`'s marker-only overlay and creates the combined
+overlay publisher.
+
+### loadConfigFromParams
+
+Reads all of `CupHolderDetectorConfig`'s fields from this node's declared
+parameters — every tunable is live re-read per frame (never cached here),
+so `ros2 param set` takes effect with no restart, since the exact
+HSV/grayscale cutoffs need iterative live tuning.
+
+### imageCallback
+
+Returns immediately if `active` is false. Otherwise: Pass 1 finds the
+cupholder disc via `cv::Canny` (on a blurred grayscale image) + dilate +
+`findCircularContours`, refined via `refineCupHolderCircle`. Pass 2
+thresholds within a square ROI around the found disc (or the full image if
+none found) to find dark hole cavities, filtered by radius bounds. Builds
+and publishes one `Detection2DArray` (empty `detections[]` if nothing
+found — same continuous-stream convention as the other detectors), and
+optionally draws + publishes the combined overlay image.
+
+Parameters: `msg`
+
+### markerOverlayCallback
+
+Caches the latest received marker-only overlay frame (`latest_marker_overlay_`)
+— does no detection work itself. If never received, `imageCallback` falls
+back to drawing on its own raw camera frame instead of publishing nothing.
+
+Parameters: `msg`
+
+### findCircularContours
+
+Static helper. Finds all contours in a binary (0/255) image passing area
+and circularity (`4π·area/perimeter²`) filters, fit via
+`cv::minEnclosingCircle`, sorted by descending area.
+
+Parameters: `binary`, `min_area_px`, `min_circularity`
+
+### refineCupHolderCircle
+
+Static helper. Re-fits a candidate's contour via `cv::fitEllipse` and
+overwrites its center/radius — `fitEllipse`'s least-squares fit is far
+less sensitive than `minEnclosingCircle` to a small outlier bulge in the
+disc's Canny/dilate contour (its rim edge also picks up a bit of the
+disc's 3D cylinder side, not just the flat top's true boundary). Applied
+only to the cupholder — holes are already small, clean, near-perfect
+circles with no equivalent bulge.
+
+Parameters: `candidate`
+
+### assignHoleQuadrants
+
+Labels each hole 1–4 (top-left/top-right/bottom-left/bottom-right) around
+the mean centroid of this frame's own hole detections (not the cupholder's
+fitted center — a sim-specific divergence from `yolo_marker_bridge_node.py`,
+since the disc's rim contour is measurably elliptical from sim's
+wrist-camera viewing angle, which would pull a disc-center reference away
+from the true 4-hole arrangement's visual center). Gives each hole a
+persistent identity across frames via nearest-centroid matching against
+`previous_holes_` (greedy, ascending-distance, gated by
+`hole_reassign_max_dist_px`) before falling back to the raw quadrant split
+— prevents a hole sitting near the quadrant boundary from flickering
+between two labels purely from detection jitter.
+
+Parameters: `holes`
+
+---
+
 ## Orientation averaging (`orientation_averaging.hpp`)
 
 Not a class — free functions `CalibrationBroadcasterNode` uses to combine
@@ -211,9 +329,11 @@ classDiagram
   `kSumNormalize` sums all sample quaternions and renormalizes — correct
   enough when samples are close together (true here: same physical
   marker/camera, only per-frame noise differs). `kMarkley` is a proper
-  SO(3) average, robust to widely-spread samples, but **not yet
-  implemented** — it's reserved so priority configs can name it today
-  without using it.
+  SO(3) average, robust to widely-spread samples (implemented via Eigen's
+  symmetric eigenvalue solver — see `markleyAverage()`'s own comment in
+  `orientation_averaging.cpp`); left at priority `0` (disabled) by default
+  in both sim/real configs, an opt-in alternative rather than a
+  default-behavior change.
 - **`OrientationAveragingResult`** — the averaged quaternion plus how far
   each sample deviated from it, in degrees (`max_spread_deg`,
   `mean_spread_deg`) — a quality signal for whether the average is
@@ -229,11 +349,23 @@ Parameters: `sum_normalize_priority`, `markley_priority`
 
 ### averageQuaternions
 
-Averages a list of quaternion samples using the given method. Throws
-`std::invalid_argument` if `method` is `kMarkley` (not implemented yet) or
-if `samples` is empty.
+Averages a list of quaternion samples using the given method
+(`sumNormalize()` or `markleyAverage()` — see each function's own doc
+comment in `orientation_averaging.cpp` for the underlying math) and
+returns the result plus max/mean angular spread from that average. Throws
+`std::invalid_argument` if `samples` is empty.
 
 Parameters: `samples`, `method`
+
+### angularDeviationDeg
+
+Free function. Angular deviation in degrees between two quaternions
+(`2·acos(|dot(a,b)|)`), accounting for the q/-q double-cover of SO(3) —
+the same formula `averageQuaternions()` uses internally for its spread
+metrics, exposed so callers needing a single sample-vs-reference deviation
+(e.g. `rejectOutliers`, `computeClusteredPose`) don't reimplement it.
+
+Parameters: `a`, `b`
 
 ---
 
@@ -251,12 +383,22 @@ classDiagram
         -executeCalibration(goal_handle) void
         -runPolygonPhase(goal_handle, waypoints, out_result, stopped_early) bool
         -runRandomPhase(goal_handle, center_pose, samples_already, out_result, stopped_early) bool
+        -runOrientationSweepPhase(goal_handle, cal_ready_pose, samples_already) void
         -randomPoseNear(center_pose, max_offset_m) Pose
+        -rotatedPoseNear(base_pose, angle_deg, is_pitch) Pose
         -tracePathBlocking(target) bool
         -waitForFreshMarkerPose(after) optional~PoseStamped~
+        -sampleOnceAtCurrentWaypoint(after, waypoint_label) optional~PoseStamped~
+        -sampleWithRetry(after, waypoint_label) optional~PoseStamped~
+        -signalInferenceServerViaOrchestrator(stop) void
+        -isHybridPerWaypointEnabled() bool
         -isMarkerVisibleNow(after) bool
         -recordSample(marker_pose) bool
         -stableAgreementReached() bool
+        -clampYawRoll(orientations) vector~Quaternion~
+        -rejectOutliers() vector~size_t~
+        -computeClusteredPose(indices, pos_bucket_cm, orient_bucket_deg) ClusteredPose
+        -saveDebugImageGrid() void
         -finishCalibration(goal_handle) void
         -config_ CalibrationBroadcasterConfig
         -tf_buffer_ Buffer
@@ -281,10 +423,26 @@ classDiagram
         +position_spread_tolerance_cm double
         +orientation_spread_tolerance_deg double
         +stable_agreement_count int
+        +orientation_sweep_enabled bool
+        +outlier_rejection_enabled bool
+        +samples_per_waypoint int
+        +detect_call_timeout_sec double
+        +min_samples_to_finish int
+        +clustering_bucket_size_cm double
+        +clustering_bucket_angle_deg double
+        +yaw_roll_clamp_enabled bool
     }
     CalibrationBroadcasterNode ..> CalibrationBroadcasterConfig : uses
     CalibrationBroadcasterNode ..> OrientationAveragingMethod : uses
 ```
+
+`hybrid_per_waypoint_enabled` (per-waypoint on-demand YOLO detection,
+live-toggled — see [../aruco_perception.md](../aruco_perception.md)'s
+"Per-waypoint hybrid detection" bullet) and `use_clustering_average` are
+deliberately **not** `CalibrationBroadcasterConfig` fields — both are read
+live via `get_parameter`/`get_parameter_or` at their point of use instead
+of cached at construction, so the web UI can flip them mid-session with no
+node restart, unlike every other field in this struct.
 
 Orchestrates the whole calibration run as a `~/calibrate` action server.
 Parameters: [calibration_broadcaster_sim.md](./calibration_broadcaster_sim.md).
@@ -469,12 +627,117 @@ call mid-run). If both are within tolerance, increments a running
 `stable_agreement_count`. Returns `false` with fewer than 2 samples
 collected (spread is meaningless with only one sample).
 
+### runOrientationSweepPhase
+
+Runs once after polygon/random sampling, only if `orientation_sweep_enabled`.
+Returns to `cal_ready_pose`, then probes 4 independent rotational offsets
+(pitch down, pitch up, roll left, roll right, each `orientation_sweep_angle_deg`
+from `cal_ready_pose`'s own orientation, not cumulative) via `rotatedPoseNear`,
+taking one sample per probe that lands with the marker visible. A failed
+probe is skipped, not a hard failure — same reasoning as `runRandomPhase`'s
+invisible-marker handling.
+
+Parameters: `goal_handle`, `cal_ready_pose`, `samples_already_collected`
+
+### rotatedPoseNear
+
+Builds a pose offset from `base_pose` by a pure rotation (pitch or roll)
+around its own local axis, position unchanged — used by
+`runOrientationSweepPhase`.
+
+Parameters: `base_pose`, `angle_deg`, `is_pitch`
+
+### sampleOnceAtCurrentWaypoint
+
+The single point both phases' inner sampling loops call for one sample.
+When `hybrid_per_waypoint_enabled` is false: identical to
+`waitForFreshMarkerPose`. When true: brackets one `~/detect_marker_once`
+call to `yolo_marker_bridge_node` with SIGCONT/SIGSTOP of
+`inference_server.py` (via `signalInferenceServerViaOrchestrator`), bounded
+by `detect_call_timeout_sec`; on success also appends the returned crop
+image to `debug_grid_images_` for the end-of-run debug grid.
+
+Parameters: `after`, `waypoint_label`
+
+### sampleWithRetry
+
+Retries `sampleOnceAtCurrentWaypoint` up to
+`cal_ready_hybrid_marker_detection_retry` times, each attempt a genuinely
+fresh frame — used by every sampling call site so a single transient
+detection miss doesn't need `min_samples_to_finish`'s discard-and-continue
+fallback to recover.
+
+Parameters: `after`, `waypoint_label`
+
+### signalInferenceServerViaOrchestrator
+
+Sends SIGSTOP/SIGCONT to `inference_server.py` via `orchestrator`'s
+`~/signal_inference_server` service — the cross-package bridge
+`sampleOnceAtCurrentWaypoint`'s per-waypoint bracketing uses, since this
+node cannot call `CalibrationOrchestratorNode`'s private
+`signalInferenceServer()` directly. Best-effort: logs, does not throw, if
+unreachable.
+
+Parameters: `stop`
+
+### isHybridPerWaypointEnabled
+
+Live (uncached) read of whether per-waypoint hybrid detection is currently
+on — shared by `sampleOnceAtCurrentWaypoint` and the visibility guards in
+both phases.
+
+### saveDebugImageGrid
+
+Assembles `debug_grid_images_` (only populated in hybrid-per-waypoint mode)
+into one labeled grid image (`cv::hconcat`/`vconcat` + `cv::putText`
+per-tile labels) and writes it once at the end of `executeCalibration` —
+an inspection/presentation artifact, not something that can fail the run
+itself.
+
+### clampYawRoll
+
+Real-only, opt-in (`yaw_roll_clamp_enabled`): computes a circular mean of
+yaw and of roll across all collected orientations, then replaces every
+sample's yaw/roll with those two run-wide means while leaving each
+sample's own pitch untouched — see
+[../aruco_perception.md](../aruco_perception.md)'s "Yaw/roll clamp" bullet
+for the full motivation. No-op (returns input unchanged) if disabled.
+
+Parameters: `orientations`
+
+### rejectOutliers
+
+If `outlier_rejection_enabled` and at least 3 samples are collected:
+computes each sample's deviation from the per-axis *median* position and
+the *medoid* orientation (the sample with smallest total angular deviation
+to every other sample — see
+[../aruco_perception.md](../aruco_perception.md)'s "Outlier rejection"
+bullet for why median/medoid, not mean), discards any sample exceeding
+either threshold, and falls back to keeping every sample if fewer than 2
+would survive. Returns every index unfiltered when disabled or too few
+samples.
+
+### computeClusteredPose
+
+Union-find clustering: two samples join the same cluster only if both
+their position (straight-line distance) and orientation (angular
+deviation) are within `position_bucket_size_cm`/`orientation_bucket_size_deg`
+of each other. Returns the arithmetic-mean position and quaternion-averaged
+orientation of the *largest* cluster's members. Falls back to a plain
+average of every given index with fewer than 2 samples.
+
+Parameters: `indices`, `position_bucket_size_cm`, `orientation_bucket_size_deg`
+
 ### finishCalibration
 
-Averages all collected samples — position arithmetically, orientation via
-`averaging_method_` — broadcasts the result as a static TF from
-`known_chain_frame` to the camera frame, completes the action goal with the
-result (including spread metrics), and clears the collected samples and
+Runs `clampYawRoll` (no-op if disabled), then `rejectOutliers`, then
+computes the final position/orientation either as a plain mean over the
+kept samples (default) or via `computeClusteredPose` if the live
+`use_clustering_average` parameter is true — orientation always uses
+`averaging_method_` regardless of which position method is active.
+Broadcasts the result as a static TF from `known_chain_frame` to the
+camera frame, completes the action goal with the result (including spread
+metrics and `is_high_confidence`), and clears the collected samples and
 resets `stable_agreement_count_` for the next run.
 
 Parameters: `goal_handle`

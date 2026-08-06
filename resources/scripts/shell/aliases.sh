@@ -596,7 +596,7 @@ vccleanbuild() {
     source install/setup.bash
 }
 
-vccleanbuildsymlink() {
+vccleanbuildsymlinksingle() {
     cd ~/ros2_ws || return
 
     rm -rf build/sim_ur3e_moveit_config \
@@ -636,6 +636,41 @@ vccleanbuildsymlink() {
     # to OOM-kill cc1plus on this 8-core/no-swap rosject. Capping gmake's
     # own job count too is what actually bounds peak memory.
     MAKEFLAGS="-j2" colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs --symlink-install --parallel-workers 1
+    source install/setup.bash
+}
+
+vccleanbuildsymlink() {
+    cd ~/ros2_ws || return
+
+    rm -rf build/sim_ur3e_moveit_config \
+        build/real_ur3e_moveit_config \
+        build/visual_calibration_msgs \
+        build/visual_calibration_moveit \
+        build/aruco_perception \
+        build/aruco_perception_yolo_bridge \
+        build/depth_perception \
+        build/orchestrator \
+        build/calibration_validation \
+        build/real_ur3e_description \
+        build/robotiq_85_msgs
+    rm -rf install/sim_ur3e_moveit_config \
+        install/real_ur3e_moveit_config \
+        install/visual_calibration_msgs \
+        install/visual_calibration_moveit \
+        install/aruco_perception \
+        install/aruco_perception_yolo_bridge \
+        install/depth_perception \
+        install/orchestrator \
+        install/calibration_validation \
+        install/real_ur3e_description \
+        install/robotiq_85_msgs
+
+    fixscriptperms
+    # Normal/default colcon parallelism (no --parallel-workers or MAKEFLAGS
+    # cap) — see vccleanbuildsymlinksingle above for the OOM-safe,
+    # single-worker variant of this same build, for when the rosject's
+    # no-swap 8-core container can't handle full parallel compilation.
+    colcon build --packages-up-to sim_ur3e_moveit_config real_ur3e_moveit_config visual_calibration_msgs visual_calibration_moveit aruco_perception aruco_perception_yolo_bridge depth_perception orchestrator calibration_validation real_ur3e_description robotiq_85_msgs --symlink-install
     source install/setup.bash
 }
 

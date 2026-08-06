@@ -11,16 +11,19 @@ visual_calibration/
 ├── aruco_perception/            # Classical detection + TF-chaining pipeline
 │   ├── src/aruco_detector/       # ArUco marker detection + pose estimation node
 │   ├── src/image_subscriber/     # Minimal camera image/camera_info smoke-test node
+│   ├── src/cup_holder_detector/  # Sim-only classical CV cupholder/hole detector
 │   ├── src/calibration_broadcaster/  # Chains marker pose with known TF, broadcasts result
 │   ├── launch/                   # Per-node launch files (env:=sim|real)
-│   └── config/*_sim.yaml         # Per-node parameters for the simulation
-├── aruco_perception_yolo_bridge/  # YOLO-backed drop-in alternative marker detector
+│   └── config/*_sim.yaml, *_real.yaml  # Per-node parameters (real: aruco_detector, calibration_broadcaster only)
+├── aruco_perception_yolo_bridge/  # YOLO-backed drop-in alternative marker detector +
+│   │                                 cupholder/hole detector (real) + on-demand ~/detect_marker_once
 │   └── aruco_perception_yolo_bridge/yolo_marker_bridge_node.py
 ├── orchestrator/                # Chains cal_ready -> auto-center -> calibrate into one action;
-│                                   also the classical/hybrid detector switch and the
-│                                   rosbridge-reachable web facade in front of the calibration action
-├── depth_perception/             # Camera-input smoke-test node (hole/cupholder 3D pose
-│                                   estimation is planned, not implemented yet)
+│                                   also the classical/hybrid detector switch, YOLO inference-server
+│                                   SIGSTOP/SIGCONT pause, and the rosbridge-reachable web facade
+├── depth_perception/             # Back-projects cupholder/hole 2D detections to stable 3D
+│                                   positions (rolling-window + hold-last-known filtering),
+│                                   broadcasts base_link -> cup_holder -> hole_1..hole_4 TFs
 ├── visual_calibration_moveit/   # MoveIt2 interaction nodes
 │   ├── src/planning_scene_setup/ # Publishes cafeteria collision objects to the planning scene
 │   ├── src/trajectory_planner/   # Services to plan/execute moves relative to a TF frame or preset
@@ -182,3 +185,11 @@ Flow narrative:
    obstacles (coffee machine, cupholder, countertop, wall — plus, on real,
    an unmeasured placeholder box guarding the wall-mounted camera) during
    any of the above arm motion.
+
+A separate, parallel pipeline (not shown above) uses that same computed
+`camera → base_link` TF: the active detector's `cup_holder`/`hole` 2D pixel
+detections (from sim's `cup_holder_detector_node` or real's
+`yolo_marker_bridge_node`) feed `depth_perception_node`, which back-projects
+them to 3D, filters them over time, and chains them through the calibrated
+camera TF to broadcast `base_link → cup_holder → hole_1..hole_4` — see
+[depth_perception.md](./depth_perception.md).

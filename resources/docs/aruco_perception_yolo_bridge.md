@@ -116,6 +116,37 @@ YOLO alone (unlike the ArUco marker's known 45 mm size), so any 3D pose for
 those two classes is left entirely to `depth_perception`'s own downstream
 pipeline, which looks up depth at each detection's centroid.
 
+## `~/detect_marker_once` — on-demand single-shot detection
+
+Served alongside the continuous per-frame pipeline above:
+`calibration_broadcaster_node`'s `hybrid_per_waypoint_enabled` mode (see
+[aruco_perception.md](./aruco_perception.md)'s "Per-waypoint hybrid
+detection" bullet) calls this once per waypoint instead of relying on the
+continuous `marker_pose` stream, so the YOLO crop + image-enhancement
+cascade only runs once per waypoint rather than continuously at camera
+framerate. `handle_detect_marker_once` waits for the *next* camera frame
+to arrive after the call started (never a stale, already-buffered frame —
+important since the caller wants a frame taken after the arm has actually
+settled at that waypoint), then runs exactly one detection with the
+cascade forced on (bypassing the continuous mode's own
+`marker_check_every_n_frames` throttle, which exists to bound continuous
+load and is irrelevant to a single on-demand call). It does **not**
+publish to `marker_pose`/`detections_2d` — the whole point of per-waypoint
+mode is bypassing those continuous-topic consumers — but does publish a
+picture-in-picture update to `overlay_image` on success, so a human
+watching the live feed can still see what the cascade detected during a
+run (`publish_overlay_image_msg`'s own continuous-mode drawing is
+suppressed for the whole run otherwise).
+
+The response (`DetectMarkerOnce.srv`) carries the marker pose, which
+cascade variant succeeded (`cascade_variant_used`), the actual annotated
+crop image that succeeded (`cascade_image_b64` — `calibration_broadcaster_node`
+accumulates these into one labeled debug grid per run), a `failure_reason`
+(`"no_yolo_bbox"` — YOLO found no candidate box at all — vs.
+`"no_classical_match"` — YOLO found a box but classical ArUco failed on
+every enhancement variant tried within it) when unsuccessful, and
+`detect_time_s` for that specific call.
+
 ## A concurrency gotcha worth knowing
 
 `image_callback` blocks on a synchronous HTTP request for up to

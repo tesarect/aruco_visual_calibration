@@ -31,14 +31,22 @@ classDiagram
         +YoloMarkerBridgeNode()
         -camera_info_callback(msg) void
         -image_callback(msg) void
+        -_process_image(msg) void
+        -_send_detect_request(cv_image, skip_marker) tuple
+        -handle_detect_marker_once(request, response) DetectMarkerOnce.Response
+        -_publish_hybrid_pip_overlay(image_msg, cv_image, marker_result) void
+        -assign_hole_quadrants(hole_dicts) list
         -publish_detections_2d(image_msg, result) void
         -publish_marker_pose(image_msg, marker_result) void
-        -publish_overlay_image_msg(image_msg, cv_image, marker_result) void
+        -publish_overlay_image_msg(image_msg, cv_image, result) void
+        -stable_positions_callback(msg) void
+        -auto_calibrate_status_callback(msg) void
         -camera_matrix numpy.ndarray
         -dist_coeffs numpy.ndarray
         -pose_pub Publisher
         -detections_2d_pub Publisher
         -overlay_image_pub Publisher
+        -detect_marker_once_srv Service
     }
 ```
 
@@ -83,6 +91,58 @@ if `active` is true) and the debug overlay (only if
 regardless of `active`. A failed `cv_bridge` conversion, a failed/timed-out
 HTTP request, or a non-200/non-JSON response each log and skip the frame
 without crashing the node.
+
+Parameters: `msg`
+
+### _process_image / _send_detect_request
+
+`_process_image` is `image_callback`'s shared core (caches the latest
+decoded frame for `handle_detect_marker_once`'s "wait for a fresh frame"
+guard, then runs the normal per-frame pipeline). `_send_detect_request`
+builds and POSTs the `/detect` request body — factored out so both the
+continuous per-frame path and `handle_detect_marker_once`'s on-demand path
+share one HTTP call implementation instead of two copies.
+
+Parameters: `cv_image`, `skip_marker`
+
+### handle_detect_marker_once
+
+`~/detect_marker_once` service handler — see
+[../aruco_perception_yolo_bridge.md](../aruco_perception_yolo_bridge.md)'s
+own section for the full mechanism (waits for a genuinely fresh frame,
+forces the cascade to run, does not publish to `marker_pose`/`detections_2d`,
+does publish a picture-in-picture overlay update on success).
+
+Parameters: `request`, `response`
+
+### _publish_hybrid_pip_overlay
+
+Draws a small picture-in-picture inset of the cascade's winning crop onto
+`overlay_image`, called from `handle_detect_marker_once`'s success path —
+lets a human watching the live overlay feed see what the per-waypoint
+hybrid cascade detected during a run, since `publish_overlay_image_msg`'s
+own continuous-mode drawing is suppressed for the run's duration.
+
+Parameters: `image_msg`, `cv_image`, `marker_result`
+
+### assign_hole_quadrants
+
+Labels each hole 1–4 by quadrant relative to the frame's cupholder/hole
+group center — see [../aruco_perception_yolo_bridge.md](../aruco_perception_yolo_bridge.md)
+and `cup_holder_detector_node`'s own `assignHoleQuadrants` (a sim-side
+C++ port of this same function, with one deliberate divergence — see that
+method's own doc comment in
+[aruco_perception.md](./aruco_perception.md#assignholequadrants)).
+
+Parameters: `hole_dicts`
+
+### stable_positions_callback / auto_calibrate_status_callback
+
+Cache the latest `depth_perception_node` stable-position stream and
+`calibration_orchestrator_node`'s auto-calibrate status respectively —
+feed the overlay's stabilized-position markers and the "suppress overlay
+drawing during a hybrid run" behavior `_publish_hybrid_pip_overlay`
+depends on.
 
 Parameters: `msg`
 

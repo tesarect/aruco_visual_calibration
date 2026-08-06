@@ -521,10 +521,45 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     // vector into known_chain_frame's axes via known_to_camera's rotation,
     // no translation component involved (a hole's offset FROM cup_holder
     // must not be shifted by cup_holder's own position again).
-    const tf2::Vector3 camera_offset(
-      window.last_stable.x - cup_holder_point.x,
-      window.last_stable.y - cup_holder_point.y,
-      window.last_stable.z - cup_holder_point.z);
+    double offset_x = window.last_stable.x - cup_holder_point.x;
+    double offset_y = window.last_stable.y - cup_holder_point.y;
+    const double offset_z = window.last_stable.z - cup_holder_point.z;
+
+    // instance_tf_hole_yaw_flip (2026-08-06, real-only — no entry in
+    // depth_perception_sim.yaml) — compensates a confirmed diagonal swap
+    // in hole placement on real hardware (hole_1<->hole_4, hole_2<->hole_3
+    // — a 180-degree rotation about the camera's own optical Z axis).
+    // hole_number itself is assigned correctly upstream, from plain 2D
+    // image-space quadrants (see yolo_marker_bridge_node.py's
+    // classify_hole_quadrants) — this is NOT a labeling bug. It's
+    // known_to_camera's own calibrated orientation (confirmed LOW
+    // CONFIDENCE, 17-20deg spread on real) landing near a half-turn on
+    // roll/yaw, which known_to_camera.getBasis() then faithfully applies
+    // to every hole's offset from cup_holder. Negating X and Y (Z
+    // untouched) before rotating is exactly a 180-degree yaw flip about
+    // the camera's optical axis — undoes the diagonal swap without
+    // touching cup_holder's own already-correct position (see
+    // instance_tf_pitch_down_deg above, applied separately to cup_holder
+    // only).
+    //
+    // DEFAULT MUST BE false, NOT true — confirmed live 2026-08-06: sim's
+    // own calibration is consistently HIGH CONFIDENCE (~0.6deg orientation
+    // spread, no 180-degree-class error at all), so applying this flip
+    // there SWAPS otherwise-correctly-placed holes into the wrong
+    // position — the opposite of what it's meant to fix. An earlier
+    // version of this code defaulted to true, which silently broke sim's
+    // hole placement even though depth_perception_sim.yaml never
+    // references this param (get_parameter_or's default was the actual
+    // culprit, not a yaml value). depth_perception_real.yaml sets this to
+    // true explicitly, which is the only place it should be enabled.
+    bool instance_tf_hole_yaw_flip = false;
+    get_parameter_or("instance_tf_hole_yaw_flip", instance_tf_hole_yaw_flip, false);
+    if (instance_tf_hole_yaw_flip) {
+      offset_x = -offset_x;
+      offset_y = -offset_y;
+    }
+
+    const tf2::Vector3 camera_offset(offset_x, offset_y, offset_z);
     const tf2::Vector3 cup_holder_to_hole = known_to_camera.getBasis() * camera_offset;
 
     RCLCPP_INFO_THROTTLE(
@@ -538,7 +573,22 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     hole_tf.child_frame_id = "hole_" + std::to_string(key.hole_number);
     hole_tf.transform.translation.x = cup_holder_to_hole.x();
     hole_tf.transform.translation.y = cup_holder_to_hole.y();
-    hole_tf.transform.translation.z = cup_holder_to_hole.z();
+    // instance_tf_holes_flush_with_holder (2026-08-06, real-only) — forces
+    // every hole's Z offset from cup_holder to 0.0, so all 4 holes end up
+    // on the EXACT SAME Z plane as cup_holder itself (which already has
+    // its own correct height via instance_tf_pitch_down_deg above) instead
+    // of each hole keeping its own small, independently-noisy Z offset.
+    // Physically justified: the 4 holes and the holder rim are all part of
+    // the same rigid, flat-topped object — they SHOULD share one Z plane
+    // in reality. true (default) enables this; set to false via
+    // `ros2 param set /depth_perception_node
+    // instance_tf_holes_flush_with_holder false` to fall back to each
+    // hole's own computed Z offset.
+    bool instance_tf_holes_flush_with_holder = true;
+    get_parameter_or(
+      "instance_tf_holes_flush_with_holder", instance_tf_holes_flush_with_holder, true);
+    hole_tf.transform.translation.z =
+      instance_tf_holes_flush_with_holder ? 0.0 : cup_holder_to_hole.z();
     // Position-only — no orientation estimate exists for cup_holder/hole
     // (see BackProjectedPoint's own doc comment: position only, no
     // orientation, no averaging-across-frames beyond the rolling window),

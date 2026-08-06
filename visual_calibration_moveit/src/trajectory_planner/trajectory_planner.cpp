@@ -870,11 +870,21 @@ void TrajectoryPlanner::handleMoveToInstance(
 
   logReachability("hover", hover_pose);
 
+  // HoverConfig::instance_end_effector_frame (2026-08-06) — see its own
+  // doc comment. Empty string falls back to standoff_config_.
+  // end_effector_frame, today's unchanged behavior; this ONLY affects
+  // move_to_instance's own calls below (hover, descend, lift) — every
+  // other caller in this file keeps calling
+  // setEndEffectorLink(standoff_config_.end_effector_frame) directly and
+  // is unaffected.
+  const std::string & instance_ee_frame = hover_config_.instance_end_effector_frame.empty() ?
+    standoff_config_.end_effector_frame : hover_config_.instance_end_effector_frame;
+
   // Cartesian first, joint-space fallback (2026-08-02 — was joint-space-only
   // before). A straight-line approach is preferable when achievable; the
   // free-space fallback exists for when it isn't from the arm's current
   // pose, matching this method's own doc comment.
-  move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
+  move_group_interface_.setEndEffectorLink(instance_ee_frame);
   bool reached_hover = planAndExecuteCartesian(hover_pose, planner_config_.cartesian_min_fraction);
   if (!reached_hover) {
     RCLCPP_WARN(
@@ -1099,6 +1109,8 @@ HoverConfig TrajectoryPlanner::loadHoverConfigFromParams() const
   node_->get_parameter_or(
     "instance_return_preset_name", config.instance_return_preset_name, std::string(""));
   node_->get_parameter_or("reach_safety_margin_m", config.reach_safety_margin_m, 0.0);
+  node_->get_parameter_or(
+    "instance_end_effector_frame", config.instance_end_effector_frame, std::string(""));
   return config;
 }
 

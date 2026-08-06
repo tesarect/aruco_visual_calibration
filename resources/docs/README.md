@@ -47,9 +47,9 @@ trusting it on real hardware.
   which chains "move to cal_ready" → "auto-center on the marker" →
   "calibrate" into one action, and exposes the rosbridge-reachable web
   facade in front of it.
-- [depth_perception](./depth_perception.md) — the camera-input smoke-test
-  node this package currently has (hole/cupholder 3D pose estimation is
-  planned but not implemented yet).
+- [depth_perception](./depth_perception.md) — back-projects cupholder/hole
+  2D detections into stable 3D positions and broadcasts them as TF frames
+  chained through the calibrated camera transform.
 - [visual_calibration_moveit](./visual_calibration_moveit.md) — the MoveIt2
   interaction nodes (planning scene setup, trajectory planning, and the
   MoveIt Task Constructor node).

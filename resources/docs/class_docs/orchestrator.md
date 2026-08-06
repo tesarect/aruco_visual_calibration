@@ -23,6 +23,9 @@ classDiagram
         -handleStartAutoCalibrate(request, response) void
         -handleCancelAutoCalibrate(request, response) void
         -handleSetDetectorMode(request, response) void
+        -handleSignalInferenceServer(request, response) void
+        -signalInferenceServer(signal) void
+        -isCalibrationBroadcasterInHybridMode() bool
         -handleGoal(uuid, goal) GoalResponse
         -handleCancel(goal_handle) CancelResponse
         -handleAccepted(goal_handle) void
@@ -49,6 +52,7 @@ classDiagram
         +centering_max_jump_m double
         +planning_mode uint8
         +camera_info_topic string
+        +post_calibrate_preset_name string
     }
     CalibrationOrchestratorNode ..> OrchestratorConfig : uses
 ```
@@ -164,6 +168,37 @@ only this node's own callback-group starvation was the problem). Fixed by
 giving `~/set_detector_mode` its own dedicated `MutuallyExclusive` callback
 group.
 
+### handleSignalInferenceServer
+
+Thin service wrapper exposing `signalInferenceServer()` as
+`~/signal_inference_server`, so `calibration_broadcaster_node` (a
+different package, cannot call this class's private member directly) can
+reuse the same SIGSTOP/SIGCONT mechanism at a per-waypoint grain for its
+`hybrid_per_waypoint_enabled` mode. No dedicated callback group needed
+(unlike `~/set_detector_mode`) — `signalInferenceServer()` is fully
+synchronous, nothing to deadlock against.
+
+Parameters: `request`, `response`
+
+### signalInferenceServer
+
+Sends SIGSTOP or SIGCONT to every running `python3 inference_server.py`
+process, found via a direct `/proc` scan (not `std::system()`/`popen()` —
+see [../orchestrator.md](../orchestrator.md)'s "Pausing YOLO inference
+during a run" section for why). No-ops harmlessly if no matching process
+is found.
+
+Parameters: `signal`
+
+### isCalibrationBroadcasterInHybridMode
+
+Live-reads `calibration_broadcaster_node`'s `hybrid_per_waypoint_enabled`
+parameter via `getCalibrationBroadcasterParamClient()`. Defaults to
+`false` (today's classical/continuous behavior) if the target node is
+unreachable or the read times out — a conservative fallback that keeps
+this node's own whole-run SIGSTOP running rather than risking the model
+process never getting paused.
+
 ### handleGoal / handleCancel / handleAccepted
 
 Standard `rclcpp_action` server callbacks: always accepts new goals and
@@ -178,7 +213,13 @@ Parameters: `uuid`, `goal` / `goal_handle` / `goal_handle`
 The actual 4-stage sequence, run on its own thread — see
 [../orchestrator.md](../orchestrator.md)'s stage diagram. Aborts with
 `failed_stage` set on the first stage that fails; checks
-`goal_handle->is_canceling()` between stages.
+`goal_handle->is_canceling()` between stages. SIGSTOPs `inference_server.py`
+at the start (skipped if `calibration_broadcaster_node` is already in
+`hybrid_per_waypoint_enabled` mode — see
+[../orchestrator.md](../orchestrator.md)'s "Pausing YOLO inference during a
+run"), and on success auto-moves to `post_calibrate_preset_name` after
+`goal_handle->succeed()` (fire-and-forget, logged not surfaced through the
+result on failure).
 
 Parameters: `goal_handle`
 

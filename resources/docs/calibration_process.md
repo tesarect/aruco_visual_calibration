@@ -2,8 +2,13 @@
 
 # The calibration process, explained simply
 
-This page walks through what actually happens during one `~/calibrate` run,
-in plain language — no code, just the mechanism. For the node-by-node
+This page walks through the *core* mechanism of one `~/calibrate` run, in
+plain language — no code. Several additional, independently-toggleable
+refinements now sit on top of this core loop (outlier rejection,
+clustering-based averaging, dual sampling per waypoint, an orientation
+sweep phase, and — real-only — an on-demand per-waypoint hybrid detection
+mode) — see [aruco_perception.md](./aruco_perception.md)'s
+`CalibrationBroadcasterNode` section for those. For the node-by-node
 technical breakdown, see [aruco_perception.md](./aruco_perception.md); for
 the full package layout, see [architecture.md](./architecture.md).
 
