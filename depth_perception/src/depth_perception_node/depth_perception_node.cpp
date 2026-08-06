@@ -337,8 +337,34 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
   // double-counted in each hole's independent base_link chain.
   const TrackedInstanceKey cup_holder_key{"cup_holder", 0};
   const auto cup_holder_it = rolling_windows_.find(cup_holder_key);
+
+  // instance_stale_timeout_s (2026-08-06) — RollingWindow::last_stable has
+  // NO concept of staleness by design (see its own doc comment: it holds
+  // forever across brief detection gaps, on purpose, to fix flicker). That
+  // means an instance that stops being detected ENTIRELY (e.g. a hole
+  // becomes occupied/obstructed — confirmed live 2026-08-06: hole_4 absent
+  // from /aruco_perception/detections_2d entirely, yet still broadcasting
+  // a stale TF) would otherwise broadcast its last known position forever,
+  // with nothing to signal it should stop. This timeout adds exactly that
+  // missing signal: an instance whose RollingWindow::last_seen is older
+  // than this many seconds is treated as invalid here, regardless of what
+  // last_stable itself holds. 0.0 (default) disables this entirely — no
+  // behavior change from before this existed. Live-read every call,
+  // tunable via `ros2 param set /depth_perception_node
+  // instance_stale_timeout_s <value>` with NO node restart needed.
+  double instance_stale_timeout_s = 0.0;
+  get_parameter_or("instance_stale_timeout_s", instance_stale_timeout_s, 0.0);
+  const rclcpp::Time now = get_clock()->now();
+  auto isStale = [&](const RollingWindow & window) {
+    if (instance_stale_timeout_s <= 0.0 || window.last_seen.nanoseconds() == 0) {
+      return false;
+    }
+    return (now - window.last_seen).seconds() > instance_stale_timeout_s;
+  };
+
   const bool cup_holder_valid =
-    cup_holder_it != rolling_windows_.end() && cup_holder_it->second.last_stable.valid;
+    cup_holder_it != rolling_windows_.end() && cup_holder_it->second.last_stable.valid &&
+    !isStale(cup_holder_it->second);
 
   // Read LIVE every call (not cached in config_), specifically so it can
   // be tuned via `ros2 param set` with no node restart — see this
@@ -499,6 +525,16 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
 
   for (const auto & [key, window] : rolling_windows_) {
     if (key.class_name != "hole" || !window.last_stable.valid) {
+      continue;
+    }
+
+    // instance_stale_timeout_s (2026-08-06) — see this function's own
+    // cup_holder_valid comment above for the full rationale. Skips
+    // broadcasting (and, since instance_tf_broadcaster_ only ever
+    // publishes when reached, effectively stops updating) any hole not
+    // actually detected within the configured window — e.g. hole_4 once
+    // it becomes occupied and stops appearing in detections_2d entirely.
+    if (isStale(window)) {
       continue;
     }
 
@@ -709,6 +745,7 @@ BackProjectedPoint DepthPerceptionNode::updateRollingWindow(
 {
   RollingWindow & window = rolling_windows_[TrackedInstanceKey{class_name, hole_number}];
   window.push(point, static_cast<size_t>(config_.rolling_window_size));
+  window.last_seen = get_clock()->now();
   out_window_size = window.samples.size();
   out_drifted = window.updateLastStable(window.median(), config_.stable_drift_threshold_m);
   return window.last_stable;

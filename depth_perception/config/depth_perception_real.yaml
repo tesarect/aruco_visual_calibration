@@ -152,6 +152,24 @@ depth_perception_node:
     # with NO node restart needed.
     instance_tf_holes_flush_with_holder: true
 
+    # Stops broadcasting cup_holder/hole_1..hole_4's TF once they haven't
+    # actually been detected (present in detections_2d) for this many
+    # seconds (2026-08-06). RollingWindow's own "hold last known position"
+    # design has no staleness concept by itself — without this, an
+    # instance that stops being detected entirely (e.g. a hole becomes
+    # occupied/obstructed) keeps broadcasting its last known TF forever.
+    # Confirmed live: hole_4 absent from /aruco_perception/detections_2d
+    # entirely, yet still showing a stale TF in RViz before this existed.
+    # 0.0 disables this entirely (the code's own default) — set here to
+    # 5.0 to actually enable it on real. rolling_window_size/detection
+    # rate above determine how quickly a genuinely-still-visible instance
+    # would false-positive as stale if this is set too low — 5.0s is a
+    # starting value, generous relative to typical per-frame detection
+    # latency. Live-read every call, tunable via
+    # `ros2 param set /depth_perception_node instance_stale_timeout_s
+    # <value>` with NO node restart needed.
+    instance_stale_timeout_s: 5.0
+
     # Horizontal (X/Y) reachability clamp (2026-07-30, real-only — no
     # entry in depth_perception_sim.yaml) — same "explicitly requested
     # cheat, not a real fix" spirit as instance_tf_z_offset_m above, same

@@ -360,6 +360,20 @@ struct RollingWindow
   // StablePositionArray.msg's "continuous stream" design.
   bool last_update_drifted = false;
 
+  // Wall-clock time of the most recent ACTUAL detection for this instance
+  // (2026-08-06) — set every time updateRollingWindow() is called for this
+  // instance, regardless of whether the new sample changed last_stable or
+  // not (i.e. a genuine "still being seen" heartbeat, distinct from
+  // last_update_drifted's "position actually changed" meaning). Needed
+  // because last_stable itself has NO concept of staleness by design (see
+  // its own doc comment) — an instance that stops being detected entirely
+  // (e.g. a hole becomes occupied/obstructed) would otherwise keep
+  // broadcasting its last known TF forever, with nothing to signal it
+  // should stop. See DepthPerceptionConfig::instance_stale_timeout_s and
+  // broadcastInstanceTfs()'s own doc comment for how this is used.
+  // Default-constructed (epoch/zero) until the first real detection.
+  rclcpp::Time last_seen;
+
   void push(const BackProjectedPoint & point, size_t max_size)
   {
     samples.push_back(point);
