@@ -914,6 +914,61 @@ void TrajectoryPlanner::handleMoveToInstance(
   // vertical drop rather than also reorienting mid-approach.
   descend_pose.orientation = hover_pose.orientation;
 
+  // reach_safety_margin_m clamp (2026-08-06) — see HoverConfig::
+  // reach_safety_margin_m's own doc comment. Only engages if the raw
+  // descend_pose is actually beyond the clamp radius; otherwise
+  // descend_pose is used as computed above, unchanged. Clamps along the
+  // hover_pose -> descend_pose line (not toward the planning-frame
+  // origin), so a too-far goal still visibly gets approached and stopped
+  // at the closest safely-reachable point on the way, rather than being
+  // pulled sideways to a different X/Y or refused outright.
+  if (hover_config_.reach_safety_margin_m > 0.0) {
+    const double clamp_radius_m =
+      standoff_config_.max_reach_m - hover_config_.reach_safety_margin_m;
+    const double raw_distance_m = distanceFromPlanningOrigin(descend_pose);
+    if (clamp_radius_m > 0.0 && raw_distance_m > clamp_radius_m) {
+      const double dx = descend_pose.position.x - hover_pose.position.x;
+      const double dy = descend_pose.position.y - hover_pose.position.y;
+      const double dz = descend_pose.position.z - hover_pose.position.z;
+      const double leg_length_m = std::sqrt(dx * dx + dy * dy + dz * dz);
+      if (leg_length_m > 1e-6) {
+        // Binary search along the hover->descend line for the farthest
+        // point (by fraction t in [0,1]) whose distance from the planning
+        // origin is still <= clamp_radius_m — distanceFromPlanningOrigin
+        // is not necessarily monotonic in t in general, but is
+        // well-behaved (monotonic) for the small, mostly-vertical
+        // hover->descend legs this handler actually produces, so a simple
+        // bisection is sufficient here rather than a closed-form solve.
+        double t_lo = 0.0;
+        double t_hi = 1.0;
+        for (int i = 0; i < 30; ++i) {
+          const double t_mid = 0.5 * (t_lo + t_hi);
+          geometry_msgs::msg::Pose candidate = descend_pose;
+          candidate.position.x = hover_pose.position.x + dx * t_mid;
+          candidate.position.y = hover_pose.position.y + dy * t_mid;
+          candidate.position.z = hover_pose.position.z + dz * t_mid;
+          if (distanceFromPlanningOrigin(candidate) <= clamp_radius_m) {
+            t_lo = t_mid;
+          } else {
+            t_hi = t_mid;
+          }
+        }
+        descend_pose.position.x = hover_pose.position.x + dx * t_lo;
+        descend_pose.position.y = hover_pose.position.y + dy * t_lo;
+        descend_pose.position.z = hover_pose.position.z + dz * t_lo;
+        RCLCPP_WARN(
+          node_->get_logger(),
+          "move_to_instance: '%s' descend target is %.3fm from the planning frame's origin, "
+          "beyond the safe clamp radius (%.3fm = max_reach_m %.3fm - reach_safety_margin_m "
+          "%.3fm) — stopping short along the hover->goal line at (x=%.3f y=%.3f z=%.3f) "
+          "instead of failing",
+          request->instance_name.c_str(), raw_distance_m, clamp_radius_m,
+          standoff_config_.max_reach_m, hover_config_.reach_safety_margin_m,
+          descend_pose.position.x, descend_pose.position.y, descend_pose.position.z);
+      }
+    }
+  }
+
   logReachability(request->instance_name, descend_pose);
 
   if (!planAndExecuteCartesian(descend_pose, planner_config_.cartesian_min_fraction)) {
@@ -945,26 +1000,32 @@ void TrajectoryPlanner::handleMoveToInstance(
     return;
   }
 
-  // Step 5: optional final move to a configured preset — empty string
-  // (the default) skips this step entirely. See
-  // HoverConfig::instance_return_preset_name's own doc comment — exact
-  // name is an explicitly deferred decision.
-  if (!hover_config_.instance_return_preset_name.empty()) {
-    if (!planAndExecuteToPreset(hover_config_.instance_return_preset_name)) {
-      response->success = false;
-      response->message = "Reached '" + request->instance_name + "' and returned to the hover "
-        "pose, but failed to move to preset '" + hover_config_.instance_return_preset_name +
-        "' (see log for the error)";
-      return;
-    }
+  // Step 5: lift straight up from the hover pose to base_link's own Z
+  // plane (2026-08-06, explicit request: "lift up till gripper reaches
+  // baselinks zplan and wait for next command, no timeout, no preset").
+  // Reuses SequenceConfig::lift_target_z_m's existing absolute-Z
+  // convention (0.0 = level with the planning frame's own origin) but
+  // applies it directly here, as a plain one-shot Cartesian move — NOT via
+  // the separate ArmState/is_sequenced_goal machinery, which is timeout-
+  // driven (auto-moves to "standby" after lift_wait_seconds) and shared
+  // with TracePath's own sequenced-goal behavior; this deliberately stays
+  // independent of that so move_to_instance simply parks at the lifted
+  // pose and waits indefinitely for the next command, with no automatic
+  // follow-up move of any kind.
+  geometry_msgs::msg::Pose lift_pose = hover_pose;
+  lift_pose.position.z = sequence_config_.lift_target_z_m;
+  if (!planAndExecuteCartesian(lift_pose, planner_config_.cartesian_min_fraction)) {
+    response->success = false;
+    response->message = "Reached '" + request->instance_name + "' and returned to the hover "
+      "pose, but failed to lift to base_link's Z plane (see log for the error)";
+    return;
   }
 
   response->success = true;
   response->message = "Moved to '" + request->instance_name + "' via the cup_holder hover "
     "approach, stayed " + std::to_string(hover_config_.instance_stay_seconds) +
-    "s, and returned" +
-    (hover_config_.instance_return_preset_name.empty() ?
-    " to the hover pose" : " via preset '" + hover_config_.instance_return_preset_name + "'");
+    "s, returned to the hover pose, and lifted to base_link's Z plane — waiting for the next "
+    "command";
 }
 
 StandoffConfig TrajectoryPlanner::loadStandoffConfigFromParams() const
@@ -1037,6 +1098,7 @@ HoverConfig TrajectoryPlanner::loadHoverConfigFromParams() const
   // declare it upfront.
   node_->get_parameter_or(
     "instance_return_preset_name", config.instance_return_preset_name, std::string(""));
+  node_->get_parameter_or("reach_safety_margin_m", config.reach_safety_margin_m, 0.0);
   return config;
 }
 

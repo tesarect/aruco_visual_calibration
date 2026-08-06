@@ -167,11 +167,21 @@ trajectory_planner:
     # the hover pose. PLACEHOLDER — starting value, exact number left as
     # an open decision (see _errors/finetuning_modification_floor_plan.txt).
     instance_stay_seconds: 3.0
-    # Preset (from preset_poses_real.yaml) to move to after returning to
-    # the hover pose, as the sequence's final step. Empty string disables
-    # this step entirely. Exact name ("home" vs "standby") explicitly
-    # deferred as of 2026-08-02 — left empty until decided.
+    # Preset (from preset_poses_real.yaml) — NO LONGER USED by
+    # handleMoveToInstance as of 2026-08-06 (superseded by the lift-to-
+    # base_link-Z step below, which now always runs and never auto-leaves
+    # on a timeout). Left here only for any future caller.
     instance_return_preset_name: ""
+    # Safety margin (meters) subtracted from max_reach_m to get the clamp
+    # radius for the descend leg only (2026-08-06, explicit request: "it
+    # should not fail, instead reach the defined safest distance"). If a
+    # hole/holder's descend target is farther than (max_reach_m -
+    # reach_safety_margin_m) from the planning frame's origin, the arm
+    # stops short along the hover->goal line at that radius instead of
+    # failing the whole move. 0.0 (default) disables clamping — PLACEHOLDER,
+    # not yet tuned against real hardware's own max_reach_m PLACEHOLDER
+    # above.
+    reach_safety_margin_m: 0.0
 
     # Sequenced-goal stay/lift/standby timing (see ArmState /
     # TracePath.srv's is_sequenced_goal doc comment) — only applies to

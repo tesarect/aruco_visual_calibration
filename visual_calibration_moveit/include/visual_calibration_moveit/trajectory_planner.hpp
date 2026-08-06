@@ -206,14 +206,28 @@ struct HoverConfig
   /// see trajectory_planner_sim.yaml/_real.yaml's own comment.
   double instance_stay_seconds = 3.0;
   /// Preset name (from preset_poses_{sim,real}.yaml, via PresetPoses — see
-  /// planAndExecuteToPreset) to move to after returning to the hover pose,
-  /// as the final step of the sequence. Empty string (default) disables
-  /// this final step entirely — same "empty disables" convention as
-  /// CalibrationOrchestratorNode's post_calibrate_preset_name. Exact name
-  /// ("home" vs "standby") explicitly deferred by the user as of
-  /// 2026-08-02 — left empty until decided, see
-  /// _errors/finetuning_modification_floor_plan.txt.
+  /// planAndExecuteToPreset). NO LONGER USED by handleMoveToInstance as of
+  /// 2026-08-06 — step 5 now always lifts to base_link's Z plane and waits
+  /// for the next command instead (see handleMoveToInstance's own doc
+  /// comment), per explicit request that the arm never auto-leave the
+  /// lifted pose on a timeout. Left here only in case a future caller wants
+  /// a configurable post-sequence preset again.
   std::string instance_return_preset_name;
+  /// Safety margin (meters) subtracted from StandoffConfig::max_reach_m to
+  /// get the clamp radius for the descend leg only (2026-08-06, explicit
+  /// request: "it should not fail, instead reach the defined safest
+  /// distance"). If the descend pose (instance's own X/Y, hover-derived Z)
+  /// is farther from the planning frame's origin than
+  /// (max_reach_m - reach_safety_margin_m), it's pulled back along the
+  /// straight line FROM THE HOVER POSE TO THE DESCEND POSE (not toward the
+  /// planning-frame origin — that would move it sideways to a different
+  /// X/Y, not just stop the vertical descent short) until it sits exactly
+  /// at that clamp radius — so the arm still visibly reaches toward the
+  /// goal and stops at the closest safely-reachable point on the way,
+  /// rather than refusing the whole move. 0.0 (default) — combined with
+  /// StandoffConfig::max_reach_m — disables clamping (i.e. only clamps if
+  /// explicitly configured with a positive margin).
+  double reach_safety_margin_m = 0.0;
 };
 
 /// Tuning for the sequenced-goal stay/lift/standby behavior (see
@@ -484,8 +498,8 @@ private:
     std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Response> response);
 
   /// Handles a MoveToInstance service request. 5-step hover-descend-stay-
-  /// return-preset sequence (2026-07-30, extended 2026-08-02 — see
-  /// HoverConfig's doc comment for the tuning fields):
+  /// return-lift sequence (2026-07-30, extended 2026-08-02 and 2026-08-06 —
+  /// see HoverConfig's doc comment for the tuning fields):
   ///   1. Looks up move_group_interface_.getPlanningFrame() -> "cup_holder"
   ///      via tf_buffer_ (fresh every call), builds a hover pose directly
   ///      above it (same X/Y as cup_holder, Z raised by
@@ -508,7 +522,13 @@ private:
   ///      hover_config_.descend_offset_m, same fixed facing-down
   ///      orientation as the hover pose — reached via
   ///      planAndExecuteCartesian(), a straight-line descent from directly
-  ///      above the target.
+  ///      above the target. If this descend pose is farther from the
+  ///      planning frame's origin than (standoff_config_.max_reach_m -
+  ///      hover_config_.reach_safety_margin_m), it's clamped back along the
+  ///      hover_pose -> descend_pose line to that radius BEFORE planning —
+  ///      see HoverConfig::reach_safety_margin_m's own doc comment — so an
+  ///      out-of-reach goal still gets visibly approached and stopped at
+  ///      the closest safe point, instead of failing outright.
   ///   3. Blocks for hover_config_.instance_stay_seconds (plain
   ///      std::this_thread::sleep_for — same "safe to sleep this service
   ///      callback thread" reasoning as tracePath()'s own
@@ -520,11 +540,16 @@ private:
   ///      unused-today is_sequenced_goal machinery does — see
   ///      onSequencedGoalReached's own doc comment) via
   ///      planAndExecuteCartesian().
-  ///   5. If hover_config_.instance_return_preset_name is non-empty, calls
-  ///      planAndExecuteToPreset() with it as the final step. Empty string
-  ///      (the 2026-08-02 default) skips this step entirely — the exact
-  ///      preset name is an explicitly deferred decision, see
-  ///      _errors/finetuning_modification_floor_plan.txt.
+  ///   5. Lifts straight up from the hover pose to base_link's own Z plane
+  ///      (sequence_config_.lift_target_z_m, same absolute-Z convention as
+  ///      the separate is_sequenced_goal machinery, but applied here
+  ///      directly as a one-shot planAndExecuteCartesian() call, NOT via
+  ///      that machinery) and then simply returns success — no timeout, no
+  ///      automatic follow-up move of any kind (2026-08-06, explicit
+  ///      request: "wait for next command"). HoverConfig::
+  ///      instance_return_preset_name is no longer used by this step as of
+  ///      2026-08-06 (superseded by the lift; left in HoverConfig/config
+  ///      files only for any other future caller).
   /// Fails (response->success = false) with a clear, stage-labeled message
   /// at the first failing step — including, at step 1, if cup_holder
   /// itself isn't currently tracked (no ~/calibrate run completed yet, or
