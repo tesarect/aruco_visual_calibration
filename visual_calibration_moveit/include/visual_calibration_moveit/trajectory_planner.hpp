@@ -228,24 +228,6 @@ struct HoverConfig
   /// StandoffConfig::max_reach_m — disables clamping (i.e. only clamps if
   /// explicitly configured with a positive margin).
   double reach_safety_margin_m = 0.0;
-  /// End-effector link commanded for handleMoveToInstance's ENTIRE
-  /// sequence (hover, descend, lift) — 2026-08-06, explicit request: the
-  /// hole/holder pick sequence should align the GRIPPER's own base link
-  /// with the goal, not StandoffConfig::end_effector_frame (which, on sim,
-  /// is rg2_gripper_aruco_link — the ArUco marker's own link, chosen
-  /// because every existing preset pose, e.g. home/standby/cal_ready, was
-  /// captured against it via pose_capture.py). Reusing
-  /// StandoffConfig::end_effector_frame here would silently misalign the
-  /// visible marker axis with the goal in RViz (confirmed live: the
-  /// marker's own axis, not the gripper's, was landing on the goal). A
-  /// SEPARATE field — not a change to StandoffConfig::end_effector_frame
-  /// itself — so this only affects move_to_instance; every other caller
-  /// (presets, standoff, calibration polygon) is completely unaffected and
-  /// keeps using the marker link, exactly as before. Empty string
-  /// (default) falls back to StandoffConfig::end_effector_frame's own
-  /// value (today's behavior, unchanged) — must be set explicitly to
-  /// opt in.
-  std::string instance_end_effector_frame;
 };
 
 /// Tuning for the sequenced-goal stay/lift/standby behavior (see
@@ -517,12 +499,7 @@ private:
 
   /// Handles a MoveToInstance service request. 5-step hover-descend-stay-
   /// return-lift sequence (2026-07-30, extended 2026-08-02 and 2026-08-06 —
-  /// see HoverConfig's doc comment for the tuning fields). Uses
-  /// HoverConfig::instance_end_effector_frame (2026-08-06), NOT
-  /// standoff_config_.end_effector_frame, as the commanded link for EVERY
-  /// pose below (hover, descend, lift) — see that field's own doc comment:
-  /// on sim, this targets the gripper's own base link instead of the
-  /// ArUco marker link every other caller in this file still uses.
+  /// see HoverConfig's doc comment for the tuning fields):
   ///   1. Looks up move_group_interface_.getPlanningFrame() -> "cup_holder"
   ///      via tf_buffer_ (fresh every call), builds a hover pose directly
   ///      above it (same X/Y as cup_holder, Z raised by

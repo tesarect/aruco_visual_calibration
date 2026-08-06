@@ -124,19 +124,6 @@ trajectory_planner:
     # stops short along the hover->goal line at that radius instead of
     # failing the whole move. 0.0 (default) disables clamping.
     reach_safety_margin_m: 0.0
-    # End-effector link for move_to_instance's hover/descend/lift sequence
-    # ONLY (2026-08-06, explicit request) — end_effector_frame above
-    # (rg2_gripper_aruco_link) stays the target for every OTHER caller
-    # (presets, standoff, calibration polygon), since every existing preset
-    # pose was captured against the marker link specifically. This is
-    # rg2_gripper_base_link instead: confirmed live that hole/holder clicks
-    # were aligning the ArUco marker's own axis with the goal rather than
-    # the gripper's actual base — see rg2_gripper.urdf.xacro's
-    # ${prefix}_aruco_joint (xyz=0.065,0.0,0.025 from base_link, no
-    # rotation) for the fixed offset this switch removes from the
-    # commanded target. Empty string falls back to end_effector_frame
-    # above.
-    instance_end_effector_frame: "rg2_gripper_base_link"
 
     # Sequenced-goal stay/lift/standby timing (see ArmState /
     # TracePath.srv's is_sequenced_goal doc comment) — only applies to

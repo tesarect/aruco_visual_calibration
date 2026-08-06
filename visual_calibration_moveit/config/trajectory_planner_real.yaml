@@ -182,16 +182,6 @@ trajectory_planner:
     # not yet tuned against real hardware's own max_reach_m PLACEHOLDER
     # above.
     reach_safety_margin_m: 0.0
-    # End-effector link for move_to_instance's hover/descend/lift sequence
-    # ONLY (2026-08-06, explicit request) — see trajectory_planner_sim
-    # .yaml's own comment for the full rationale (this switch is what fixes
-    # the marker-axis-aligns-with-goal symptom, sim and real alike).
-    # Explicitly set here for uniformity even though real's
-    # end_effector_frame above (robotiq_85_base_link) is ALREADY the
-    # gripper's own base link, not a separate marker link like sim's
-    # rg2_gripper_aruco_link — so this is a same-value, no-behavior-change
-    # declaration on real, unlike sim where it's an actual switch.
-    instance_end_effector_frame: "robotiq_85_base_link"
 
     # Sequenced-goal stay/lift/standby timing (see ArmState /
     # TracePath.srv's is_sequenced_goal doc comment) — only applies to
