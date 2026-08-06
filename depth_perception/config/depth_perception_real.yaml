@@ -125,7 +125,7 @@ depth_perception_node:
     # Live-read every call, tunable via
     # `ros2 param set /depth_perception_node instance_tf_pitch_down_deg <value>`
     # with NO node restart needed. 0.0 disables this entirely.
-    instance_tf_pitch_down_deg: 17.0
+    instance_tf_pitch_down_deg: 20.0
 
     # Hole diagonal-swap correction (2026-08-06, real-only — no entry in
     # depth_perception_sim.yaml). Confirmed live: hole_1<->hole_4 and

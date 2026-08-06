@@ -178,10 +178,19 @@ trajectory_planner:
     # hole/holder's descend target is farther than (max_reach_m -
     # reach_safety_margin_m) from the planning frame's origin, the arm
     # stops short along the hover->goal line at that radius instead of
-    # failing the whole move. 0.0 (default) disables clamping — PLACEHOLDER,
-    # not yet tuned against real hardware's own max_reach_m PLACEHOLDER
-    # above.
-    reach_safety_margin_m: 0.0
+    # failing the whole move.
+    #
+    # Tuned 2026-08-07 from a live classical-detector run's log (deterministic
+    # across repeated attempts, not noise): cup_holder (0.490m) and hole_2
+    # (0.429m) always succeeded (within max_reach_m 0.500m); hole_1 (0.537m,
+    # 3.7cm over) always failed at exactly 90.0% Cartesian achieved; hole_3
+    # (0.545m, 4.5cm over) always failed at exactly 82.4% — both below
+    # cartesian_min_fraction's 95.0% requirement below. 0.05 gives a clamp
+    # radius of 0.450m, comfortably pulling both hole_1/hole_3 back into a
+    # range with margin to spare for cartesian_min_fraction's own check at
+    # the clamped point (not just barely inside max_reach_m). 0.0 disables
+    # clamping entirely.
+    reach_safety_margin_m: 0.05
 
     # Sequenced-goal stay/lift/standby timing (see ArmState /
     # TracePath.srv's is_sequenced_goal doc comment) — only applies to
