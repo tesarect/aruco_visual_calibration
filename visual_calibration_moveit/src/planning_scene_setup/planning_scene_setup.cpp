@@ -40,6 +40,7 @@ const std::vector<SceneObjectId> PlanningSceneSetup::kKnownObjectIds = {
   SceneObjectId::Wall,
   SceneObjectId::Camera,
   SceneObjectId::TableEdgeGuard,
+  SceneObjectId::BaseSlab,
 };
 
 PlanningSceneSetup::PlanningSceneSetup()
@@ -166,6 +167,26 @@ void PlanningSceneSetup::declareParameters()
   declare_parameter("table_edge_guard.boxes.body.size", std::vector<double>{1.0, 0.05, 0.05});
   declare_parameter(
     "table_edge_guard.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
+
+  // base_slab (2026-08-06) — a thin box placed just below the arm's own
+  // base_link, so the shoulder/upper-arm can't dip down and clip the table
+  // surface directly under the arm's mount point (confirmed live: widening
+  // countertop's own body box did NOT stop this — the shoulder passes
+  // close to base_link's own origin, not necessarily within countertop's
+  // box extent, so a small, precisely-placed slab right at the mount point
+  // is the more direct fix). Disabled by default (false), same "real-only
+  // physical addition" reasoning as table_edge_guard — scene_objects_real
+  // .yaml enables and positions it explicitly.
+  declare_parameter("base_slab.enabled", false);
+  declare_parameter("base_slab.shape_type", "box");
+  declare_parameter("base_slab.pose.x", 0.0);
+  declare_parameter("base_slab.pose.y", 0.0);
+  declare_parameter("base_slab.pose.z", 0.0);
+  declare_parameter("base_slab.pose.yaw", 0.0);
+  declare_parameter("base_slab.box_names", std::vector<std::string>{"body"});
+  declare_parameter("base_slab.boxes.body.size", std::vector<double>{0.3, 0.3, 0.02});
+  declare_parameter(
+    "base_slab.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 }
 
 std::vector<SceneObjectConfig> PlanningSceneSetup::loadSceneObjects()

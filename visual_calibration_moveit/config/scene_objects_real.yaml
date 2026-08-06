@@ -33,6 +33,7 @@ planning_scene_setup:
     wall.enabled: true
     camera.enabled: true
     table_edge_guard.enabled: true
+    base_slab.enabled: true
 
     # Coffee machine — rough box, padded. Fill in real rough distances.
     coffee_machine.shape_type: "box"
@@ -116,3 +117,24 @@ planning_scene_setup:
     table_edge_guard.box_names: ["body"]
     table_edge_guard.boxes.body.size: [0.10, 0.06, 0.05]
     table_edge_guard.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]
+
+    # base_slab (2026-08-06) — thin box directly below the arm's own
+    # base_link, so the shoulder/upper-arm can't dip down and clip the
+    # table surface right under the arm's mount point. Widening
+    # countertop's own body box did NOT fix this live (the shoulder passes
+    # close to base_link's own origin — x=0,y=0 in this planning frame —
+    # not necessarily within countertop's own box extent), so this is a
+    # small, precisely-placed slab centered at the mount point instead.
+    # pose.z is negative (top surface sits just under base_link's own
+    # z=0 plane) — ROUGH STARTING VALUE, same "pad generously, then
+    # verify collision-aware in RViz before jogging near it" convention as
+    # every other object in this file; adjust pose.z/size once confirmed
+    # against the actual table surface height under the arm's mount.
+    base_slab.shape_type: "box"
+    base_slab.pose.x: 0.02
+    base_slab.pose.y: 0.0
+    base_slab.pose.z: -0.02
+    base_slab.pose.yaw: 0.0
+    base_slab.box_names: ["body"]
+    base_slab.boxes.body.size: [0.3, 0.3, 0.02]
+    base_slab.boxes.body.local_pose: [0.0, 0.0, 0.0, 0.0]

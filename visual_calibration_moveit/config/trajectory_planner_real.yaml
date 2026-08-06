@@ -85,7 +85,7 @@ trajectory_planner:
     # shortest-path plan among the attempts.
     planning_pipeline_id: "ompl"
     planner_id: "RRTstarkConfigDefault"
-    planning_time_s: 3.0
+    planning_time_s: 10.0
     num_planning_attempts: 8
 
     # Escalating-retry budget (2026-07-30) — if a plan fails at

@@ -15,6 +15,7 @@ enum class SceneObjectId
   Wall,
   Camera,
   TableEdgeGuard,
+  BaseSlab,
 };
 
 /// How a SceneObjectConfig's geometry should be interpreted:
