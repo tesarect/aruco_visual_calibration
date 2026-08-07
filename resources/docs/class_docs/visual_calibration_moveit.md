@@ -149,12 +149,14 @@ classDiagram
         +getPresetJointValues(name) optional~vector~double~~
         +planAndExecuteToPreset(name) bool
         -polygonWaypointsAroundStandoff(tf_timeout) pair~vector~Pose~, Pose~
+        -planWithEscalatingTime(plan) bool
         -handleTracePath(request, response) void
         -handleTracePolygon(request, response) void
         -handleGetPolygonWaypoints(request, response) void
         -handleGetStandoffPose(request, response) void
         -handleGetPresetPose(request, response) void
         -handleMoveToPreset(request, response) void
+        -handleMoveToInstance(request, response) void
         -onSequencedGoalReached(goal_pose) void
         -onStayTimerFired() void
         -onLiftWaitTimerFired() void
@@ -168,6 +170,7 @@ classDiagram
         -polygon_config_ PolygonConfig
         -planner_config_ PlannerConfig
         -sequence_config_ SequenceConfig
+        -hover_config_ HoverConfig
         -preset_poses_ PresetPoses
         -arm_state_ ArmState
     }
@@ -175,6 +178,7 @@ classDiagram
     TrajectoryPlanner ..> PolygonConfig : uses
     TrajectoryPlanner ..> PlannerConfig : uses
     TrajectoryPlanner ..> SequenceConfig : uses
+    TrajectoryPlanner ..> HoverConfig : uses
     TrajectoryPlanner ..> PresetPoses : uses
     TrajectoryPlanner ..> ArmState : uses
     class ArmState {
@@ -219,6 +223,21 @@ way.
 Constructs the planner around an existing node and a MoveIt planning group.
 
 Parameters: `node`, `planning_group`
+
+### planWithEscalatingTime
+
+Shared by both `planAndExecute` overloads: plans (never executes) with
+`planner_config_`'s pipeline/planner id and `num_planning_attempts`, at
+`planning_time_s`. If that fails, retries once per entry in
+`planning_time_retry_multipliers`, each attempt's time budget
+`planning_time_s × multiplier` — e.g. `3.0s` base with `[3.0, 5.0]`
+produces `3s → 9s → 15s` attempts. An empty multipliers list (the default)
+means exactly one attempt. Each retry publishes a `~/planning_failure` with
+context `"planning_retry"` (distinct from a genuine terminal failure) so the
+web UI can show "still retrying" rather than going silent. Motivated by a
+real OMPL log showing a genuine search timeout, not a hard
+reachability/collision failure, for a target near the edge of what
+`RRTstar` could solve quickly within the original fixed time budget.
 
 ### planAndExecute
 
@@ -369,6 +388,19 @@ behavior should use `getStandoffPose()`/`planAndExecuteInFrontOf()`
 instead.
 
 Parameters: `name`
+
+### handleMoveToInstance
+
+Handles a `~/move_to_instance` request — see
+[../visual_calibration_moveit.md](../visual_calibration_moveit.md)'s own
+`~/move_to_instance` section for the full 5-step hover-descend-stay-return-
+lift sequence and the reach-safety clamp's geometry. Every call hovers above
+`cup_holder`'s own TF first regardless of the requested instance, so
+`hole_1..hole_4` are always approached from the same known-safe point.
+Fails at the first failing step (a TF lookup or a planning call) with a
+stage-labeled message.
+
+Parameters: `request`, `response`
 
 ### onSequencedGoalReached
 

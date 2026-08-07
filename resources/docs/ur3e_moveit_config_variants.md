@@ -4,13 +4,13 @@
 
 `sim_ur3e_moveit_config` and `real_ur3e_moveit_config` are project-owned,
 environment-split copies of the instructor-provided
-`universal_robot_ros2/ur3e_moveit_config`. Like `aruco_moveit_config`, they
-are pure MoveIt2 configuration (SRDF, YAML, launch files) with no
-hand-written classes — no `class_docs/` entry exists for either, same
-reasoning as [aruco_moveit_config.md](./aruco_moveit_config.md)'s own skip
-note. `move_group` for both sim and real launches from one of these two
-packages today, not from `aruco_moveit_config` or the untouched
-`universal_robot_ros2/ur3e_moveit_config`.
+`universal_robot_ros2/ur3e_moveit_config`. They are pure MoveIt2
+configuration (SRDF, YAML, launch files) with no hand-written classes — no
+`class_docs/` entry exists for either, see
+[class_docs/README.md](./class_docs/README.md)'s own skip note. `move_group`
+for both sim and real launches from one of these two packages today, not
+from the untouched `universal_robot_ros2/ur3e_moveit_config` (never edited
+directly — see this project's `CLAUDE.md`).
 
 ## Why two copies exist instead of one
 

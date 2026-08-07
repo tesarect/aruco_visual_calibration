@@ -370,6 +370,7 @@ across multiple frames on their own side, not a one-shot/on-demand sample.
 | `cx`, `cy` | `float64` | Pixel coordinates of the detection's centroid (bbox center) in the source image. |
 | `confidence` | `float64` | Detection confidence; `1.0` for `"aruco_marker"` (neither detector has a meaningful per-marker confidence score for that class). |
 | `bbox` | `float64[4]` | `[x1, y1, x2, y2]` in pixels — lets a consumer (e.g. depth lookup) sample a small patch rather than one noisy pixel. |
+| `hole_number` | `int32` | Only meaningful for `class_name == "hole"` — a fixed image-space quadrant label (1=top-left, 2=top-right, 3=bottom-left, 4=bottom-right), computed from each hole's centroid relative to the frame's cupholder/hole-group center. `0` (unset) for `"aruco_marker"`/`"cup_holder"`, since only one of each ever exists in frame. |
 
 `cup_holder`/`hole` are 2D pixel space only, never a 3D pose from this
 message — unlike the ArUco marker (known 45 mm real-world size, solvable

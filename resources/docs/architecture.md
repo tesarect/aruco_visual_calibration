@@ -29,24 +29,33 @@ visual_calibration/
 │   ├── src/trajectory_planner/   # Services to plan/execute moves relative to a TF frame or preset
 │   └── src/mtc_trajectory/       # MoveIt Task Constructor node; see visual_calibration_moveit.md
 ├── visual_calibration_msgs/     # Custom action/srv/msg definitions shared by the above
-├── aruco_moveit_config/         # Project's original MoveIt2 config for UR3e + RG2 gripper
 ├── sim_ur3e_moveit_config/      # Project-owned copy of ur3e_moveit_config, sim-only
 ├── real_ur3e_moveit_config/     # Project-owned copy of ur3e_moveit_config, real-robot-only
 ├── calibration_validation/      # Sim-only node: broadcast TF vs. ground-truth TF accuracy check
 └── resources/
     ├── docs/                    # This documentation set
     ├── info/                    # Captured TF trees, topic lists, observations (sim vs. real)
+    ├── jenkins/, grafana/       # CI pipeline scripts and log/metrics stack install scripts
     └── scripts/                 # tmux/shell/python helpers for running the sim stack
 ```
+
+`aruco_moveit_config` — the project's original MoveIt2 config for the UR3e +
+RG2 gripper, predating the instructor-provided `ur3e_moveit_config` — has
+been removed; `sim_ur3e_moveit_config` / `real_ur3e_moveit_config` are what
+`move_group` actually launches from (see
+[ur3e_moveit_config_variants.md](./ur3e_moveit_config_variants.md)).
 
 A few packages under `visual_calibration/` are not listed above because their
 place in the project isn't settled: `visual_calibration_bringup` (ROS-native
 launch sequencing, an alternative to the tmux scripts under
-`resources/scripts/tmux/`), `real_moveit_config`, and `real_ur3e_description`
-all still exist on disk but were candidates for removal as of the last
-review (see `resources/docs/stale_packages_review.md`) — check that file and
-confirm current status with the project owner before assuming any of the
-three is either gone or a permanent part of the architecture.
+`resources/scripts/tmux/`), `real_ur3e_moveit_config`'s predecessor
+`real_moveit_config` (already removed), and `real_ur3e_description` all
+still exist on disk (`real_ur3e_moveit_config`/`real_ur3e_description` do;
+`real_moveit_config` does not) but were candidates for removal as of the
+last review (see `resources/docs/stale_packages_review.md`) — check that
+file and confirm current status with the project owner before assuming
+either of the two still-present packages is either gone or a permanent part
+of the architecture.
 
 Exposing control of the calibration pipeline via a web application is part of
 this project's overall goal. That web dashboard (`webpage_ws/`, a separate
@@ -60,8 +69,9 @@ package, node, or launch file living in this directory.
 ## Dependency on the wider workspace
 
 - **`ur_description`** (`Universal_Robots_ROS2_Description`) — supplies the
-  UR3e xacro (`ur.urdf.xacro`) that `aruco_moveit_config` is generated
-  against, matching the RG2-gripper robot actually spawned in Gazebo.
+  UR3e xacro (`ur.urdf.xacro`) that `sim_ur3e_moveit_config`/
+  `real_ur3e_moveit_config` trace back to, matching the RG2-gripper robot
+  actually spawned in Gazebo.
 - **`rg2_gripper_description`** — defines `rg2_gripper_aruco_link`, the frame
   the ArUco marker is rigidly mounted at (45 mm marker, 4x4 dictionary —
   50/100/250/1000 depending on config).
@@ -69,9 +79,11 @@ package, node, or launch file living in this directory.
   launch chain that spawns the simulated UR3e with its wrist-mounted RGBD
   camera; also the source of the cafeteria collision meshes/SDF referenced by
   `planning_scene_setup` (coffee machine, cupholder, countertop, wall).
-- **`ur3e_moveit_config`** — the sim/robot-driver-facing MoveIt config;
-  `aruco_moveit_config` is this project's own equivalent, kept in sync with
-  the same URDF source.
+- **`ur3e_moveit_config`** — the instructor-provided, robot-driver-facing
+  MoveIt config; `sim_ur3e_moveit_config`/`real_ur3e_moveit_config` are this
+  project's own environment-split copies, kept in sync with the same URDF
+  source — see
+  [ur3e_moveit_config_variants.md](./ur3e_moveit_config_variants.md).
 - **`zenoh-pointcloud`** — the real-robot camera bridge. Camera topics on the
   real UR3e cell are only reachable via this Zenoh bridge, not native DDS —
   see [aruco_perception.md](./aruco_perception.md) for how the per-node

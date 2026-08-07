@@ -19,9 +19,10 @@ itself.
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `publish_overlay_image` | bool | `true` | Whether to draw and publish a debug image with the detected marker's border and axes, on every processed frame (not just frames where the marker was found). |
-| `overlay_image_topic` | string | `/aruco_perception/overlay_image` | Topic the overlay image is published on when enabled. |
+| `overlay_image_topic` | string | sim: `/aruco_perception/overlay_image_marker_only`, real: `/aruco_perception/overlay_image` | Topic the marker-only overlay image is published on when enabled. **Sim only**, this is an intermediate topic, not the web-facing one: `cup_holder_detector_node` subscribes here, draws `cup_holder`/`hole` on top, and republishes the combined image as the sole publisher of `/aruco_perception/overlay_image` — matching real's existing single-publisher pattern (`yolo_marker_bridge_node` already draws marker+cup_holder+hole together before its own single publish). Real is unchanged: `aruco_detector_real.yaml` publishes directly to `/aruco_perception/overlay_image`, since `cup_holder_detector_node` never runs there. |
 | `overlay_border_color_bgr` | int[3] | `[0, 255, 255]` | BGR (not RGB) color OpenCV draws the marker's detected border in — default is yellow. |
 | `detections_2d_topic` | string | `/aruco_perception/detections_2d` | Where this node publishes the marker's pixel-space centroid/bbox as a `Detection2D` (`class_name` `"aruco_marker"`) when found — the same topic `aruco_perception_yolo_bridge`'s `yolo_marker_bridge_node` publishes `cup_holder`/`hole` detections on. |
+| `show_centering_crosshair` | bool | `false` | Draws a crosshair at the image's own pixel center in the overlay stream while true. Live-toggled (no restart) by `calibration_orchestrator_node` for the duration of its image-based centering routine — see [../orchestrator.md](../orchestrator.md). |
 
 ## Marker identity (known/given)
 

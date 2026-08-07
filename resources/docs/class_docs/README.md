@@ -60,23 +60,22 @@ flowchart TD
     DET -->|"detections_2d (aruco_marker)"| DPN
     YOLO -->|"detections_2d (cup_holder, hole)"| DPN
     DPN -.->|"lookupTransform\nknown_chain_frame -> camera_..._calibrated"| CB
+    DPN -.->|"broadcasts /tf:\ncup_holder, hole_1..hole_4"| TP
 ```
 
-> [Note] 
+> **Note:**
 `TrajectoryPlanner` never sees `Calibrate.action`/`AutoCalibrate.action` or
 knows calibration exists — it only serves plain `TracePath`/
-`GetPolygonWaypoints`/`GetStandoffPose`/`MoveToPreset` requests. All
-calibration-specific orchestration lives in `CalibrationBroadcasterNode`
-(per-sample waypoint iteration, timing, averaging) and
-`CalibrationOrchestratorNode` (the cal_ready → center → calibrate
-sequence) — `TrajectoryPlanner` itself stays a dumb mover.
+`GetPolygonWaypoints`/`GetStandoffPose`/`MoveToPreset`/`MoveToInstance`
+requests. All calibration-specific orchestration lives in
+`CalibrationBroadcasterNode` (per-sample waypoint iteration, timing,
+averaging) and `CalibrationOrchestratorNode` (the cal_ready → center →
+calibrate sequence) — `TrajectoryPlanner` itself stays a dumb mover.
 
-[REMARKS to agent: give a gentle introduction and not what we are using to create something or what kind of summaries]
 Per-class documentation (Mermaid class diagrams + short plain-language
 method summaries) for the packages under `visual_calibration/`. See
 [CONVENTIONS.md](./CONVENTIONS.md) before adding to or extending this
 folder.
-[REMARKS to agent: dont meniton anything about progress related or internal purpose files]
 
 ## Packages
 
@@ -109,10 +108,9 @@ folder.
   in [../depth_perception.md](../depth_perception.md) via its own doc
   comments (back-projection math, rolling-window/hold-last-known
   filtering, TF broadcast chaining).
-- `aruco_moveit_config`, `sim_ur3e_moveit_config`, `real_ur3e_moveit_config`
-  — **skipped**: purely generated MoveIt2 config (SRDF, kinematics.yaml,
-  joint_limits.yaml, launch files) with no hand-written C++ classes to
-  document. See [../aruco_moveit_config.md](../aruco_moveit_config.md) and
+- `sim_ur3e_moveit_config`, `real_ur3e_moveit_config` — **skipped**: purely
+  generated MoveIt2 config (SRDF, kinematics.yaml, joint_limits.yaml, launch
+  files) with no hand-written C++ classes to document. See
   [../ur3e_moveit_config_variants.md](../ur3e_moveit_config_variants.md)
   for their project-level (non-class) docs instead. Their `config/*.yaml`
   files are skipped for the same reason — MoveIt Setup Assistant output,

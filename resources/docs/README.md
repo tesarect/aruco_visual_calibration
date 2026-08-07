@@ -53,9 +53,6 @@ trusting it on real hardware.
 - [visual_calibration_moveit](./visual_calibration_moveit.md) — the MoveIt2
   interaction nodes (planning scene setup, trajectory planning, and the
   MoveIt Task Constructor node).
-- [aruco_moveit_config](./aruco_moveit_config.md) — this project's MoveIt2
-  config for the UR3e + RG2 gripper, and specifically the one deliberate
-  change made to it (the `tip_link` change in the SRDF).
 - [sim_ur3e_moveit_config / real_ur3e_moveit_config](./ur3e_moveit_config_variants.md)
   — the project-owned, environment-split copies of the instructor-provided
   `ur3e_moveit_config` that `move_group` actually launches from today.

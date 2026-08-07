@@ -30,10 +30,11 @@ via `ros2 topic echo /joint_states --once` at the desired pose (see
 
 ## Real (`preset_poses_real.yaml`)
 
-`home`, `standby`, `baristastandby`, and `cal_ready` (== `standoff`, same
-pose under two names) are all Cartesian, real-measured — no joint-value
-preset has been captured for real yet, so `~/move_to_preset("cal_ready")`
-there falls back to the Cartesian preset. `standoff` itself is not a fixed
-preset entry consulted by `~/move_to_preset` (that method never touches
-TF) — it exists as `getStandoffPose()`'s fallback source when the live
-`camera_frame` TF lookup fails.
+| Preset | Kind | Used by |
+|---|---|---|
+| `home` | Cartesian | `move_to_home_on_startup` (auto-move at node construction). |
+| `standoff` | Cartesian | `getStandoffPose()`'s fallback source when the live `camera_frame` TF lookup fails — not a fixed preset `~/move_to_preset` itself resolves to (that method never touches TF). Position/orientation match `cal_ready` (recorded independently, at the same physical pose, under two names). |
+| `cal_ready` | **Joint-value** (re-measured 2026-07-23) | `~/move_to_preset("cal_ready")`, same role as sim's — captured by manually jogging to a pose where the marker was confirmed cleanly, stably visible to the wall-mounted D415 (the previous Cartesian-only `cal_ready`/`standoff` pose lost the marker within a second of arriving), then reading back the exact joint values via `pose_capture.py`. Not yet verified against a full live `~/auto_calibrate` run — only marker visibility/stability at the pose itself was confirmed as of this writing. |
+| `cal_ready_alt` / `cal_ready_alt2` | Joint-value, **untested** | Two alternate joint configurations reaching essentially the same Cartesian pose as `cal_ready` via different UR3e IK branches (captured 2026-07-20, before `cal_ready` itself became a joint-value preset) — kept under separate names specifically because neither has been verified against a live calibration run, unlike sim's `cal_ready.joint_values`. Not part of `~/move_to_preset("cal_ready")`'s default resolution; reachable only by explicitly requesting `cal_ready_alt`/`cal_ready_alt2` by name. |
+| `standby` | Cartesian | The sequenced-goal idle-timeout destination. |
+| `baristastandby` | Cartesian | An additional named stop, not part of the automatic sequence. |

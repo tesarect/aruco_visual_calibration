@@ -60,8 +60,10 @@ struct StandoffConfig
 {
   /// TF frame to stand off in front of, e.g. the camera's optical frame.
   std::string camera_frame;
-  /// TF frame to place at the standoff pose — must be part of the
-  /// planning group's kinematic chain (see aruco_moveit_config's SRDF).
+  /// TF frame to place at the standoff pose — must be rigidly attached
+  /// somewhere along the planning group's kinematic chain (see
+  /// sim_ur3e_moveit_config's/real_ur3e_moveit_config's SRDF); reachable via
+  /// setEndEffectorLink() even if it isn't the chain's own SRDF tip_link.
   std::string end_effector_frame;
   /// Distance in front of camera_frame to place the goal pose.
   double standoff_m = 0.0;
@@ -358,9 +360,10 @@ public:
   /// front of it (see offsetInFrontOf), then plans + executes so
   /// config.end_effector_frame reaches that pose — via
   /// setEndEffectorLink(config.end_effector_frame), so that frame must be
-  /// part of the planning group's kinematic chain (see aruco_moveit_config's
-  /// SRDF). Refuses to plan if the resulting pose is farther than
-  /// config.max_reach_m from the planning frame's origin.
+  /// part of the planning group's kinematic chain (see
+  /// sim_ur3e_moveit_config's/real_ur3e_moveit_config's SRDF). Refuses to
+  /// plan if the resulting pose is farther than config.max_reach_m from the
+  /// planning frame's origin.
   /// tf_timeout bounds how long the TF lookup waits for config.camera_frame
   /// to become available (TransformListener needs a moment after
   /// construction to receive /tf_static).

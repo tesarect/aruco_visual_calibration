@@ -39,17 +39,35 @@ from this group.
 | `planning_time_s` | double | `3.0` (sim) | Seconds allotted per planning attempt. |
 | `num_planning_attempts` | int | `3` (sim) | `MoveGroupInterface` automatically keeps the shortest-path plan among this many attempts. |
 | `cartesian_min_fraction` | double | sim: `0.75`, real: see file (both a **safety tradeoff**, not a pure tuning knob) | Minimum achieved fraction of a straight-line Cartesian path required to execute it at all (`planAndExecuteCartesian`'s `min_fraction`). Sim's value was lowered from the original 0.95 default after `calibration_orchestrator_node`'s image-based centering probes (small ~0.05–0.10 m moves near `cal_ready`) were found to legitimately achieve only 50–83% on some directions near that pose — a real geometric limitation of the straight-line path from that specific start, not a bug. Lowering this means MORE incomplete paths get executed rather than refused, i.e. the arm can stop short of the intended waypoint at an unplanned intermediate pose — only lower it if that tradeoff is deliberately acceptable. |
+| `planning_time_retry_multipliers` | double[] | sim: `[]` (no retries — original single-attempt behavior), real: `[3.0, 5.0]` | Escalating-retry budget for joint-space planning (`planWithEscalatingTime`): each retry multiplies `planning_time_s` by the next entry (e.g. real's `3.0s` base × `[3.0, 5.0]` = `3s`, then `9s`, then `15s` attempts). Motivated by a real-robot OMPL log showing a genuine search timeout (not a hard reachability/collision failure) for `~/move_to_instance`'s hover-pose leg — a longer budget is worth trying for a target near the edge of what `RRTstar` can solve quickly before concluding it's genuinely unreachable. |
+
+## `~/move_to_instance` hover/descend tuning (`HoverConfig`)
+
+Only applies to `~/move_to_instance` (see
+[visual_calibration_moveit.md](./visual_calibration_moveit.md)'s
+`~/move_to_instance` section for the full 5-step sequence).
+
+| Parameter | Type | Default | Meaning |
+|---|---|---|---|
+| `instance_hover_offset_m` | double | sim: `0.20`, real: `0.40` | Height (meters) above `cup_holder`'s own TF the shared hover/approach pose targets. |
+| `instance_descend_offset_m` | double | `0.15` (both) | How far (meters) the descend leg travels down from the hover pose's Z toward the requested instance's own Z — independent of `instance_hover_offset_m`, so the final approach distance isn't tied to how high the hover point sits. Not clamped against the hover offset — a larger descend offset than the hover offset would overshoot below the instance's own Z. |
+| `instance_stay_seconds` | double | `3.0` (both) | How long to stay at the descended goal before returning to the hover pose. |
+| `instance_return_preset_name` | string | `""` (both) | No longer used by `handleMoveToInstance` (superseded by an unconditional lift-and-wait step) — left in config only for a possible future caller. |
+| `reach_safety_margin_m` | double | sim: `0.08`, real: `0.05` | Safety margin subtracted from `max_reach_m` to get the descend leg's own clamp radius. If the raw descend pose would land farther than `max_reach_m - reach_safety_margin_m` from the planning frame's origin, it's pulled back along the hover→descend line to that radius instead of failing outright — the arm still visibly approaches the target and stops at the closest safely-reachable point. `0.0` disables clamping. |
 
 ## Sequenced-goal timing (`SequenceConfig`)
 
-Only applies to `~/trace_path` calls that explicitly set
-`is_sequenced_goal: true` (see `TracePath.srv` and `ArmState`, in
-[visual_calibration_moveit.md](./visual_calibration_moveit.md)).
+`stay_seconds_at_goal`/`lift_wait_seconds` only apply to `~/trace_path`
+calls that explicitly set `is_sequenced_goal: true` (see `TracePath.srv` and
+`ArmState`, in [visual_calibration_moveit.md](./visual_calibration_moveit.md)).
+`lift_target_z_m` is also reused directly by `~/move_to_instance`'s own
+final lift step (independent of the `is_sequenced_goal`/`ArmState`
+machinery — see that section of `visual_calibration_moveit.md`).
 
 | Parameter | Type | Default | Meaning |
 |---|---|---|---|
 | `stay_seconds_at_goal` | double | `4.0` (both) | How long to stay AT a sequenced goal (e.g. a hole/cupholder pose) before automatically lifting away from it. |
-| `lift_target_z_m` | double | `0.0` (both) | Absolute Z (in the planning frame — `base_link`'s own Z) to lift to after `stay_seconds_at_goal` — NOT an offset added to the goal's Z. X/Y/orientation stay identical to the goal. |
+| `lift_target_z_m` | double | `0.0` (both) | Absolute Z (in the planning frame — `base_link`'s own Z) to lift to after `stay_seconds_at_goal` — NOT an offset added to the goal's Z. X/Y/orientation stay identical to the goal. Also the target Z for `~/move_to_instance`'s own final lift step. |
 | `lift_wait_seconds` | double | `8.0` (both) | How long to then wait at the lifted pose, with no new sequenced goal arriving, before automatically moving to the `"standby"` preset. |
 | `waypoint_settle_seconds` | double | `1.0` (both) | Global delay applied inside `tracePath()` after EVERY successful waypoint move (single or multi-waypoint calls alike — home, cal_ready, sequenced goals, and each polygon corner all funnel through `tracePath()`). Gives a real camera time to produce a fresh, non-motion-blurred frame after the arm stops moving — sim can visually keep up instantly, but a slower real camera pipeline may not. `0.0` disables it. |
 | `gripper_close_settle_seconds` | double | `2.0` (both) | How long to pause after publishing the startup gripper-close command (see `closeGripperOnStartup`) before `runStartupSequence` proceeds to the home move. No completion feedback exists to wait on instead — a fixed guess, not a measurement. Runs on sim too even though nothing there subscribes to `/gripper/cmd` (the publish is a no-op) — the pause still happens either way. |

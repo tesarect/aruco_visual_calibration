@@ -3,11 +3,12 @@
 # visual_calibration_moveit
 
 `visual_calibration_moveit` is the package that moves the arm and keeps
-MoveIt aware of its surroundings. It wraps `MoveGroupInterface` behind two
-ROS services for driving the end effector to poses derived from TF (used
-both for spreading out calibration samples and for validating a computed
-camera transform), and separately publishes the static collision geometry
-of the Starbots Cafeteria scene so planning avoids known obstacles.
+MoveIt aware of its surroundings. It wraps `MoveGroupInterface` behind ROS
+services for driving the end effector to poses derived from TF — used for
+spreading out calibration samples, validating a computed camera transform,
+and moving to a depth-perception-detected cupholder/hole instance — and
+separately publishes the static collision geometry of the Starbots
+Cafeteria scene so planning avoids known obstacles.
 
 ## Flow
 
@@ -79,9 +80,15 @@ Both services plan against a configurable `end_effector_frame` rather than
 MoveIt's default end-effector link: every call to `planAndExecute` is
 preceded by `move_group_interface_.setEndEffectorLink(config.end_effector_frame)`.
 In this project's configuration, `end_effector_frame` is set to
-`rg2_gripper_aruco_link` — see
-[aruco_moveit_config.md](./aruco_moveit_config.md) for why targeting that
-link directly (instead of `tool0`) is possible at all.
+`rg2_gripper_aruco_link` (sim) / `robotiq_85_base_link` (real) — neither
+matches the `ur_manipulator` group's own SRDF `tip_link` (`tool0` on both
+`sim_ur3e_moveit_config` and `real_ur3e_moveit_config`, see
+[ur3e_moveit_config_variants.md](./ur3e_moveit_config_variants.md)).
+`setEndEffectorLink()` is what makes targeting a link past the SRDF chain's
+own tip possible at all: as long as the requested link is rigidly (fixed-
+joint) attached somewhere along the kinematic chain from `tip_link` onward,
+MoveIt can still solve IK and plan for it directly, with no SRDF change
+needed.
 
 The standoff pose itself is computed by `offsetInFrontOf()`: starting from
 the camera's TF, it moves `standoff_m` along the camera's local +Z (the
@@ -107,6 +114,68 @@ Each service call runs against the parameter set loaded at startup
 (`camera_frame`, `end_effector_frame`, `standoff_m`, `max_reach_m`,
 `facing_rpy_rad`, `polygon_num_corners`, `polygon_radius_m`), with separate
 `trajectory_planner_sim.yaml` / `trajectory_planner_real.yaml` files.
+
+### `~/move_to_instance` — moving to a detected cupholder/hole
+
+- **`~/move_to_instance`** (`visual_calibration_msgs/MoveToInstance`) —
+  moves the arm to a **live TF lookup** of a named `depth_perception_node`
+  instance (`"cup_holder"` or `"hole_1".."hole_4"`, the exact
+  `child_frame_id`s `broadcastInstanceTfs()` publishes — see
+  [depth_perception.md](./depth_perception.md)), not a static preset: these
+  positions are only known once calibration and depth-perception have
+  actually run.
+
+Every call — regardless of which instance was requested — always hovers
+above `cup_holder` itself first, then descends to the actual target. This
+keeps `hole_1..hole_4` approaches consistent and predictable: all four holes
+are approached from the exact same known-safe point directly above the
+holder, rather than each hole computing its own, potentially differently-
+angled approach.
+
+```mermaid
+flowchart TD
+    A["1. Hover above cup_holder's own TF\n(Cartesian, joint-space fallback)"] --> B["2. Descend to the requested\ninstance's own X/Y\n(Cartesian, reach-clamped)"]
+    B --> C["3. Stay instance_stay_seconds"]
+    C --> D["4. Return to the SAME hover pose\n(not a fresh TF lookup)"]
+    D --> E["5. Lift to base_link's Z plane,\nwait for next command"]
+```
+
+1. **Hover** — looks up `cup_holder`'s TF (needed even when the requested
+   instance *is* `cup_holder`, since the hover point is always derived from
+   it) and builds a pose directly above it (`hover_offset_m` higher, same
+   X/Y). Reached via a Cartesian attempt first, falling back to joint-space
+   if the straight line isn't achievable from the arm's current pose.
+2. **Descend** — looks up the actually-requested instance's own TF and
+   descends `descend_offset_m` below the hover pose's Z, straight down onto
+   that instance's X/Y, via a Cartesian move. If this pose would land
+   farther from the planning frame's origin than `max_reach_m -
+   reach_safety_margin_m`, it's pulled back along the hover→descend line to
+   that radius instead of failing outright — the arm still visibly
+   approaches the target and stops at the closest safely-reachable point.
+3. **Stay** — pauses `instance_stay_seconds` at the descended pose.
+4. **Return** — moves back to the *exact* hover pose computed in step 1 (not
+   a fresh TF lookup), via the same Cartesian call.
+5. **Lift** — moves straight up from the hover pose to `base_link`'s own Z
+   plane (`lift_target_z_m`, the same absolute-Z convention `SequenceConfig`
+   uses elsewhere, but applied here as a single direct call, independent of
+   the `is_sequenced_goal`/`ArmState` machinery) and returns success — no
+   timeout, no automatic follow-up move; the arm simply waits at the lifted
+   pose for the next command.
+
+Every hover/descend pose uses a fixed goal orientation (the end effector's
+local +X axis pointed straight down) rather than the instance TF's own
+rotation — `cup_holder`/`hole_N` TFs carry no meaningful orientation (they
+come from position-only 2D-to-3D detection, see
+[depth_perception.md](./depth_perception.md)), so an identity-quaternion
+goal was found to correlate directly with otherwise-avoidable OMPL planning
+failures. The chosen orientation is one arbitrary valid completion of
+"palm facing down" (roll about the down axis is left unconstrained); a
+proper tolerance-based orientation constraint was deferred as a further
+refinement.
+
+Fails at the first failing step with a stage-labeled message — including if
+`cup_holder` itself has no TF yet (no `~/calibrate` run completed, or
+`depth_perception_node` hasn't detected it).
 
 ## `mtc_trajectory`
 
