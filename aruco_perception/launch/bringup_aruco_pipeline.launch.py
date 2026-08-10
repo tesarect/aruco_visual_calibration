@@ -1,17 +1,12 @@
-"""NEW, additive file — does not replace or modify aruco_detector.launch.py
-or calibration_broadcaster.launch.py, both left untouched and still
-independently launchable. See visual_calibration_moveit/launch/
-bringup_full_sim_README.md (and bringup_full_real_README.md) for the full
-staged-bringup design this file is part of.
+"""Combines aruco_detector_node and calibration_broadcaster_node into a single
+launch file. aruco_detector.launch.py and calibration_broadcaster.launch.py
+remain independently launchable.
 
-Combines aruco_detector_node + calibration_broadcaster_node into one launch
-file, gated on the same condition sim_tmux_trajcal.sh/real_tmux_trajcal.sh
-chain today via `wait_for_node.sh aruco_detector_node` before starting
-calibration_broadcaster_node (it needs marker_pose to be publishable).
-Reimplements that check via rclpy's get_node_names() (the same mechanism
-`ros2 node list` itself uses) rather than shelling out to the .sh script,
-for the same install-space-reachability reason as
-bringup_moveit_pipeline.launch.py.
+calibration_broadcaster_node needs marker_pose to be publishable, so its
+start is gated on aruco_detector_node already being up in the ROS graph.
+The wait is implemented via rclpy's get_node_names() (the same mechanism
+`ros2 node list` uses) rather than shelling out to a script, so it works
+directly from the install space.
 """
 
 import time
@@ -33,9 +28,8 @@ NODE_WAIT_POLL_INTERVAL_SEC = 1.0
 def _wait_for_node(node_name_substring, timeout_sec, interval_sec):
     """Blocks the launch process until a node whose fully-qualified name
     contains node_name_substring appears in the ROS graph, or timeout_sec
-    elapses. Same substring-match semantics as wait_for_node.sh (`ros2
-    node list | grep -q "$NODE_NAME"`). Returns True if found, False on
-    timeout — caller decides whether to proceed anyway.
+    elapses. Returns True if found, False on timeout — caller decides
+    whether to proceed anyway.
     """
     rclpy.init(args=None)
     node = RclpyNode("bringup_aruco_pipeline_node_wait")
@@ -70,8 +64,7 @@ def _launch_setup(context, *args, **kwargs):
     else:
         print(
             "[bringup_aruco_pipeline] Timed out waiting for aruco_detector_node — "
-            "starting calibration_broadcaster_node anyway (same 'continuing "
-            "anyway' convention as wait_for_node.sh).", flush=True,
+            "starting calibration_broadcaster_node anyway.", flush=True,
         )
 
     calibration_broadcaster_include = IncludeLaunchDescription(
@@ -106,9 +99,8 @@ def generate_launch_description():
     return LaunchDescription([
         env_arg,
         aruco_detector_include,
-        # See bringup_moveit_pipeline.launch.py's matching comment: this
-        # only guarantees aruco_detector_node's process is STARTED before
-        # the wait begins — the blocking wait inside _launch_setup is what
+        # Only guarantees aruco_detector_node's process is STARTED before the
+        # wait begins — the blocking wait inside _launch_setup is what
         # actually enforces the gate.
         OpaqueFunction(function=_launch_setup),
     ])

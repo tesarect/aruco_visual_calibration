@@ -127,19 +127,17 @@ void PlanningSceneSetup::declareParameters()
   declare_parameter("wall.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 
   // Wall-mounted camera housing. On real, this is a genuine collision
-  // guard — added 2026-07-20 to stop the arm from hitting the camera
-  // where it protrudes off the wall, above table height; scene_objects_
-  // real.yaml's camera.* entries are what actually apply and are expected
-  // to be moved once the camera's real mount point is measured (same
-  // measurecorner/measurecompute workflow as the other objects) — see
-  // that file's comment. Default pose here is a guess (roughly centered
-  // on wall.pose.x/z, just in front of wall's own front face).
+  // guard, stopping the arm from hitting the camera where it protrudes
+  // off the wall, above table height; scene_objects_real.yaml's camera.*
+  // entries are what actually apply and are expected to be moved once
+  // the camera's real mount point is measured — see that file's comment.
+  // Default pose here is a guess (roughly centered on wall.pose.x/z,
+  // just in front of wall's own front face).
   // On sim, there is no physical wall-mounted camera (sim's camera is
   // wrist-mounted, rides the arm via URDF) — this box is kept enabled
   // there anyway as a placeholder/visual-reference object, explicitly
-  // configured in scene_objects_sim.yaml (2026-07-22) rather than
-  // silently inheriting these C++ defaults, matching real's explicit
-  // camera.* style.
+  // configured in scene_objects_sim.yaml rather than silently inheriting
+  // these C++ defaults, matching real's explicit camera.* style.
   declare_parameter("camera.enabled", true);
   declare_parameter("camera.shape_type", "box");
   declare_parameter("camera.pose.x", 0.3);
@@ -150,11 +148,11 @@ void PlanningSceneSetup::declareParameters()
   declare_parameter("camera.boxes.body.size", std::vector<double>{0.2, 0.2, 0.2});
   declare_parameter("camera.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 
-  // table_edge_guard (2026-07-30) — a long rectangular box laid along the
-  // countertop's longer edge closest to the arm's own base_link origin, on
-  // top of the table surface. Disabled by default (false) since it's a
-  // real-only physical addition (sim's Gazebo world has no matching
-  // object) — scene_objects_real.yaml enables and positions it explicitly;
+  // table_edge_guard — a long rectangular box laid along the countertop's
+  // longer edge closest to the arm's own base_link origin, on top of the
+  // table surface. Disabled by default (false) since it's a real-only
+  // physical addition (sim's Gazebo world has no matching object) —
+  // scene_objects_real.yaml enables and positions it explicitly;
   // scene_objects_sim.yaml leaves it off rather than modeling something
   // that doesn't exist in the simulated scene.
   declare_parameter("table_edge_guard.enabled", false);
@@ -168,15 +166,15 @@ void PlanningSceneSetup::declareParameters()
   declare_parameter(
     "table_edge_guard.boxes.body.local_pose", std::vector<double>{0.0, 0.0, 0.0, 0.0});
 
-  // base_slab (2026-08-06) — a thin box placed just below the arm's own
-  // base_link, so the shoulder/upper-arm can't dip down and clip the table
-  // surface directly under the arm's mount point (confirmed live: widening
-  // countertop's own body box did NOT stop this — the shoulder passes
-  // close to base_link's own origin, not necessarily within countertop's
-  // box extent, so a small, precisely-placed slab right at the mount point
-  // is the more direct fix). Disabled by default (false), same "real-only
-  // physical addition" reasoning as table_edge_guard — scene_objects_real
-  // .yaml enables and positions it explicitly.
+  // base_slab — a thin box placed just below the arm's own base_link, so
+  // the shoulder/upper-arm can't dip down and clip the table surface
+  // directly under the arm's mount point. Widening countertop's own body
+  // box does not cover this case, since the shoulder passes close to
+  // base_link's own origin, not necessarily within countertop's box
+  // extent, so a small, precisely-placed slab right at the mount point is
+  // the more direct fix. Disabled by default (false), same "real-only
+  // physical addition" reasoning as table_edge_guard —
+  // scene_objects_real.yaml enables and positions it explicitly.
   declare_parameter("base_slab.enabled", false);
   declare_parameter("base_slab.shape_type", "box");
   declare_parameter("base_slab.pose.x", 0.0);

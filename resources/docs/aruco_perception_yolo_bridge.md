@@ -97,7 +97,8 @@ Request:
     "image_jpeg_base64": "<base64 JPEG>",
     "camera_matrix": [[fx,0,cx],[0,fy,cy],[0,0,1]],
     "dist_coeffs": [d0, d1, ...],
-    "conf": 0.25
+    "conf": 0.25,
+    "skip_marker": false
   }
 Response (each key entirely omitted, never null/empty, if not found):
   {
@@ -107,14 +108,30 @@ Response (each key entirely omitted, never null/empty, if not found):
   }
 ```
 
+`camera_matrix`/`dist_coeffs` sent are the ones actually used for this
+request — already scaled down to match a downscaled frame when
+`detect_max_width_px` triggers (see "CPU-budget mitigations" above), not
+always the raw `camera_info` intrinsics.
+
+`skip_marker` — optional, defaults `false` server-side if omitted. When
+`true`, `inference_server.py` skips the ArUco marker cascade entirely for
+this request (no `aruco_marker` key in the response); `cup_holder`/`hole`
+detection is unaffected either way, since it was never part of that
+cascade. This node computes it per-frame via the marker-cascade
+throttling described above.
+
 `corners` are already converted back to full-frame pixel coordinates
 server-side, undoing both any YOLO crop offset and any preprocessing
-resize — usable directly, no further transform needed on this node's side.
-`cx`/`cy`/`bbox` for `cup_holder`/`hole` are 2D pixel coordinates only —
-there is no known real-world circle size to solve a 3D pose against from
-YOLO alone (unlike the ArUco marker's known 45 mm size), so any 3D pose for
-those two classes is left entirely to `depth_perception`'s own downstream
-pipeline, which looks up depth at each detection's centroid.
+resize; this node then additionally rescales them (along with
+`cup_holder`/`hole`'s `cx`/`cy`/`bbox`) back to the *source* frame's
+native resolution if `detect_max_width_px` downscaled the request —
+usable directly either way, no further transform needed on this node's
+side. `cx`/`cy`/`bbox` for `cup_holder`/`hole` are 2D pixel coordinates
+only — there is no known real-world circle size to solve a 3D pose
+against from YOLO alone (unlike the ArUco marker's known 45 mm size), so
+any 3D pose for those two classes is left entirely to `depth_perception`'s
+own downstream pipeline, which looks up depth at each detection's
+centroid.
 
 ## `~/detect_marker_once` — on-demand single-shot detection
 
@@ -146,6 +163,50 @@ accumulates these into one labeled debug grid per run), a `failure_reason`
 `"no_classical_match"` — YOLO found a box but classical ArUco failed on
 every enhancement variant tried within it) when unsuccessful, and
 `detect_time_s` for that specific call.
+
+## CPU-budget mitigations
+
+Both sim and real run this pipeline on CPU-only hardware, where a YOLO
+forward pass is the genuine compute bottleneck — three independent,
+opt-in mechanisms exist purely to keep that bottleneck from cascading
+into stale data or a starved auto-centering loop:
+
+- **Drop-stale-frames guard** — `image_sub`'s `MutuallyExclusiveCallbackGroup`
+  queues every incoming image while a previous `image_callback` is still
+  blocked on the `/detect` HTTP call (bounded by `request_timeout_sec`,
+  up to 8s on real). By the time a queued frame's turn comes, a much
+  newer camera frame has usually already arrived, so processing it would
+  only burn an inference cycle on outdated data. `image_callback` checks
+  a `_request_in_flight` flag first and returns immediately if a request
+  is already in progress, rather than letting the queue back up — no
+  amount of ROS-side concurrency makes the underlying YOLO compute
+  itself faster, so queuing stale frames only adds latency.
+- **Marker-cascade throttling** (`marker_check_every_n_frames`,
+  `marker_check_full_rate_when_active`) — the ArUco marker cascade inside
+  `inference_server.py`'s `/detect` costs a meaningful fraction of total
+  request time even when no marker is present, starving `cup_holder`/
+  `hole` detection of a smoother stream. This node computes a per-frame
+  `skip_marker` flag (sent in the request body — see the contract below)
+  that skips the cascade on most frames, checking only every
+  `marker_check_every_n_frames`th frame — **unless** this node's own
+  `active` parameter is currently true, in which case
+  `marker_check_full_rate_when_active` (default `true`) forces full-rate
+  checking regardless of the throttle, since calibration/auto-centering
+  need reliable per-attempt marker detection and must never be starved by
+  this.
+- **Detection-resolution downscaling** (`detect_max_width_px`, default
+  `0` = disabled) — unlike the other tuning knobs, a smaller input image
+  genuinely reduces the YOLO forward-pass cost itself (fewer pixels to
+  convolve over). When enabled, the frame sent to `/detect` is downscaled
+  to this width (camera intrinsics scaled proportionally alongside it),
+  and every 2D pixel field in the response (`aruco_marker.corners`,
+  `cup_holder`/`hole`'s `cx`/`cy`/`bbox`) is rescaled back to the
+  original frame's native resolution before any downstream consumer
+  (`publish_marker_pose`, `publish_detections_2d`, the overlay) ever sees
+  it — none of them need to know downscaling happened.
+  `aruco_marker`'s `rvec`/`tvec` (a 3D metric pose, not pixels) is left
+  untouched, since `solvePnP` already used the already-scaled camera
+  matrix and is correct in real-world units as computed.
 
 ## A concurrency gotcha worth knowing
 

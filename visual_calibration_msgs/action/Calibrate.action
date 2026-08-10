@@ -10,37 +10,34 @@ bool success
 string message
 float64 max_spread_deg
 float64 mean_spread_deg
-# Soft, informational confidence signal (2026-07-29) — true if the
-# POST-outlier-rejection max_spread_deg/max position spread are both
-# within position_spread_tolerance_cm/orientation_spread_tolerance_deg.
-# Does NOT affect `success` above — a low-confidence result is still a
-# real, broadcast, usable calibration; this field exists purely so a
-# caller (web UI) can show a warning rather than silently trusting a
-# result that may be less accurate than usual, without blocking the
-# workflow on it.
+# Soft, informational confidence signal — true if the post-outlier-
+# rejection max_spread_deg/max position spread are both within
+# position_spread_tolerance_cm/orientation_spread_tolerance_deg. Does not
+# affect `success` above — a low-confidence result is still a real,
+# broadcast, usable calibration; this field exists purely so a caller
+# (web UI) can show a warning rather than silently trusting a result that
+# may be less accurate than usual, without blocking the workflow on it.
 bool is_high_confidence
 ---
 # Feedback: published after each accepted sample.
 uint32 samples_collected
 uint32 samples_total
-# Short, human-readable status text for the CURRENT event (2026-08-04) —
-# e.g. "Sample 6 skipped: marker not found (no_yolo_bbox)" or
-# "Waypoint 7: detect call timed out after 30.0s". Empty string for the
-# normal "sample recorded successfully" feedback (samples_collected/
-# samples_total already convey that case fully — this field exists
-# specifically for the discard-and-continue/timeout events
-# min_samples_to_finish's soft-fail path introduces, which previously had
-# no user-visible signal at all outside calibration_broadcaster_node's own
-# server-side log). Not cumulative/history — always just the latest event.
+# Short, human-readable status text for the current event — e.g. "Sample
+# 6 skipped: marker not found (no_yolo_bbox)" or "Waypoint 7: detect call
+# timed out after 30.0s". Empty string for the normal "sample recorded
+# successfully" feedback (samples_collected/samples_total already convey
+# that case fully); this field exists specifically for the
+# discard-and-continue/timeout events min_samples_to_finish's soft-fail
+# path introduces, giving them a user-visible signal beyond
+# calibration_broadcaster_node's own server-side log. Not
+# cumulative/history — always just the latest event.
 string current_status
-# The just-recorded sample's known_chain_frame -> camera candidate pose
-# (2026-07-29) — the SAME per-sample transform recordSample() already
-# computes into collected_positions_/collected_orientations_ internally,
-# now also surfaced here so a caller (web app, RViz via
-# calibration_broadcaster_node's own transient per-sample TF broadcast) can
-# visualize how the calibrated camera pose estimate is converging sample by
-# sample, not just the final averaged result. Zero-valued (default Pose)
-# on any feedback that isn't accompanied by a fresh sample (there are none
-# today — every feedback publish in this node follows a recordSample()
-# call — but this comment holds for any future caller relying on it).
+# The just-recorded sample's known_chain_frame -> camera candidate pose —
+# the same per-sample transform recordSample() computes into
+# collected_positions_/collected_orientations_ internally, also surfaced
+# here so a caller (web app, RViz via calibration_broadcaster_node's own
+# transient per-sample TF broadcast) can visualize how the calibrated
+# camera pose estimate is converging sample by sample, not just the final
+# averaged result. Zero-valued (default Pose) on any feedback that isn't
+# accompanied by a fresh sample.
 geometry_msgs/Pose latest_sample_pose

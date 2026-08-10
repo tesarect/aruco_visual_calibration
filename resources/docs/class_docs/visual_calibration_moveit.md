@@ -67,6 +67,8 @@ classDiagram
         Countertop
         Wall
         Camera
+        TableEdgeGuard
+        BaseSlab
     }
     class ShapeType {
         <<enumeration>>
@@ -103,7 +105,10 @@ classDiagram
   `Cupholder`, `Countertop`, `Wall`, `Camera` — the last a placeholder box
   guarding the wall-mounted real camera, also present in sim for style
   parity even though sim's camera is wrist-mounted and not a real
-  collision concern there).
+  collision concern there — plus `TableEdgeGuard`/`BaseSlab`, two
+  real-only boxes added from live-jogged positions to guard the table
+  edge nearest the arm and the table surface directly under `base_link`'s
+  own mount point — see [scene_objects.md](./scene_objects.md)).
 - **`ShapeType`** — whether the object's collision geometry is a loaded mesh
   file or one-or-more axis-aligned boxes.
 - **`Pose2D`** — a flat x/y/z/yaw pose (no full quaternion — every known

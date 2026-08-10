@@ -92,24 +92,17 @@ CalibrationOrchestratorNode::CalibrationOrchestratorNode()
   // deliberately NOT constructed here — see their doc comment in the
   // header (shared_from_this() isn't safe yet during this constructor).
   //
-  // set_detector_mode_service_ gets its OWN callback group (2026-07-24,
-  // fixed a live bug), separate from this node's default group — this
-  // node has zero explicit callback groups anywhere else, so every
-  // subscription/service/client (including AsyncParametersClient's own
-  // internal client callbacks — see getClassicalDetectorParamClient/
-  // getHybridDetectorParamClient) shares one default MutuallyExclusive
-  // group. handleSetDetectorMode blocks (via waitForParametersFuture's
-  // poll loop) waiting for exactly those AsyncParametersClient responses
-  // — under a shared default group, that blocks the same group's ability
-  // to ever process the incoming response it's waiting for, a genuine
-  // deadlock (confirmed live: `ros2 param set` directly against
-  // yolo_marker_bridge_node succeeded instantly, proving the target node
-  // was healthy the whole time — only orchestrator's OWN callback-group
-  // starvation was the problem). Same class of bug already found and
-  // fixed twice elsewhere this session (trajectory_planner's
-  // getCurrentState() callback-group deadlock; yolo_marker_bridge_node's
-  // image_callback blocking its own set_parameters service) — this node
-  // just hadn't been fixed to match yet.
+  // set_detector_mode_service_ gets its own callback group, separate from
+  // this node's default group — this node has zero explicit callback
+  // groups anywhere else, so every subscription/service/client
+  // (including AsyncParametersClient's own internal client callbacks —
+  // see getClassicalDetectorParamClient/getHybridDetectorParamClient)
+  // shares one default MutuallyExclusive group. handleSetDetectorMode
+  // blocks (via waitForParametersFuture's poll loop) waiting for exactly
+  // those AsyncParametersClient responses — under a shared default group,
+  // that blocks the same group's ability to ever process the incoming
+  // response it's waiting for, a genuine deadlock. A dedicated callback
+  // group for this service avoids that self-blocking.
   set_detector_mode_callback_group_ =
     create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
   set_detector_mode_service_ = create_service<visual_calibration_msgs::srv::SetDetectorMode>(
@@ -147,17 +140,16 @@ void CalibrationOrchestratorNode::markerPoseCallback(
 void CalibrationOrchestratorNode::currentPoseNameCallback(
   const std_msgs::msg::String::ConstSharedPtr & msg)
 {
-  // Exclude nudge moves (2026-07-24, found live) — the web app's fine-tune
-  // control drawer issues ~/trace_path calls with pose_name
-  // "nudge_<axis><+/->" (see useNudgeControl.ts), which ALSO publishes on
-  // this same ~/current_pose_name topic. Without this exclusion, the very
-  // first nudge after an auto-centering failure immediately cleared
-  // pending_manual_adjustment_ — exactly backwards: a nudge is the user
-  // performing the fine-tune this flag exists to preserve, not abandoning
-  // it. Only an ACTUAL named-preset move (home, standby, cal_ready, ...)
-  // should clear it. Checking the "nudge_" prefix rather than maintaining
-  // a hardcoded list of "real" preset names here avoids this node needing
-  // to stay in sync with preset_poses_sim.yaml/_real.yaml's own lists.
+  // Excludes nudge moves — the web app's fine-tune control drawer issues
+  // ~/trace_path calls with pose_name "nudge_<axis><+/->" (see
+  // useNudgeControl.ts), which also publishes on this same
+  // ~/current_pose_name topic. A nudge is the user performing the
+  // fine-tune pending_manual_adjustment_ exists to preserve, not
+  // abandoning it, so only an actual named-preset move (home, standby,
+  // cal_ready, ...) should clear the flag. Checking the "nudge_" prefix
+  // rather than maintaining a hardcoded list of "real" preset names here
+  // avoids this node needing to stay in sync with
+  // preset_poses_sim.yaml/_real.yaml's own lists.
   if (msg->data.rfind("nudge_", 0) == 0) {
     return;
   }
@@ -220,8 +212,8 @@ void CalibrationOrchestratorNode::publishStatusResult(const AutoCalibrate::Resul
   // calibration ending for any reason (success or failure) resumes YOLO.
   // See the matching SIGSTOP call/comment at the top of executeAutoCalibrate().
   //
-  // SKIPPED when this run itself skipped the whole-run SIGSTOP (2026-08-04
-  // — see current_run_skipped_whole_run_sigstop_'s own doc comment and
+  // Skipped when this run itself skipped the whole-run SIGSTOP (see
+  // current_run_skipped_whole_run_sigstop_'s own doc comment and
   // executeAutoCalibrate's matching SIGSTOP-skip comment for the full
   // SIGSTOP-race rationale) — the per-waypoint code already leaves the
   // model SIGSTOPped after its own last sample; this SIGCONT would
@@ -245,16 +237,13 @@ void CalibrationOrchestratorNode::publishStatusResult(const AutoCalibrate::Resul
 void CalibrationOrchestratorNode::signalInferenceServer(int signal)
 {
   // Finds every process whose /proc/<pid>/cmdline matches
-  // "python3 inference_server.py" by scanning /proc directly — NOT
+  // "python3 inference_server.py" by scanning /proc directly — not
   // std::system("pkill ...")/popen(), which fork()s a child process.
   // fork()ing from a multithreaded process (this node runs many rclcpp/DDS
-  // internal threads) only carries the CALLING thread into the child; any
+  // internal threads) only carries the calling thread into the child; any
   // mutex held by a different thread at the moment of fork() stays locked
-  // forever in the child with no thread left alive to unlock it. Confirmed
-  // live 2026-07-29: an earlier std::system("pkill ...") call here hung the
-  // entire executeAutoCalibrate() thread silently before it ever reached
-  // moveToCalReady() — no crash, no error, no log line, just permanent
-  // silence (the goal sat at PHASE_RUNNING until manually cancelled). This
+  // forever in the child with no thread left alive to unlock it, which can
+  // silently hang the calling thread with no crash or log line. This
   // implementation never calls fork()/system()/popen() — kill() is a
   // direct syscall, safe to call from any thread of a multithreaded process.
   DIR * proc_dir = opendir("/proc");
@@ -263,20 +252,12 @@ void CalibrationOrchestratorNode::signalInferenceServer(int signal)
     return;
   }
 
-  // Diagnostic logging (2026-08-04) — added after a live failure where a
-  // ~/detect_marker_once call (calibration_broadcaster_node's
-  // hybrid_per_waypoint_enabled mode) immediately got "Read timed out"
-  // from inference_server.py, and it was unclear from the existing logs
-  // alone whether this function had ever actually reached/signaled the
-  // process (this call site previously logged NOTHING on the successful-
-  // match path — only RCLCPP_DEBUG, easy to miss, on the no-match path).
-  // Now logs at INFO unconditionally: every PID actually found+signaled,
-  // whether each individual kill() syscall itself reported success (it CAN
-  // fail — e.g. the process exited between readdir() and kill(), or a
-  // permissions issue — and the old code never checked its return value at
-  // all), and the zero-matched case explicitly. This turns "was the model
-  // actually paused/resumed just now" from a guess into a directly
-  // readable log line for the next test run.
+  // Logs at INFO unconditionally: every PID actually found and signaled,
+  // whether each individual kill() syscall itself reported success (it
+  // can fail — e.g. the process exited between readdir() and kill(), or a
+  // permissions issue), and the zero-matched case explicitly. This makes
+  // "was the model actually paused/resumed just now" directly readable
+  // from the log rather than something to infer indirectly.
   const char * signal_name = (signal == SIGSTOP) ? "SIGSTOP" : (signal == SIGCONT ? "SIGCONT" : "?");
 
   std::vector<pid_t> matched_pids;
@@ -326,9 +307,8 @@ void CalibrationOrchestratorNode::signalInferenceServer(int signal)
   if (matched_pids.empty()) {
     // Fine if it's not running (e.g. sim-only testing) — same "no-op if no
     // matching process" convention as start_inference_server.sh's own
-    // pkill call. Raised from DEBUG to INFO (2026-08-04) — this is exactly
-    // the "did SIGCONT/SIGSTOP actually do anything" signal worth always
-    // seeing, not just when debug verbosity happens to be enabled.
+    // pkill call. Logged at INFO since this is exactly the "did
+    // SIGCONT/SIGSTOP actually do anything" signal worth always seeing.
     RCLCPP_INFO(
       get_logger(), "signalInferenceServer(%s): no matching inference_server.py process found",
       signal_name);
@@ -502,10 +482,9 @@ bool CalibrationOrchestratorNode::isCalibrationBroadcasterInHybridMode()
     return false;
   }
 
-  // Logged unconditionally (2026-08-04) — this exact value is what decides
-  // whether executeAutoCalibrate's whole-run SIGSTOP runs or is skipped,
-  // so a captured log should always show it, not just the failure paths
-  // above.
+  // Logged unconditionally — this exact value is what decides whether
+  // executeAutoCalibrate's whole-run SIGSTOP runs or is skipped, so a
+  // captured log should always show it, not just the failure paths above.
   const bool enabled = param.as_bool();
   RCLCPP_INFO(
     get_logger(), "isCalibrationBroadcasterInHybridMode: read hybrid_per_waypoint_enabled=%s",
@@ -592,18 +571,17 @@ void CalibrationOrchestratorNode::handleSetDetectorMode(
     return;
   }
 
-  // Repurposed (2026-08-04): mode="hybrid" ALSO sets
-  // calibration_broadcaster_node's hybrid_per_waypoint_enabled, so
-  // flipping this switch fully wires up the new per-waypoint
-  // SIGCONT/detect-once/SIGSTOP mechanism, not just the old continuous
-  // active-flip above (which still runs unchanged — it governs the
-  // classical/continuous fallback used whenever hybrid_per_waypoint_
-  // enabled is false, and yolo_marker_bridge_node's own continuous
-  // cup_holder/hole detection, both unrelated to this repurposing). See
-  // CalibrationBroadcasterConfig::hybrid_per_waypoint_enabled's own doc
-  // comment for why this is a live get_parameter_or() read on that node's
-  // side, not cached — this set_parameters call takes effect on that
-  // node's very next sample, no restart needed.
+  // mode="hybrid" also sets calibration_broadcaster_node's
+  // hybrid_per_waypoint_enabled, so flipping this switch fully wires up
+  // the per-waypoint SIGCONT/detect-once/SIGSTOP mechanism, not just the
+  // continuous active-flip above (which still runs unchanged — it
+  // governs the classical/continuous fallback used whenever
+  // hybrid_per_waypoint_enabled is false, and yolo_marker_bridge_node's
+  // own continuous cup_holder/hole detection, both unrelated to this).
+  // See CalibrationBroadcasterConfig::hybrid_per_waypoint_enabled's own
+  // doc comment for why this is a live get_parameter_or() read on that
+  // node's side, not cached — this set_parameters call takes effect on
+  // that node's very next sample, no restart needed.
   //
   // Best-effort: logged (not a response->success=false) if this specific
   // sub-step fails — the classical/hybrid active-flip above already fully
@@ -634,10 +612,8 @@ void CalibrationOrchestratorNode::handleSetDetectorMode(
         broadcaster_result.has_value() ? broadcaster_result->reason.c_str() :
         "timed out waiting for response");
     } else {
-      // Confirms the set actually landed (2026-08-04, closes the same
-      // "no log line on the success path" gap signalInferenceServer's own
-      // logging fix addressed earlier) — this is the direct answer to
-      // "did flipping the web switch actually engage per-waypoint hybrid
+      // Confirms the set actually landed — the direct answer to "did
+      // flipping the web switch actually engage per-waypoint hybrid
       // mode," visible without needing to separately query the parameter
       // back afterward.
       RCLCPP_INFO(
@@ -691,28 +667,26 @@ void CalibrationOrchestratorNode::executeAutoCalibrate(
   const std::shared_ptr<GoalHandleAutoCalibrate> goal_handle)
 {
   // Pause inference_server.py (YOLO-pipeline) for the whole calibration
-  // sequence, cal_ready move included — real's CPU has nothing to spare for
-  // YOLO's cup_holder/hole inference while the arm is actively moving
-  // through waypoints. SIGSTOP freezes the process (confirmed live: 0% CPU,
-  // loaded model stays resident) rather than killing it, so resuming via
-  // SIGCONT in publishStatusResult() below is instant, no model reload. A
-  // request that straddles this window simply times out client-side in
-  // yolo_marker_bridge_node.py (existing request_timeout_sec handling) —
-  // confirmed live, no crash/hang. See signalInferenceServer()'s doc
-  // comment for why this is a direct kill(), not std::system("pkill ...").
+  // sequence, cal_ready move included — real's CPU has nothing to spare
+  // for YOLO's cup_holder/hole inference while the arm is actively moving
+  // through waypoints. SIGSTOP freezes the process (0% CPU, loaded model
+  // stays resident) rather than killing it, so resuming via SIGCONT in
+  // publishStatusResult() below is instant, no model reload. A request
+  // that straddles this window simply times out client-side in
+  // yolo_marker_bridge_node.py (existing request_timeout_sec handling).
+  // See signalInferenceServer()'s doc comment for why this is a direct
+  // kill(), not std::system("pkill ...").
   //
-  // SKIPPED when calibration_broadcaster_node's own
-  // hybrid_per_waypoint_enabled is true (2026-08-04, fixed a live bug) —
-  // that mode already does its own SIGCONT/SIGSTOP bracketing PER
-  // WAYPOINT inside its ~/calibrate call (Stage 4 below). Doing BOTH this
-  // whole-run bracket AND the per-waypoint one meant two independent
-  // pieces of code fought over the same process's pause/resume state —
-  // confirmed live: a real test run's very first sample instantly failed
-  // with the model still SIGSTOPped, ~4ms after this SIGSTOP fired and
-  // right as the per-waypoint code's own SIGCONT/SIGSTOP pair was also
-  // executing. current_run_skipped_whole_run_sigstop_ remembers this
-  // run's decision so publishStatusResult()'s matching SIGCONT stays
-  // paired with it (see that member's own doc comment).
+  // Skipped when calibration_broadcaster_node's own
+  // hybrid_per_waypoint_enabled is true — that mode already does its own
+  // SIGCONT/SIGSTOP bracketing per waypoint inside its ~/calibrate call
+  // (Stage 4 below). Doing both this whole-run bracket and the
+  // per-waypoint one means two independent pieces of code fight over the
+  // same process's pause/resume state, and a sample can fail with the
+  // model still SIGSTOPped if the two brackets race. current_run_
+  // skipped_whole_run_sigstop_ remembers this run's decision so
+  // publishStatusResult()'s matching SIGCONT stays paired with it (see
+  // that member's own doc comment).
   current_run_skipped_whole_run_sigstop_ = isCalibrationBroadcasterInHybridMode();
   if (!current_run_skipped_whole_run_sigstop_) {
     signalInferenceServer(SIGSTOP);
@@ -739,13 +713,14 @@ void CalibrationOrchestratorNode::executeAutoCalibrate(
       RCLCPP_ERROR(get_logger(), "%s", message.c_str());
     };
 
-  // Stage 1: move to cal_ready/standoff — SKIPPED if pending_manual_adjustment_
-  // is set (see that member's doc comment, 2026-07-24): a previous run's
-  // auto-centering failed, the user was shown a message to go fine-tune
-  // the pose via the web app's control drawer, and is now re-pressing the
-  // SAME Calibrate button — this decides automatically, with no separate
-  // button/goal field, to calibrate from wherever the arm currently is
-  // instead of snapping back to cal_ready and discarding that fine-tune.
+  // Stage 1: move to cal_ready/standoff — skipped if
+  // pending_manual_adjustment_ is set (see that member's doc comment): a
+  // previous run's auto-centering failed, the user was shown a message to
+  // go fine-tune the pose via the web app's control drawer, and is now
+  // re-pressing the same Calibrate button — this decides automatically,
+  // with no separate button/goal field, to calibrate from wherever the
+  // arm currently is instead of snapping back to cal_ready and discarding
+  // that fine-tune.
   std::optional<geometry_msgs::msg::Pose> cal_ready_pose;
   if (pending_manual_adjustment_) {
     publish_stage("Calibrating from current pose (after manual adjustment)");
@@ -837,13 +812,13 @@ void CalibrationOrchestratorNode::executeAutoCalibrate(
   if (calibrate_result->success) {
     goal_handle->succeed(result);
 
-    // Auto-move to config_.post_calibrate_preset_name (2026-07-29) —
-    // parameterized (default "home") rather than hardcoded, per explicit
-    // request, so the destination can be changed later without a code
-    // change. Fire-and-forget from this thread's perspective: this thread
-    // is about to return/end regardless, and a failed move here shouldn't
-    // retroactively turn an already-succeeded calibration into a failure —
-    // logged, not surfaced through the action result.
+    // Auto-move to config_.post_calibrate_preset_name — parameterized
+    // (default "home") rather than hardcoded, so the destination can be
+    // changed later without a code change. Fire-and-forget from this
+    // thread's perspective: this thread is about to return/end
+    // regardless, and a failed move here shouldn't retroactively turn an
+    // already-succeeded calibration into a failure — logged, not
+    // surfaced through the action result.
     if (!config_.post_calibrate_preset_name.empty()) {
       auto preset_request = std::make_shared<visual_calibration_msgs::srv::MoveToPreset::Request>();
       preset_request->name = config_.post_calibrate_preset_name;
@@ -1049,11 +1024,12 @@ bool CalibrationOrchestratorNode::probeDirectionVisible(
     // A failed plan/execute (e.g. near a joint limit) is treated the same
     // as "marker not visible" — either way this direction can't go
     // further, so the caller should stop extending it here. Logged
-    // distinctly from the isMarkerVisibleAfter() case below (2026-07-22)
-    // so an asymmetric probe result (e.g. +X reaching much further than
-    // -X/Y) can be diagnosed from the log alone — a reachability wall and
-    // a camera-FOV edge have different implications, but runAutoCenterProbe's
-    // own "boundary at %.3fm" line can't tell them apart on its own.
+    // distinctly from the isMarkerVisibleAfter() case below so an
+    // asymmetric probe result (e.g. +X reaching much further than -X/Y)
+    // can be diagnosed from the log alone — a reachability wall and a
+    // camera-FOV edge have different implications, but
+    // runAutoCenterProbe's own "boundary at %.3fm" line can't tell them
+    // apart on its own.
     RCLCPP_INFO(
       get_logger(),
       "probeDirectionVisible: move to (x=%.0f,y=%.0f) at %.3fm FAILED "
@@ -1093,22 +1069,20 @@ geometry_msgs::msg::Pose offsetInLocalPlane(
   return result_pose;
 }
 
-/// Applies (offset_x, offset_y) directly to base_pose's WORLD-frame X/Y
+/// Applies (offset_x, offset_y) directly to base_pose's world-frame X/Y
 /// position — orientation is left completely untouched (both the
-/// rotation applied to the offset AND the resulting pose's own
+/// rotation applied to the offset and the resulting pose's own
 /// orientation are unaffected by base_pose's current tilt). Used by
-/// centerOnMarkerUsingImage's Jacobian bootstrap/correction moves
-/// (2026-07-24 — replaces offsetInLocalPlane there specifically): probing
-/// in the GRIPPER's local frame (as offsetInLocalPlane does) ties the two
-/// probe directions to however the gripper happens to be tilted at
-/// cal_ready, which has no fixed relationship to the camera's own view
-/// (confirmed live on real: cal_ready's recorded orientation made
-/// "local X" project mostly onto world -Y/-Z instead of a clean single
-/// axis, breaking the bootstrap's reliability check). World-frame offsets
-/// are always the same physical directions regardless of orientation —
-/// the Jacobian doesn't need the probes to be gripper-relative, only
-/// linearly independent, so this removes the dependency on cal_ready's
-/// specific tilt entirely.
+/// centerOnMarkerUsingImage's Jacobian bootstrap/correction moves instead
+/// of offsetInLocalPlane: probing in the gripper's local frame ties the
+/// two probe directions to however the gripper happens to be tilted at
+/// cal_ready, which has no fixed relationship to the camera's own view —
+/// a tilted cal_ready orientation can make "local X" project mostly onto
+/// a different world axis, breaking the bootstrap's reliability check.
+/// World-frame offsets are always the same physical directions regardless
+/// of orientation — the Jacobian doesn't need the probes to be
+/// gripper-relative, only linearly independent, so this removes the
+/// dependency on cal_ready's specific tilt entirely.
 geometry_msgs::msg::Pose offsetInWorldPlane(
   const geometry_msgs::msg::Pose & base_pose, double offset_x, double offset_y)
 {
@@ -1121,7 +1095,7 @@ geometry_msgs::msg::Pose offsetInWorldPlane(
 /// A 2x2 image Jacobian: maps an arm-local-plane delta (dx, dy) to a
 /// pixel delta (du, dv) via du = j00*dx + j01*dy, dv = j10*dx + j11*dy.
 /// See centerOnMarkerUsingImage's doc comment for the algorithm this
-/// supports (uncalibrated IBVS, 2026-07-23).
+/// supports (uncalibrated IBVS).
 struct Jacobian2x2
 {
   double j00 = 0.0, j01 = 0.0, j10 = 0.0, j11 = 0.0;
@@ -1300,7 +1274,7 @@ std::optional<geometry_msgs::msg::Pose> CalibrationOrchestratorNode::centerOnMar
   // below (marker never visible, weak/unreliable bootstrap signal, or a
   // corrective move losing the marker mid-search) — all three are
   // plausibly fixed by the same handful of user actions, so one message
-  // covers them (2026-07-23, see this method's header doc comment).
+  // covers them (see this method's header doc comment).
   static const char * kDetectionTroubleMessage =
     "Couldn't get a reliable view of the marker to center on. Try improving "
     "lighting, moving the camera or marker closer, or switching to hybrid "
@@ -1367,15 +1341,14 @@ std::optional<geometry_msgs::msg::Pose> CalibrationOrchestratorNode::centerOnMar
   // uncalibrated-IBVS background and why this replaces an earlier
   // per-axis design that assumed no cross-axis coupling.
   //
-  // Always-on diagnostic (2026-07-23) — the arm-local X/Y axes' actual
-  // WORLD direction depends entirely on center_pose's orientation
-  // (offsetInLocalPlane rotates the offset by this quaternion — a
-  // "local X" move can visually look like straight-down world motion if
-  // this orientation happens to point that way). Logged unconditionally,
-  // before either probe, so any future confusing bootstrap result (e.g.
-  // one axis reading near-zero pixel response) can be checked directly
-  // against the actual orientation in effect for that run, instead of
-  // inferred after the fact.
+  // The arm-local X/Y axes' actual world direction depends entirely on
+  // center_pose's orientation (offsetInLocalPlane rotates the offset by
+  // this quaternion — a "local X" move can visually look like
+  // straight-down world motion if this orientation happens to point that
+  // way). Logged unconditionally, before either probe, so any confusing
+  // bootstrap result (e.g. one axis reading near-zero pixel response) can
+  // be checked directly against the actual orientation in effect for
+  // that run.
   RCLCPP_INFO(
     get_logger(), "centerOnMarkerUsingImage: bootstrap starting pose — "
     "position (%.4f, %.4f, %.4f), orientation xyzw (%.4f, %.4f, %.4f, %.4f)",
@@ -1435,13 +1408,11 @@ std::optional<geometry_msgs::msg::Pose> CalibrationOrchestratorNode::centerOnMar
   const double column1_norm = std::hypot(jacobian.j00, jacobian.j10);
   const double column2_norm = std::hypot(jacobian.j01, jacobian.j11);
 
-  // Always-on diagnostic (2026-07-23) — deliberately logged BEFORE the
-  // pass/fail check below, on every run (not just failures), so a live
-  // test (sim or real, including the first-ever real test of this
-  // feature) always shows the raw evidence needed to judge whether
-  // config_.centering_min_jacobian_column_px_per_m needs raising (if
-  // this margin is uncomfortably close to the floor) or is fine as-is
-  // (if comfortably above it) — no separate diagnostic pass needed.
+  // Logged before the pass/fail check below, on every run (not just
+  // failures), so a log capture always shows the raw evidence needed to
+  // judge whether config_.centering_min_jacobian_column_px_per_m needs
+  // raising (if this margin is uncomfortably close to the floor) or is
+  // fine as-is.
   RCLCPP_INFO(
     get_logger(), "centerOnMarkerUsingImage: bootstrap raw pixel deltas — X probe (%.0fm step) "
     "-> (du=%.2f, dv=%.2f)px [%.1fpx/m], Y probe (%.0fm step) -> (du=%.2f, dv=%.2f)px "

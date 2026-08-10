@@ -29,14 +29,13 @@ namespace visual_calibration_moveit
 /// multiple valid IK solutions (elbow-up/elbow-down, wrist-flipped, ...)
 /// for the same Cartesian target — which one a joint-space plan lands in
 /// depends on the path taken to get there, not just the target itself.
-/// Confirmed 2026-07-20: two different joint-space paths to the exact same
-/// cal_ready Cartesian pose (xyz/quat matching to 3+ decimal places)
-/// produced joint configurations differing by 90-250° on several joints —
-/// one of those configurations reliably let downstream Cartesian polygon-
-/// corner moves succeed, the other reliably made them fail partway
-/// (computeCartesianPath() stopping at ~80-83%). A Cartesian preset alone
-/// can't force a specific IK branch; a joint-value preset can, via
-/// MoveGroupInterface::setJointValueTarget() instead of setPoseTarget().
+/// Two different joint-space paths to the exact same Cartesian pose can
+/// produce joint configurations differing by tens to hundreds of degrees
+/// on several joints, and only one such configuration may leave enough
+/// margin for downstream Cartesian moves to succeed rather than fail
+/// partway. A Cartesian preset alone can't force a specific IK branch; a
+/// joint-value preset can, via MoveGroupInterface::setJointValueTarget()
+/// instead of setPoseTarget().
 class PresetPoses
 {
 public:

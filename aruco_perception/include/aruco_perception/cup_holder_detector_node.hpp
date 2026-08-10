@@ -48,29 +48,23 @@ struct CupHolderDetectorConfig
 
   /// Base layer (always drawn when publish_overlay_image is true): a
   /// filled centroid dot + label for the cup_holder and each detected
-  /// hole — matches yolo_marker_bridge_node.py's own always-on "green
-  /// centroid marker" convention for holes (real's overlay never drew a
-  /// cup_holder-specific marker at all — this node adds one). Extras
-  /// layer (gated behind this live-toggleable param, default OFF): the
-  /// diagnostic detection-radius ring for the cup_holder/each hole — same
+  /// hole — matches yolo_marker_bridge_node.py's own always-on green
+  /// centroid marker convention for holes. Extras layer (gated behind
+  /// this live-toggleable param, default off): the diagnostic
+  /// detection-radius ring for the cup_holder/each hole — same
   /// show_extras_markers name/semantics as yolo_marker_bridge_node.py's
-  /// own param (2026-07-28, "let's have only the green centroid marker"),
-  /// so a future web "Extras" toggle can target this node identically to
-  /// how it already targets yolo_marker_bridge_node. Live re-read every
-  /// frame (never cached), same pattern as "active".
+  /// own param, so a web "Extras" toggle can target this node identically
+  /// to how it already targets yolo_marker_bridge_node. Live re-read
+  /// every frame (never cached), same pattern as "active".
   bool show_extras_markers = false;
 
   /// cv::Canny low/high threshold pair, run on a blurred grayscale image
   /// (see cup_holder_blur_kernel_px) to find the cup_holder disc's rim.
-  /// REPLACES an earlier flat cv::threshold(THRESH_BINARY) approach
-  /// (2026-07-30) — live-tested and confirmed via
-  /// cup_holder_pipeline_debug.py that the disc has almost no brightness
-  /// separation from the background wall in sim's actual lighting (the
-  /// wall and the white disc surface are nearly the same grayscale value),
-  /// so no single global brightness cutoff can isolate it — Canny finds
-  /// the disc via its edge/rim instead, which IS distinct regardless of
-  /// the flat-region brightness similarity. OpenCV's own docs recommend a
-  /// high:low ratio of roughly 2:1 to 3:1.
+  /// The disc has almost no brightness separation from the background
+  /// wall in sim's lighting, so no single global brightness cutoff can
+  /// isolate it — Canny finds the disc via its edge/rim instead, which is
+  /// distinct regardless of the flat-region brightness similarity.
+  /// OpenCV's own docs recommend a high:low ratio of roughly 2:1 to 3:1.
   int cup_holder_canny_low = 80;
   int cup_holder_canny_high = 200;
   /// Square Gaussian blur kernel size (must be odd) applied before Canny —
@@ -80,18 +74,13 @@ struct CupHolderDetectorConfig
   /// Square dilation kernel size (pixels) applied to the raw Canny edge
   /// map before findContours — Canny edges are 1px wide and often have
   /// small gaps, so a rim that's a closed loop in reality won't close
-  /// into one clean contour without this. Confirmed via
-  /// cup_holder_pipeline_debug.py that a small dilate is sufficient (the
-  /// rim closes cleanly at kernel=3) — keep this small; too large starts
-  /// merging the disc's rim contour with nearby hole rims.
+  /// into one clean contour without this. Keep this small; too large
+  /// starts merging the disc's rim contour with nearby hole rims.
   int cup_holder_dilate_kernel_px = 3;
 
   /// Minimum circularity (4*pi*area/perimeter^2, 1.0 = perfect circle) for
   /// a contour to be accepted as the cup_holder disc. Filters out
-  /// non-circular edges — confirmed live (2026-07-30) that this alone
-  /// cleanly rejects a long diagonal background/wall-corner edge line
-  /// (circularity ~0.01-0.11) while accepting the disc's own rim
-  /// (circularity ~0.78-0.87 in the same test frame).
+  /// non-circular edges such as a diagonal background/wall-corner line.
   double cup_holder_min_circularity = 0.6;
   /// Minimum contour area in pixels^2 — filters out small edge fragments
   /// before circularity is even computed (cheap first-pass rejection).
@@ -107,8 +96,7 @@ struct CupHolderDetectorConfig
   double hole_min_circularity = 0.6;
   /// Radius floor in pixels — separates the 4 real holes from small
   /// decorative screw-holes visible in the reference image (see class doc
-  /// comment). Verify this empirically against live sim; not guessed
-  /// blind.
+  /// comment).
   double hole_min_radius_px = 4.0;
   double hole_max_radius_px = 40.0;
 
@@ -139,72 +127,53 @@ struct CupHolderDetectorConfig
   bool active = true;
 };
 
-/// Vision-only node, SIMULATION ONLY: detects the cup_holder disc (1
+/// Vision-only node, simulation only: detects the cup_holder disc (one
 /// white/light circular object) and its up to 4 holes via classical
 /// OpenCV, publishing visual_calibration_msgs/Detection2DArray on the
-/// exact same topic aruco_detector_node/yolo_marker_bridge_node already
-/// publish on. 2D pixel space only — no depth, no TF, no 3D pose (see
+/// same topic aruco_detector_node/yolo_marker_bridge_node already publish
+/// on. 2D pixel space only — no depth, no TF, no 3D pose (see
 /// depth_perception_node for the consumer that does that).
 ///
-/// Why this node exists, and why it is sim-only: real's cup_holder/hole
-/// detection runs on YOLO (aruco_perception_yolo_bridge's
-/// yolo_marker_bridge_node, backed by YOLO-pipeline/inference_server.py).
-/// Sim's rosject has no GPU and is already CPU-oversubscribed running
-/// Gazebo+RViz+the web dashboard simultaneously, making YOLO inference
-/// there too slow for continuous use. This node is a drop-in ALTERNATE
-/// PUBLISHER on the same interface for sim only — depth_perception_node
-/// (the actual consumer) has zero awareness of which detector produced a
-/// given Detection2DArray message. This node is never launched on real
-/// (no cup_holder_detector_real.yaml exists, and no real_tmux_*.sh script
-/// references it) — that absence, not any runtime gate, is what keeps it
-/// off the real robot.
+/// This node exists because real's cup_holder/hole detection runs on YOLO
+/// (aruco_perception_yolo_bridge's yolo_marker_bridge_node, backed by
+/// YOLO-pipeline/inference_server.py), which needs more compute than
+/// sim's environment reliably has available alongside Gazebo/RViz/the web
+/// dashboard. This node is a drop-in alternate publisher on the same
+/// interface for sim only — depth_perception_node (the actual consumer)
+/// has zero awareness of which detector produced a given
+/// Detection2DArray message. It is never launched on real.
 ///
-/// Detection approach differs between the disc and the holes, by design:
+/// Detection approach differs between the disc and the holes by design:
 /// the 4 holes are reliably darker than everything else in frame, so a
 /// flat grayscale threshold (cv::threshold, THRESH_BINARY_INV) isolates
-/// them cleanly (see hole_thresh). The cup_holder DISC, however, was
-/// live-tested (2026-07-30) to have almost no brightness separation from
-/// the background wall in sim's actual lighting — no single global
-/// cv::threshold cutoff could isolate it at any value tried — so the disc
-/// is instead found via its RIM: cv::Canny edge detection (on a blurred
-/// grayscale image) + a small dilate to close small gaps in the 1px edge
-/// line + findContours/circularity, same as the holes' final
-/// contour/circularity step but fed an edge map instead of a brightness
-/// mask. Confirmed via a standalone debug tool
-/// (resources/scripts/python/cup_holder_pipeline_debug.py) against a live
-/// sim frame that this cleanly isolates the disc's rim as a closed loop
-/// (circularity ~0.78-0.87) while correctly rejecting a nearby diagonal
-/// wall-corner edge (circularity ~0.01-0.11) via the same circularity
-/// filter already used for holes.
+/// them cleanly (see hole_thresh). The cup_holder disc has almost no
+/// brightness separation from the background wall in sim's lighting, so
+/// no single global threshold can isolate it — the disc is instead found
+/// via its rim: cv::Canny edge detection (on a blurred grayscale image) +
+/// a small dilate to close gaps in the 1px edge line + findContours/
+/// circularity, the same final contour/circularity step the holes use,
+/// fed an edge map instead of a brightness mask.
 ///
 /// Hole quadrant numbering: ported from yolo_marker_bridge_node.py's
 /// assign_hole_quadrants() (1=top-left, 2=top-right, 3=bottom-left,
-/// 4=bottom-right, split around the cup_holder's own bbox center). NOTE:
-/// that function's design comment justifies a simple 2-axis split because
-/// real's camera is wall-fixed and never rolls — sim's wrist-mounted
-/// camera can roll through a wider range of orientations during a scan,
-/// so this numbering has NOT yet been empirically verified to stay
-/// consistent across every pose sim's arm actually reaches. Treat
-/// hole_number as provisional until checked live against a real scan
-/// sweep.
+/// 4=bottom-right, split around the cup_holder's own bbox center). That
+/// function's simple 2-axis split assumes a camera that never rolls; sim's
+/// wrist-mounted camera can roll through a wider range of orientations
+/// during a scan, so hole_number should be treated as provisional until
+/// verified across the full range of poses sim's arm reaches.
 ///
-/// Overlay unification (2026-07-29): sim's aruco_detector_node no longer
-/// publishes /aruco_perception/overlay_image directly — its
-/// aruco_detector_sim.yaml reroutes overlay_image_topic to
-/// overlay_image_input_topic here instead (see that file's comment). This
-/// node subscribes to that marker-only overlay, caches the LATEST received
-/// frame (latest_marker_overlay_), and — every time its OWN detection pass
-/// completes — draws cup_holder/hole circles on top of that cached frame
-/// and publishes the combined image as the sole publisher of
-/// /aruco_perception/overlay_image. No strict frame-pairing/sync between
-/// the two subscriptions: same "latest cached frame, degrades gracefully
-/// if the other publisher is down" pattern yolo_marker_bridge_node.py
-/// already uses for overlaying depth_perception_node's stable-position
-/// markers (see that node's own doc comment) — if aruco_detector_node
+/// Overlay unification: sim's aruco_detector_node does not publish
+/// /aruco_perception/overlay_image directly — its yaml reroutes
+/// overlay_image_topic to overlay_image_input_topic here instead. This
+/// node subscribes to that marker-only overlay, caches the latest
+/// received frame (latest_marker_overlay_), and — every time its own
+/// detection pass completes — draws cup_holder/hole circles on top of
+/// that cached frame and publishes the combined image as the sole
+/// publisher of /aruco_perception/overlay_image. There is no strict
+/// frame-pairing/sync between the two subscriptions: if aruco_detector_node
 /// isn't running/hasn't published yet, latest_marker_overlay_ is empty and
 /// this node falls back to drawing directly on its own raw camera frame
-/// (still a valid, if marker-less, overlay) rather than publishing
-/// nothing.
+/// rather than publishing nothing.
 class CupHolderDetectorNode : public rclcpp::Node
 {
 public:
@@ -239,22 +208,16 @@ private:
   /// Re-fits `candidate.contour` with cv::fitEllipse and overwrites cx/cy/
   /// radius in place with the ellipse's own center and the average of its
   /// two semi-axes (radius unchanged if the contour has < 5 points —
-  /// fitEllipse's own minimum). REPLACES the cup_holder pass's initial
-  /// cv::minEnclosingCircle fit (2026-07-30): live-tested that the disc's
-  /// Canny/dilate contour is slightly non-circular (circularity ~0.78, not
-  /// 1.0) because it also picks up a bit of the disc's own 3D
-  /// cylinder-side/rim edge below the flat top surface, not just the flat
-  /// top's true boundary — minEnclosingCircle stretches to cover that
-  /// outlier bulge (radius 113.9px in the confirmed test frame), visibly
-  /// overshooting the wall at the disc's top edge and the flat-top/rim
-  /// seam at the bottom. fitEllipse's least-squares fit is far less
-  /// sensitive to a few outlier boundary points than "smallest circle
-  /// containing every point" — confirmed to give a tighter, more accurate
-  /// radius (~110.6px average semi-axis, vs. the same contour's
-  /// minEnclosingCircle radius of 113.9px) that better matches the disc's
-  /// true flat-top boundary by eye. Only applied to the cup_holder — the 4
-  /// holes are small, clean, near-perfect circles already (no equivalent
-  /// bulge observed), so minEnclosingCircle stays unchanged for them.
+  /// fitEllipse's own minimum). Used instead of cv::minEnclosingCircle for
+  /// the cup_holder disc: the disc's Canny/dilate contour is slightly
+  /// non-circular (it also picks up part of the disc's 3D cylinder-side
+  /// edge below the flat top surface, not just the flat top's true
+  /// boundary), and minEnclosingCircle stretches to cover that outlier
+  /// bulge, overshooting the disc's true radius. fitEllipse's
+  /// least-squares fit is far less sensitive to a few outlier boundary
+  /// points. Only applied to the cup_holder — the 4 holes are small,
+  /// clean, near-perfect circles already, so minEnclosingCircle stays
+  /// unchanged for them.
   static void refineCupHolderCircle(CircleCandidate & candidate);
 
   /// Ported from yolo_marker_bridge_node.py's assign_hole_quadrants(), but
@@ -263,10 +226,10 @@ private:
   /// sim-specific divergence; see .cpp definition's doc comment for why).
   /// Mutates each element of `holes` in place, setting hole_number.
   ///
-  /// NOT static (unlike the rest of this pass's helpers) — see .cpp
-  /// definition's doc comment: fixing the label-flicker bug described there
-  /// requires remembering previous_holes_ (this node's own per-instance
-  /// state) across calls, so this method needs a `this`.
+  /// Not static (unlike the rest of this file's helpers): stabilizing
+  /// hole_number across frames requires remembering previous_holes_ (this
+  /// node's own per-instance state) — see the .cpp definition's doc
+  /// comment.
   void assignHoleQuadrants(std::vector<visual_calibration_msgs::msg::Detection2D> & holes);
 
   CupHolderDetectorConfig config_;

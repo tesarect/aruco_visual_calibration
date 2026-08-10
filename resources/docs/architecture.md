@@ -27,7 +27,7 @@ visual_calibration/
 ├── visual_calibration_moveit/   # MoveIt2 interaction nodes
 │   ├── src/planning_scene_setup/ # Publishes cafeteria collision objects to the planning scene
 │   ├── src/trajectory_planner/   # Services to plan/execute moves relative to a TF frame or preset
-│   └── src/mtc_trajectory/       # MoveIt Task Constructor node; see visual_calibration_moveit.md
+│   └── src/mtc_trajectory/       # MoveIt Task Constructor node; not currently built, see visual_calibration_moveit.md
 ├── visual_calibration_msgs/     # Custom action/srv/msg definitions shared by the above
 ├── sim_ur3e_moveit_config/      # Project-owned copy of ur3e_moveit_config, sim-only
 ├── real_ur3e_moveit_config/     # Project-owned copy of ur3e_moveit_config, real-robot-only
@@ -35,27 +35,22 @@ visual_calibration/
 └── resources/
     ├── docs/                    # This documentation set
     ├── info/                    # Captured TF trees, topic lists, observations (sim vs. real)
-    ├── jenkins/, grafana/       # CI pipeline scripts and log/metrics stack install scripts
     └── scripts/                 # tmux/shell/python helpers for running the sim stack
 ```
 
-`aruco_moveit_config` — the project's original MoveIt2 config for the UR3e +
-RG2 gripper, predating the instructor-provided `ur3e_moveit_config` — has
-been removed; `sim_ur3e_moveit_config` / `real_ur3e_moveit_config` are what
-`move_group` actually launches from (see
-[ur3e_moveit_config_variants.md](./ur3e_moveit_config_variants.md)).
+`sim_ur3e_moveit_config` / `real_ur3e_moveit_config` are what `move_group`
+actually launches from — see
+[ur3e_moveit_config_variants.md](./ur3e_moveit_config_variants.md).
 
 A few packages under `visual_calibration/` are not listed above because their
 place in the project isn't settled: `visual_calibration_bringup` (ROS-native
 launch sequencing, an alternative to the tmux scripts under
-`resources/scripts/tmux/`), `real_ur3e_moveit_config`'s predecessor
-`real_moveit_config` (already removed), and `real_ur3e_description` all
-still exist on disk (`real_ur3e_moveit_config`/`real_ur3e_description` do;
-`real_moveit_config` does not) but were candidates for removal as of the
-last review (see `resources/docs/stale_packages_review.md`) — check that
-file and confirm current status with the project owner before assuming
-either of the two still-present packages is either gone or a permanent part
-of the architecture.
+`resources/scripts/tmux/` — see
+[manual_bringup.md](./manual_bringup.md)), and `real_ur3e_description` still
+exist on disk but were candidates for removal as of the last review (see
+`resources/docs/stale_packages_review.md`) — check that file and confirm
+current status with the project owner before assuming either is either gone
+or a permanent part of the architecture.
 
 Exposing control of the calibration pipeline via a web application is part of
 this project's overall goal. That web dashboard (`webpage_ws/`, a separate
@@ -97,13 +92,81 @@ package, node, or launch file living in this directory.
   `ultralytics`' bundled, ABI-incompatible newer OpenCV — see
   [aruco_perception_yolo_bridge.md](./aruco_perception_yolo_bridge.md).
 
-## Working / flow
+## Component interaction, at a glance
+
+The diagram below is deliberately low-detail: boxes are packages/nodes,
+arrows are just "who talks to whom," with no topic/service/action names.
+See the detailed diagram further down for the actual interfaces.
+
+```mermaid
+flowchart LR
+    subgraph AP["aruco_perception"]
+        DETC["aruco_detector_node"]
+        CUPH["cup_holder_detector"]
+        CB["calibration_broadcaster_node"]
+        IMGSUB["image_subscriber_node"]
+    end
+
+    subgraph YOLO["aruco_perception_yolo_bridge"]
+        BRIDGE["yolo_marker_bridge_node"]
+    end
+
+    subgraph ORCH["orchestrator"]
+        ORC["calibration_orchestrator_node"]
+    end
+
+    subgraph MV["visual_calibration_moveit"]
+        PSS["planning_scene_setup"]
+        TP["trajectory_planner"]
+        MTC["mtc_trajectory"]
+    end
+
+    subgraph DP["depth_perception"]
+        DPN["depth_perception_node"]
+    end
+
+    subgraph CV["calibration_validation"]
+        VAL["validate_calibration_sim.py"]
+    end
+
+    Camera(["Camera feed"]) --> DETC
+    Camera --> CUPH
+    Camera --> BRIDGE
+    Camera --> IMGSUB
+
+    DETC --> CB
+    BRIDGE --> CB
+    ORC --> CB
+    ORC --> TP
+    ORC --> DETC
+    ORC --> BRIDGE
+    CB --> TP
+
+    DETC --> DPN
+    CUPH --> DPN
+    BRIDGE --> DPN
+    DPN --> TP
+
+    PSS --- TP
+    MTC -.-> TP
+
+    CB --> VAL
+    TP --> Arm(["UR3e arm"])
+```
+
+`mtc_trajectory` is drawn with a dashed arrow because it is not currently
+built (see [visual_calibration_moveit.md](./visual_calibration_moveit.md));
+it is included here as a real package/node on disk, not as an active part
+of the runtime data flow.
+
+## Detailed architecture
 
 The diagram below covers `orchestrator` sequencing the full auto-calibrate
 run, `aruco_perception`/`aruco_perception_yolo_bridge` detecting the marker
 and chaining TFs, `trajectory_planner` executing the sampling/centering
-moves, and `calibration_validation`'s automated accuracy check.
-`calibration_broadcaster_node`'s own internal two-phase sampling loop
+moves, `depth_perception` chaining the calibrated camera TF into 3D
+cupholder/hole positions, and `calibration_validation`'s automated accuracy
+check. `calibration_broadcaster_node`'s own internal two-phase sampling loop
 (polygon corners, then randomized offsets, with an early-stop check) is
 described separately in
 [calibration_process.md](./calibration_process.md) and
@@ -117,9 +180,14 @@ flowchart TD
         TF_GT["/tf: base_link -> wrist_rgbd_camera_depth_optical_frame\n(ground truth, sim only)"]
     end
 
-    subgraph AP["aruco_perception / aruco_perception_yolo_bridge"]
-        DET["aruco_detector_node (classical)\nOR yolo_marker_bridge_node (hybrid)\n-- exactly one \"active\" at a time"]
+    subgraph AP["aruco_perception"]
+        DET["aruco_detector_node (classical)"]
+        CUPH["cup_holder_detector\n(sim only)"]
         CB["calibration_broadcaster_node\n(~/calibrate action server)"]
+    end
+
+    subgraph YOLO["aruco_perception_yolo_bridge"]
+        BRIDGE["yolo_marker_bridge_node (hybrid)\n-- also cupholder/hole on real,\n~/detect_marker_once"]
     end
 
     subgraph ORCH["orchestrator"]
@@ -128,32 +196,52 @@ flowchart TD
 
     subgraph MV["visual_calibration_moveit"]
         PSS["planning_scene_setup\n(cafeteria collision objects)"]
-        TP["trajectory_planner\n(~/trace_path, ~/get_polygon_waypoints,\n~/get_standoff_pose, ~/move_to_preset)"]
+        TP["trajectory_planner\n(~/trace_path, ~/get_polygon_waypoints,\n~/get_standoff_pose, ~/get_preset_pose,\n~/move_to_preset, ~/move_to_instance)"]
     end
 
-    CAM -->|image, camera_info| DET
-    DET -->|"/aruco_perception/marker_pose\n(camera -> marker)"| CB
-    DET -->|"/aruco_perception/detections_2d\n(pixel centroid, for image-based centering)"| ORC
-    TF_KNOWN -->|"lookupTransform\nbase_link -> rg2_gripper_aruco_link"| CB
-    CB -->|"broadcasts static TF\nbase_link -> camera_frame_calibrated\n(samples averaged, early-stop possible)"| TF_OUT["/tf: base_link -> ..._calibrated\n(computed)"]
-
-    ORC -->|"1. move to cal_ready (preset or TF-derived)"| TP
-    ORC -->|"2. auto-center on marker (uncalibrated IBVS,\nimage Jacobian from 2 bootstrap probes)"| TP
-    ORC -->|"3. ~/calibrate goal, relays feedback/result"| CB
-    ORC -.->|"~/set_detector_mode\n(flips \"active\" param on both detectors)"| DET
-
-    CB -->|"~/get_polygon_waypoints (read-only),\nthen ~/trace_path per waypoint\n(blocks until settled)"| TP
-    TP -.->|"lookupTransform camera_frame\nin planning frame"| TF_OUT
-    TP -->|MoveGroupInterface plan+execute| ARM["UR3e arm motion"]
-    PSS -->|collision objects| ARM
+    subgraph DP["depth_perception"]
+        DPN["depth_perception_node"]
+    end
 
     subgraph CV["calibration_validation"]
         VALIDATE["validate_calibration_sim.py\n(one-shot position + orientation\nerror vs. ground truth)"]
     end
+
+    CAM -->|image, camera_info| DET
+    CAM -->|image, camera_info| CUPH
+    CAM -->|image, camera_info| BRIDGE
+
+    DET -->|"/aruco_perception/marker_pose\n(camera -> marker, classical mode)"| CB
+    BRIDGE -->|"/aruco_perception/marker_pose\n(camera -> marker, hybrid mode)"| CB
+    DET -.->|"exactly one &quot;active&quot; at a time\n(active param)"| BRIDGE
+
+    DET -->|"/aruco_perception/detections_2d\n(marker pixel centroid)"| ORC
+    TF_KNOWN -->|"lookupTransform\nbase_link -> rg2_gripper_aruco_link"| CB
+    CB -->|"broadcasts static TF\nbase_link -> camera_frame_calibrated\n(samples averaged, early-stop possible)"| TF_OUT["/tf: base_link -> ..._calibrated\n(computed)"]
+
+    ORC -->|"1. ~/get_standoff_pose,\n~/trace_path or ~/move_to_preset\n(move to cal_ready)"| TP
+    ORC -->|"2. auto-center on marker (uncalibrated IBVS,\nimage Jacobian from bootstrap probes)"| TP
+    ORC -->|"3. ~/calibrate goal, relays feedback/result"| CB
+    ORC -.->|"~/set_detector_mode\n(flips &quot;active&quot; param on both detectors)"| DET
+    ORC -.->|"~/set_detector_mode"| BRIDGE
+
+    CB -->|"~/get_polygon_waypoints (read-only),\nthen ~/trace_path per waypoint\n(blocks until settled)"| TP
+    CB -.->|"~/detect_marker_once\n(hybrid_per_waypoint_enabled mode only)"| BRIDGE
+    TP -.->|"lookupTransform camera_frame\nin planning frame"| TF_OUT
+    TP -->|MoveGroupInterface plan+execute| ARM["UR3e arm motion"]
+    PSS -->|collision objects| ARM
+
     TF_OUT --> VALIDATE
     TF_GT --> VALIDATE
 
+    DET -->|"detections_2d\n(cup_holder/hole, real)"| DPN
+    CUPH -->|"detections_2d\n(cup_holder/hole, sim)"| DPN
+    BRIDGE -->|"detections_2d\n(cup_holder/hole, real)"| DPN
+    TF_OUT -.->|"calibrated camera TF\n(chains 3D back-projection)"| DPN
+    DPN -->|"/tf: base_link -> cup_holder -> hole_1..hole_4"| TF_HOLES["/tf: cup_holder / hole frames"]
+
     ARM -->|"settled pose triggers\na fresh marker detection"| DET
+    ARM -->|"settled pose triggers\na fresh marker detection"| BRIDGE
 ```
 
 Flow narrative:
@@ -171,10 +259,13 @@ Flow narrative:
    `calibration_orchestrator_node`'s `~/auto_calibrate` action (or its
    `~/start_auto_calibrate` rosbridge-reachable facade, for clients like the
    web app that can't speak rosbridge's native ROS2 action protocol — see
-   [orchestrator.md](./orchestrator.md)): move to `cal_ready`, optionally
+   [orchestrator.md](./orchestrator.md)): move to `cal_ready` (via
+   `~/get_standoff_pose` + `~/trace_path`, or `~/move_to_preset`), optionally
    auto-center on the marker using an uncalibrated image-based visual
    servoing search, then call `calibration_broadcaster_node`'s
-   `~/calibrate` action and relay its feedback/result.
+   `~/calibrate` action and relay its feedback/result — see
+   [calibration_process.md](./calibration_process.md) for that hand-off in
+   sequence-diagram form.
 3. `calibration_broadcaster_node` orchestrates that `~/calibrate` action
    goal: it fetches waypoints from `trajectory_planner`'s
    `~/get_polygon_waypoints` (read-only, no motion), then runs a polygon
@@ -182,7 +273,9 @@ Flow narrative:
    condition after every sample — see
    [calibration_process.md](./calibration_process.md) for the full
    per-sample mechanism (still: trace to a waypoint, wait for a *fresh*
-   marker detection, chain it with the known TF chain).
+   marker detection, chain it with the known TF chain). In hybrid mode with
+   `hybrid_per_waypoint_enabled`, it can additionally call
+   `yolo_marker_bridge_node`'s `~/detect_marker_once` directly per waypoint.
 4. Once enough samples are collected (or early-stop triggers), position is
    averaged arithmetically and orientation is averaged by the configured
    quaternion-averaging method, and a static TF
@@ -197,11 +290,29 @@ Flow narrative:
    obstacles (coffee machine, cupholder, countertop, wall — plus, on real,
    an unmeasured placeholder box guarding the wall-mounted camera) during
    any of the above arm motion.
+7. A separate, parallel pipeline uses that same computed `camera → base_link`
+   TF: the active detector's `cup_holder`/`hole` 2D pixel detections (from
+   sim's `cup_holder_detector_node` or, on both sim and real,
+   `yolo_marker_bridge_node`) feed `depth_perception_node`, which
+   back-projects them to 3D, filters them over time, and chains them through
+   the calibrated camera TF to broadcast `base_link → cup_holder →
+   hole_1..hole_4` — see [depth_perception.md](./depth_perception.md).
 
-A separate, parallel pipeline (not shown above) uses that same computed
-`camera → base_link` TF: the active detector's `cup_holder`/`hole` 2D pixel
-detections (from sim's `cup_holder_detector_node` or real's
-`yolo_marker_bridge_node`) feed `depth_perception_node`, which back-projects
-them to 3D, filters them over time, and chains them through the calibrated
-camera TF to broadcast `base_link → cup_holder → hole_1..hole_4` — see
-[depth_perception.md](./depth_perception.md).
+## Pipeline stages
+
+The diagram below is the "what happens, in order" view of one `~/calibrate`
+run — one box per processing stage rather than per node/package. See
+[calibration_process.md](./calibration_process.md) for the full
+plain-language walkthrough of each stage.
+
+```mermaid
+flowchart TD
+    A["Camera image in\n(RGB frame + camera_info)"]
+    B["Marker detection\n(classical ArUco or YOLO,\nexactly one active)\n-> camera -> marker pose"]
+    C["TF chaining\n(known base_link -> marker chain,\nfrom joint states, combined with\nthe fresh detection)\n-> one base_link -> camera sample"]
+    D["Sample collection\n(move to next waypoint,\nwait for a settled + fresh detection,\nrepeat until num_samples)"]
+    E["Averaging\n(position: arithmetic mean;\norientation: quaternion averaging,\ndouble-cover corrected)"]
+    F["Broadcast TF out\n(static base_link -> camera_..._calibrated)"]
+
+    A --> B --> C --> D --> E --> F
+```

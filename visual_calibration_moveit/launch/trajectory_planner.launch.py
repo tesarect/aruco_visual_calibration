@@ -31,10 +31,8 @@ def _launch_setup(context, *args, **kwargs):
     # setPoseTarget() can never resolve IK for a Cartesian goal, so every
     # planAndExecute() call (including the startup home move) aborts with
     # "Planning request aborted" / "MoveGroupInterface::plan() failed" —
-    # no collision, no CHOMP involved, just no way to convert the pose
-    # target into joint values at all (found 2026-07-19, after ruling out
-    # planner/pipeline config as the cause — see move_group.launch.py's
-    # capabilities comment for that separate investigation).
+    # not a collision or CHOMP issue, just no way to convert the pose
+    # target into joint values at all.
     # move_group's own move_group.launch.py loads this correctly already
     # (via MoveItConfigsBuilder's default auto-discovery) —
     # trajectory_planner is a SEPARATE node with its own
@@ -65,8 +63,9 @@ def _launch_setup(context, *args, **kwargs):
 
     # use_sim_time must match the environment: Gazebo publishes /clock on
     # sim time in env:=sim, while env:=real has no simulated clock at all.
-    # This node calls get_clock()->now() and does TF lookups, so a mismatch
-    # here risks the same class of timing bug as error-mitigation.md #5/#9.
+    # This node calls get_clock()->now() and does TF lookups, so a
+    # mismatch here would misalign timestamps against actual message
+    # arrival.
     use_sim_time = (env == "sim")
 
     trajectory_planner_node = Node(

@@ -1,11 +1,10 @@
-"""cup_holder_detector_node launch, sim-only. Same env-parameterized
-pattern as aruco_detector.launch.py (env arg -> params filename), even
-though only cup_holder_detector_sim.yaml exists today — no _real.yaml
-counterpart, and no real_tmux_*.sh script references this launch file
-at all (see cup_holder_detector_node.hpp's class doc comment for why this
-node has no real-robot role). env:=real would fail to find a params file
-and is not a supported/tested path; the argument exists for parity with
-this package's other launch files, not because real usage is expected.
+"""Launches cup_holder_detector_node, sim-only.
+
+Uses the same env-parameterized pattern as aruco_detector.launch.py (env arg
+-> params filename), but only a cup_holder_detector_sim.yaml params file
+exists — see cup_holder_detector_node.hpp for why this node has no
+real-robot role. env:=real is not a supported/tested path; the argument
+exists only for parity with this package's other launch files.
 """
 
 from launch import LaunchDescription

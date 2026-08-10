@@ -60,6 +60,9 @@ def quaternion_angle_deg(q_a, q_b):
 
 
 class ValidateCalibrationSim(Node):
+    """One-shot node that compares the broadcast calibrated camera TF
+    against sim's URDF-declared ground-truth camera TF and reports the
+    position/orientation error against fixed verdict bands."""
 
     def __init__(self):
         super().__init__("validate_calibration_sim")

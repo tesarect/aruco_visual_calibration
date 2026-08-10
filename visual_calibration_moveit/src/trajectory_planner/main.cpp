@@ -17,13 +17,11 @@ int main(int argc, char ** argv)
   // internally needs a /joint_states (via TF) callback to be serviced to
   // resolve — under a single-threaded executor, that callback can only run
   // on the same thread already blocked inside handleTracePath, deadlocking
-  // the whole node (confirmed via testing, 2026-07-17: a plain named
-  // ~/trace_path call hung indefinitely, no response, "No state update
-  // received" repeating in the log). A multi-threaded executor lets a
-  // second thread service that callback while the first is still blocked.
-  // See TrajectoryPlanner's mutex-guarded state members (arm_state_ etc.)
-  // for the thread-safety implication of this change — service/timer
-  // callbacks can now genuinely run concurrently.
+  // the whole node. A multi-threaded executor lets a second thread service
+  // that callback while the first is still blocked. See TrajectoryPlanner's
+  // mutex-guarded state members (arm_state_ etc.) for the thread-safety
+  // implication of this — service/timer callbacks can genuinely run
+  // concurrently.
   auto executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
   executor->add_node(node);
   std::thread executor_thread([&executor]() {executor->spin();});
@@ -34,13 +32,10 @@ int main(int argc, char ** argv)
   // move_to_home_on_startup param (see TrajectoryPlanner::runStartupSequence,
   // called from the constructor) — an explicit, auditable config choice
   // rather than unconditional motion; set per-environment in
-  // trajectory_planner_sim.yaml/_real.yaml (both true today, matching the
-  // desired "always return home on startup" behavior — flip to false there
-  // if this should be paused without a code change). See todo.txt item 1
-  // and error-mitigation.md for why
-  // unconditional motion on startup is unsafe on the real robot (no TF
-  // guarantee, no operator confirmation) — that reasoning is exactly why
-  // this is opt-in rather than the default behavior.
+  // trajectory_planner_sim.yaml/_real.yaml. Unconditional motion on
+  // startup is unsafe on the real robot (no TF guarantee, no operator
+  // confirmation), which is why this is opt-in rather than the default
+  // behavior.
   visual_calibration_moveit::TrajectoryPlanner trajectory_planner(node);
 
   // Keep the node alive so ~/trace_path, ~/trace_polygon,

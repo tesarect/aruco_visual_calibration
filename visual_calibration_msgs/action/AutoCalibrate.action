@@ -9,9 +9,9 @@
 # empty goal.
 #
 # Whether Stage 1 actually moves to cal_ready or instead calibrates from
-# the arm's current pose is decided INTERNALLY by the node itself (see
-# CalibrationOrchestratorNode::pending_manual_adjustment_'s doc comment,
-# 2026-07-24) — not a per-call goal field. The single existing
+# the arm's current pose is decided internally by the node itself (see
+# CalibrationOrchestratorNode::pending_manual_adjustment_'s doc comment)
+# — not a per-call goal field. The single existing
 # ~/start_auto_calibrate/~/auto_calibrate entry point behaves
 # automatically based on that internal state (set when a previous
 # auto-centering attempt failed, cleared once calibration completes or a
@@ -28,9 +28,9 @@ float64 mean_spread_deg
 # which stage of the sequence failed, for a caller (e.g. the web app) to
 # show a more specific error than the generic message string alone.
 string failed_stage
-# Relayed from Calibrate.action's own is_high_confidence result field
-# (2026-07-29) — see that field's doc comment. Meaningless/false on
-# failure (failed runs never reach the point where this is computed).
+# Relayed from Calibrate.action's own is_high_confidence result field —
+# see that field's doc comment. Meaningless/false on failure (failed runs
+# never reach the point where this is computed).
 bool is_high_confidence
 ---
 # Feedback: one line per stage transition, e.g. "Moving to cal_ready",
@@ -40,15 +40,15 @@ bool is_high_confidence
 string stage
 uint32 samples_collected
 uint32 samples_total
-# Relayed from Calibrate.action's own latest_sample_pose feedback field
-# (2026-07-29) — see that field's doc comment. Zero-valued (default Pose)
-# for every non-"Calibrating" stage feedback (cal_ready/auto_center have
-# no per-sample pose to relay).
+# Relayed from Calibrate.action's own latest_sample_pose feedback field —
+# see that field's doc comment. Zero-valued (default Pose) for every
+# non-"Calibrating" stage feedback (cal_ready/auto_center have no
+# per-sample pose to relay).
 geometry_msgs/Pose latest_sample_pose
-# Relayed from Calibrate.action's own current_status feedback field
-# (2026-08-04) — see that field's doc comment. Empty for every
-# non-"Calibrating" stage feedback and for normal successful-sample
-# feedback during Calibrating; populated only for discard-and-continue/
-# timeout events (e.g. "Waypoint 6 (polygon): sample skipped — marker not
-# found") that samples_collected/samples_total alone don't explain.
+# Relayed from Calibrate.action's own current_status feedback field — see
+# that field's doc comment. Empty for every non-"Calibrating" stage
+# feedback and for normal successful-sample feedback during Calibrating;
+# populated only for discard-and-continue/timeout events (e.g. "Waypoint
+# 6 (polygon): sample skipped — marker not found") that
+# samples_collected/samples_total alone don't explain.
 string current_status

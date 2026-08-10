@@ -1,32 +1,33 @@
-"""NEW, additive file — does not replace or modify planning_scene_setup.launch.py
-or trajectory_planner.launch.py, both left untouched and still independently
-launchable. See visual_calibration_moveit/launch/bringup_full_sim_README.md
-(and bringup_full_real_README.md) for the full staged-bringup design this
-file is part of.
+"""Combines planning_scene_setup + trajectory_planner into one launch
+file, additive alongside planning_scene_setup.launch.py and
+trajectory_planner.launch.py (neither of which this file replaces or
+modifies, and both remain independently launchable). See
+visual_calibration_moveit/launch/bringup_full_sim_README.md (and
+bringup_full_real_README.md) for the full staged-bringup design this file
+is part of.
 
-Combines planning_scene_setup + trajectory_planner into one launch file,
-gated on the SAME condition resources/scripts/python/wait_for_planning_scene.py
-checks today (that script isn't installed/reachable from an install-space
+Gated on the same condition resources/scripts/python/wait_for_planning_scene.py
+checks (that script isn't installed/reachable from an install-space
 launch file, so its /get_planning_scene polling logic is reimplemented
 inline below rather than shelled out to) — trajectory_planner's
 move_to_home_on_startup plans/executes as soon as its constructor runs, and
-collision checking can only avoid obstacles already IN the scene at that
+collision checking can only avoid obstacles already in the scene at that
 moment. planning_scene_setup does not exit after populating the scene
-(rclcpp::spin() runs immediately after construction, confirmed in
-src/planning_scene_setup/main.cpp) — so neither "is the node in ros2 node
+(rclcpp::spin() runs immediately after construction, see
+src/planning_scene_setup/main.cpp) -- so neither "is the node in ros2 node
 list" nor "did the process exit" is a valid readiness signal here; only the
 scene's actual contents are.
 
-Does NOT wait for move_group itself — both included launch files' own nodes
-(planning_scene_setup via PlanningSceneInterface, trajectory_planner via
-MoveGroupInterface) already block on move_group internally on first use, the
-same as running them via `ros2 launch` directly today.
+Does not wait for move_group itself -- both included launch files' own
+nodes (planning_scene_setup via PlanningSceneInterface, trajectory_planner
+via MoveGroupInterface) already block on move_group internally on first
+use, the same as running them via `ros2 launch` directly.
 
 Real-only, additionally: also waits for scaled_joint_trajectory_controller
 to report "active" on /controller_manager/list_controllers before starting
-trajectory_planner — see REQUIRED_CONTROLLER_NAME's doc comment below for
-the live failure this closes (move_group/planning-scene readiness does not
-imply the real robot's controller connection has finished activating).
+trajectory_planner -- see REQUIRED_CONTROLLER_NAME's doc comment below for
+why (move_group/planning-scene readiness does not imply the real robot's
+controller connection has finished activating).
 """
 
 import time
@@ -45,22 +46,17 @@ REQUIRED_SCENE_OBJECTS = {"countertop", "wall"}
 SCENE_POLL_TIMEOUT_SEC = 30.0
 SCENE_POLL_INTERVAL_SEC = 2.0
 
-# Real-robot only (see _launch_setup) — added 2026-07-23 after a live
-# bringup_moveit_pipeline.launch.py test on real hit "Goal was rejected by
-# server" from scaled_joint_trajectory_controller on trajectory_planner's
-# very first move_to_home_on_startup call. move_group being present in
+# Real-robot only (see _launch_setup): move_group being present in
 # `ros2 node list` (or even successfully serving /get_planning_scene) does
-# NOT mean its controller_manager connection has finished activating
-# scaled_joint_trajectory_controller — the existing tmux-script flow never
-# hit this because starting each session by hand left enough incidental
-# delay for the controller to settle before trajectory_planner started;
-# this bringup chain runs faster/more automated and can race ahead of
-# that settle time. Same fix/convention as resources/scripts/shell/
-# wait_for_controllers.sh (generalized the same day to accept any
-# controller name, not just joint_state_broadcaster) — reimplemented here
-# via controller_manager_msgs/ListControllers directly (same reasoning as
-# _wait_for_planning_scene: the shell script isn't installed/reachable
-# from an install-space launch file).
+# not mean its controller_manager connection has finished activating
+# scaled_joint_trajectory_controller -- without this wait,
+# trajectory_planner's very first move_to_home_on_startup call can race
+# ahead of that settle time and get "Goal was rejected by server" from the
+# controller. Same fix/convention as resources/scripts/shell/
+# wait_for_controllers.sh (generalized to accept any controller name, not
+# just joint_state_broadcaster) -- reimplemented here via
+# controller_manager_msgs/ListControllers directly, since the shell script
+# isn't installed/reachable from an install-space launch file.
 REQUIRED_CONTROLLER_NAME = "scaled_joint_trajectory_controller"
 CONTROLLER_POLL_TIMEOUT_SEC = 60.0
 CONTROLLER_POLL_INTERVAL_SEC = 1.0

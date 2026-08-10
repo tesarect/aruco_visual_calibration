@@ -59,6 +59,9 @@ trusting it on real hardware.
 - [calibration_validation](./calibration_validation.md) — the sim-only node
   that automatically checks the broadcast calibration TF against
   simulation's own ground-truth camera TF.
+- [manual_bringup](./manual_bringup.md) — the ordered, per-node manual
+  startup sequence for the calibration stack (an alternative to
+  `visual_calibration_bringup`'s launch-native sequencing).
 
 ## Class-level docs
 

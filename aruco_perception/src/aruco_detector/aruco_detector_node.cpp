@@ -89,9 +89,9 @@ void drawCenterCrosshair(cv::Mat & image, int width, int height)
 
 void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
 {
-  // Live re-read (never cached in config_) so calibration_orchestrator_
-  // node's set_parameters("active", ...) call takes effect on the very
-  // next frame — see class doc comment for the classical/hybrid switch.
+  // Live re-read (never cached in config_) so a runtime set_parameters
+  // call from calibration_orchestrator_node takes effect on the next
+  // frame — see class doc comment for the classical/hybrid switch.
   if (!get_parameter("active").as_bool()) {
     return;
   }
@@ -106,9 +106,9 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
 
   cv_bridge::CvImageConstPtr cv_ptr;
   try {
-    // toCvCopy (not toCvShare) is required here: toCvShare only works when
-    // no actual pixel conversion is needed, but sim publishes rgb8 while
-    // ArUco detection needs mono8 — that conversion requires a copy.
+    // toCvCopy (not toCvShare): the source encoding (e.g. rgb8) generally
+    // differs from the mono8 ArUco detection needs, and that conversion
+    // requires an actual pixel copy.
     cv_ptr = cv_bridge::toCvCopy(msg, "mono8");
   } catch (const cv_bridge::Exception & e) {
     RCLCPP_ERROR_THROTTLE(
@@ -125,16 +125,15 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
   const auto found = std::find(marker_ids.begin(), marker_ids.end(), config_.marker_id);
   const bool marker_found = found != marker_ids.end();
 
-  // Both the overlay stream and the detections_2d stream are published
-  // EVERY frame regardless of marker_found (2026-07-23) — see class doc
-  // comment. Only the marker-specific drawing/fields differ.
+  // The overlay stream and the detections_2d stream are both published on
+  // every frame regardless of marker_found (see class doc comment); only
+  // the marker-specific drawing/fields differ.
   std::vector<std::vector<cv::Point2f>> single_marker_corners;
   std::vector<cv::Vec3d> rvecs, tvecs;
 
   if (!marker_found) {
-    // Edge-triggered: log once on the transition into "not visible", not
-    // every frame/every 5s for as long as it stays that way — see
-    // marker_was_visible_'s doc comment.
+    // Edge-triggered logging: fire once on the transition into
+    // "not visible" rather than every frame.
     if (!marker_was_visible_.has_value() || *marker_was_visible_) {
       RCLCPP_WARN(
         get_logger(), "Marker id %d not detected (%zu other marker(s) seen).",
@@ -144,8 +143,7 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
   } else {
     const size_t idx = static_cast<size_t>(std::distance(marker_ids.begin(), found));
 
-    // Edge-triggered: log once on the transition into "visible", not
-    // every frame — see marker_was_visible_'s doc comment.
+    // Edge-triggered logging: fire once on the transition into "visible".
     if (!marker_was_visible_.has_value() || !*marker_was_visible_) {
       RCLCPP_INFO(get_logger(), "Marker id %d detected.", config_.marker_id);
     }
@@ -153,15 +151,13 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
 
     single_marker_corners = {marker_corners[idx]};
 
-    // Corner/squareness diagnostic (2026-08-03) — a physically square
-    // marker's 4 detected corners should form 4 equal side lengths and 2
-    // equal diagonal lengths; logging these numbers (rather than only the
-    // overlay image) gives an objective, comparable-across-tuning-attempts
-    // measure of "how square are the corners actually landing" — see
-    // ArucoDetectorConfig's new corner_refinement_*/polygonal_approx_
-    // accuracy_rate fields, added specifically to be tuned against this.
-    // Corner order is corners[0..3] going around the marker (OpenCV
-    // convention: top-left, top-right, bottom-right, bottom-left).
+    // Corner/squareness diagnostic: a physically square marker's 4
+    // detected corners should form 4 equal side lengths and 2 equal
+    // diagonal lengths. Logging these gives an objective measure of corner
+    // detection quality, useful when tuning the corner_refinement_*/
+    // polygonal_approx_accuracy_rate fields on ArucoDetectorConfig. Corner
+    // order is corners[0..3] going around the marker (OpenCV convention:
+    // top-left, top-right, bottom-right, bottom-left).
     {
       const std::vector<cv::Point2f> & c = single_marker_corners[0];
       const double side01 = cv::norm(c[0] - c[1]);
@@ -205,10 +201,10 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
     pose_pub_->publish(pose_msg);
   }
 
-  // detections_2d: published every frame, empty detections[] when the
-  // marker isn't found — same "continuous stream, not a detected-vs-
-  // absent gap" convention yolo_marker_bridge_node.py already established
-  // for cup_holder/hole (see Detection2DArray.msg's header comment).
+  // detections_2d is published every frame with an empty detections[] when
+  // the marker isn't found, giving a continuous stream rather than gaps —
+  // matching the convention yolo_marker_bridge_node.py uses for
+  // cup_holder/hole detections on the same topic.
   visual_calibration_msgs::msg::Detection2DArray detections_msg;
   detections_msg.header = msg->header;
   if (marker_found) {
@@ -237,9 +233,8 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
 
   if (config_.publish_overlay_image) {
     // Separate bgr8 conversion (rather than reusing cv_ptr's mono8 buffer):
-    // drawAxis's red/green/blue lines and the yellow border are only
-    // distinguishable on a color image. Skipped entirely when the feature
-    // is off, so it costs nothing in the common (overlay-disabled) case.
+    // the drawn axes/border are only meaningful on a color image. Skipped
+    // entirely when the feature is disabled.
     cv_bridge::CvImagePtr overlay_ptr;
     try {
       overlay_ptr = cv_bridge::toCvCopy(msg, "bgr8");
@@ -259,12 +254,12 @@ void ArucoDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstShared
         overlay_ptr->image, camera_matrix_, distortion_coeffs_,
         rvecs[0], tvecs[0], config_.marker_length_m * 0.5f);
     }
-    // else: plain camera frame, no drawing — still published below, so
-    // the overlay stream never stops just because the marker is absent.
+    // else: plain camera frame, no drawing — still published below so the
+    // overlay stream never stops just because the marker is absent.
 
-    // Live re-read, same pattern as "active" — calibration_orchestrator_
-    // node sets this true for the duration of its image-based centering
-    // routine and false once it's done, no restart needed either way.
+    // Live re-read, same pattern as "active": calibration_orchestrator_node
+    // toggles this for the duration of its image-based centering routine
+    // with no restart required.
     if (get_parameter("show_centering_crosshair").as_bool()) {
       drawCenterCrosshair(overlay_ptr->image, image_width_, image_height_);
     }

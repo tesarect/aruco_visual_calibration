@@ -47,9 +47,9 @@ What it does, per image callback:
      detections_2d_topic (default /aruco_perception/detections_2d), every
      frame, containing whichever of "aruco_marker"/"cup_holder"/"hole"
      were present in the response:
-       - "aruco_marker" (added 2026-07-23): cx/cy = average of the 4
-         returned corners, confidence 1.0, bbox = corner min/max -- same
-         convention as aruco_detector_node.cpp's classical publish, so
+       - "aruco_marker": cx/cy = average of the 4 returned corners,
+         confidence 1.0, bbox = corner min/max -- same convention as
+         aruco_detector_node.cpp's classical publish, so
          calibration_orchestrator_node's image-based centering
          (centerOnMarkerUsingImage) works identically regardless of which
          detector is active. Published UNCONDITIONALLY (like cup_holder/
@@ -80,19 +80,19 @@ a summary for readers of this file only):
       "conf": 0.25,
       "skip_marker": false
     }
-  skip_marker (added 2026-07-27): optional, defaults false server-side if
-  omitted. When true, inference_server.py skips the ArUco marker cascade
-  entirely for this request (no "aruco_marker" key in the response) --
-  cup_holder/hole detection is UNAFFECTED either way, it was never part of
-  the cascade. This node decides skip_marker per-frame via
+  skip_marker: optional, defaults false server-side if omitted. When true,
+  inference_server.py skips the ArUco marker cascade entirely for this
+  request (no "aruco_marker" key in the response) -- cup_holder/hole
+  detection is unaffected either way, it was never part of the cascade.
+  This node decides skip_marker per-frame via
   marker_check_every_n_frames/marker_check_full_rate_when_active (see
-  __init__) -- the marker cascade was found live to cost 0.17-0.36s/request
-  even when no marker was present, the dominant cost in a ~0.4-0.6s total
-  /detect call, starving cup_holder/hole of a smoother detection stream.
-  Full-rate checking is always forced (skip_marker=false) whenever this
-  node's own "active" param is true, so calibration/auto-centering (both
-  of which DO need reliable per-attempt marker detection, unlike
-  cup_holder/hole) are never starved by this throttle.
+  __init__) -- the marker cascade costs a meaningful fraction of total
+  /detect call time even when no marker is present, so throttling it when
+  not needed leaves more of the request budget for cup_holder/hole
+  detection. Full-rate checking is always forced (skip_marker=false)
+  whenever this node's own "active" param is true, so calibration/
+  auto-centering (both of which do need reliable per-attempt marker
+  detection, unlike cup_holder/hole) are never starved by this throttle.
   Response body (each key entirely OMITTED, never null/empty, if that class
   was not found in the frame):
     {
@@ -118,12 +118,12 @@ a summary for readers of this file only):
   Detection2D -- NOT part of the inference_server.py response above, this
   is computed client-side, once per frame in _process_image, via
   YoloMarkerBridgeNode.assign_hole_quadrants() (a bound method, not a
-  module-level function, since 2026-07-30 -- it needs persistent per-node
-  state, self._prev_holes, to add cross-frame hysteresis; see its own doc
-  comment for the flicker bug this fixes and Detection2D.msg's
+  module-level function -- it needs persistent per-node state,
+  self._prev_holes, to add cross-frame hysteresis; see its own doc
+  comment for the flicker issue this addresses and Detection2D.msg's
   hole_number field comment for the base quadrant rule).
 
-Stabilized-overlay subscription (2026-07-27) -- a deliberate exception to
+Stabilized-overlay subscription -- a deliberate exception to
 this node's otherwise one-directional (image in, poses/detections out)
 data flow: also subscribes to depth_perception_node's
 visual_calibration_msgs/StablePositionArray (stable_positions_topic,
@@ -210,12 +210,13 @@ def rotation_matrix_to_quaternion(rotation_matrix):
 
 def pose_stamped_from_marker_result(image_msg, marker_result):
     """Builds a geometry_msgs/PoseStamped from one inference_server.py
-    "aruco_marker" result dict (rvec/tvec) -- extracted from
-    YoloMarkerBridgeNode.publish_marker_pose (2026-08-04) so
-    handle_detect_marker_once can build the SAME message shape to return in
-    a DetectMarkerOnce.srv response, without publishing it to marker_pose
-    (per-waypoint hybrid mode's whole point is NOT feeding the continuous
-    topic-driven consumers)."""
+    "aruco_marker" result dict (rvec/tvec) -- shared by
+    YoloMarkerBridgeNode.publish_marker_pose and
+    handle_detect_marker_once, so both build the same message shape;
+    handle_detect_marker_once returns it directly in a DetectMarkerOnce.srv
+    response instead of publishing it to marker_pose, since per-waypoint
+    hybrid mode's whole point is not feeding the continuous topic-driven
+    consumers."""
     rvec = np.array(marker_result["rvec"], dtype=float)
     tvec = np.array(marker_result["tvec"], dtype=float)
 
@@ -225,10 +226,9 @@ def pose_stamped_from_marker_result(image_msg, marker_result):
     pose_msg = PoseStamped()
     # Same convention as aruco_detector_node.cpp: reuse the incoming Image
     # message's own header (stamp + frame_id) rather than
-    # self.get_clock().now() -- matches this project's use_sim_time fix
-    # (see progress.md's 2026-07-08 entry / error-mitigation.md #16) and
-    # keeps frame_id as the camera's optical frame, exactly as the
-    # classical detector does.
+    # self.get_clock().now() -- keeps frame_id as the camera's optical
+    # frame, exactly as the classical detector does, and stamps correctly
+    # under use_sim_time.
     pose_msg.header = image_msg.header
     pose_msg.pose.position.x = float(tvec[0])
     pose_msg.pose.position.y = float(tvec[1])
@@ -240,13 +240,10 @@ def pose_stamped_from_marker_result(image_msg, marker_result):
     return pose_msg
 
 
-# assign_hole_quadrants was moved onto YoloMarkerBridgeNode itself
-# (2026-07-30, hole_number flicker fix) -- see
-# YoloMarkerBridgeNode.assign_hole_quadrants's own doc comment for why: it
-# now needs persistent per-node state (self._prev_holes) to add hysteresis
-# across frames, which a bare module-level function has no way to hold. Only
-# ever called from within this file (confirmed via grep), so this is a safe
-# in-file refactor -- no other module imports assign_hole_quadrants.
+# assign_hole_quadrants lives on YoloMarkerBridgeNode itself, not as a
+# module-level function -- see YoloMarkerBridgeNode.assign_hole_quadrants's
+# own doc comment for why: it needs persistent per-node state
+# (self._prev_holes) to add hysteresis across frames.
 
 
 class YoloMarkerBridgeNode(Node):
@@ -263,22 +260,17 @@ class YoloMarkerBridgeNode(Node):
             automatically_declare_parameters_from_overrides=True,
         )
 
-        # NOTE (2026-07-24, fixed a live crash): do NOT explicitly
-        # declare_parameter() any of these here -- automatically_declare_
-        # parameters_from_overrides=True above already auto-declares every
-        # parameter present in the --params-file yaml (yolo_marker_bridge_
-        # {sim,real}.yaml set every one of these), so an explicit
-        # declare_parameter() call for the same name throws
-        # rclpy.exceptions.ParameterAlreadyDeclaredException at
-        # construction time -- confirmed live, this crashed the node
-        # outright the first time it was actually run. Matches
-        # aruco_detector_node.cpp's own pattern (same auto-declare flag,
-        # zero explicit declare_parameter calls, only get_parameter reads)
-        # -- this file just hadn't been fixed to match it yet. If a NEW
-        # parameter not already in both yaml files is ever added here, it
-        # WILL need an explicit declare_parameter (yaml won't auto-declare
-        # what it doesn't mention) -- just keep it out of this list if it's
-        # already yaml-declared.
+        # Do not explicitly declare_parameter() any of these --
+        # automatically_declare_parameters_from_overrides=True above already
+        # auto-declares every parameter present in the --params-file yaml
+        # (yolo_marker_bridge_{sim,real}.yaml set every one of these), and an
+        # explicit declare_parameter() call for an already-declared name
+        # throws rclpy.exceptions.ParameterAlreadyDeclaredException at
+        # construction time. Matches aruco_detector_node.cpp's own pattern
+        # (same auto-declare flag, zero explicit declare_parameter calls,
+        # only get_parameter reads). A new parameter not already in both
+        # yaml files would need an explicit declare_parameter, since yaml
+        # won't auto-declare what it doesn't mention.
         # classical/hybrid switch -- default false (classical
         # aruco_detector_node is active by default). Re-read live via
         # get_parameter in image_callback, never cached, so
@@ -322,33 +314,31 @@ class YoloMarkerBridgeNode(Node):
         )
         self.jpeg_quality = int(self.get_parameter("jpeg_quality").value)
 
-        # hole_number flicker fix (2026-07-30) -- see
-        # assign_hole_quadrants's own doc comment for the full mechanism.
-        # hole_quadrant_hysteresis_px is a deadband margin (pixels, in the
-        # SAME frame the /detect response's cx/cy already come back in --
-        # i.e. post-rescale, full native-resolution pixel space, matching
-        # every other pixel-space field this node publishes) added around
-        # the ref_x/ref_y split lines: a previously-classified hole only
-        # flips to the other side of a line once it has crossed that line
-        # by MORE than this many pixels, not the instant it crosses zero.
-        # Sized relative to hole_min_radius_px/hole_max_radius_px
+        # See assign_hole_quadrants's own doc comment for the full
+        # mechanism. hole_quadrant_hysteresis_px is a deadband margin
+        # (pixels, in the same frame the /detect response's cx/cy already
+        # come back in -- i.e. post-rescale, full native-resolution pixel
+        # space, matching every other pixel-space field this node
+        # publishes) added around the ref_x/ref_y split lines: a
+        # previously-classified hole only flips to the other side of a
+        # line once it has crossed that line by more than this many
+        # pixels, not the instant it crosses zero. Sized relative to
+        # hole_min_radius_px/hole_max_radius_px
         # (cup_holder_detector_sim.yaml's sim-only classical-CV equivalent,
         # 4-40px) -- the only existing pixel-scale reference for "how big
         # is a hole" in this codebase; a hole's own radius is a reasonable
         # floor for "how far past the line is genuinely a new position vs.
         # detection noise jittering the same physical hole's reported
-        # centroid." Default 6px chosen as a small multiple of that floor
+        # centroid." Default 6px is a small multiple of that floor
         # (roughly 1.5x hole_min_radius_px) -- deliberately conservative
         # (favors stability over split-second re-classification accuracy
-        # right at a boundary) since a wrong-but-STABLE label lets
+        # right at a boundary) since a wrong-but-stable label lets
         # depth_perception_node's rolling-window filter converge, while a
-        # flickering label corrupts it outright (see this node's own
-        # module-level docstring / the task this fix was written for).
-        # Live-tunable (`ros2 param set /yolo_marker_bridge_node
-        # hole_quadrant_hysteresis_px <value>`) since the right value is a
-        # function of actual live jitter amplitude, not something to guess
-        # blind -- see assign_hole_quadrants's doc comment for how to tune
-        # it against real overlay/rviz observations.
+        # flickering label corrupts it outright. Live-tunable (`ros2 param
+        # set /yolo_marker_bridge_node hole_quadrant_hysteresis_px
+        # <value>`) since the right value is a function of actual live
+        # jitter amplitude -- see assign_hole_quadrants's doc comment for
+        # how to tune it against real overlay/rviz observations.
         self.hole_quadrant_hysteresis_px = float(
             self.get_parameter("hole_quadrant_hysteresis_px").value
         )
@@ -368,46 +358,41 @@ class YoloMarkerBridgeNode(Node):
         # is called, None if no cup_holder was in this frame's response.
         self._latest_cup_holder_bbox = None
 
-        # Detection-resolution downscaling (2026-07-28) -- confirmed live:
-        # this project's sim AND real environments are both CPU-only (no
-        # GPU, `nvidia-smi` unavailable on either), and YOLO inference is
-        # the genuine compute bottleneck (0.4-0.6s/request even with the
-        # marker cascade throttled) -- not a bug in any ROS-side code, a
-        # hardware/environment throughput ceiling. Extensive live parameter
-        # sweeps (confidence_threshold, marker_check_every_n_frames,
-        # jpeg_quality, rolling_window_size, stable_drift_threshold_m) all
-        # confirmed NOT to move the needle, since none of them reduce the
-        # actual per-request YOLO forward-pass cost. A smaller input image
-        # genuinely does: fewer pixels for the model to convolve over.
-        # 0 = disabled (send the frame at its native resolution, this
-        # node's original behavior) -- opt-in, not a silent default change.
-        # When set, ANY value > 0 also requires the corresponding rescale-
-        # back-to-native-resolution logic in _process_image/
-        # publish_detections_2d/publish_marker_pose below -- see
-        # scale_intrinsics_and_size()'s own doc comment for why this is
-        # handled entirely on THIS side, not inference_server.py's (that
-        # server already correctly trusts whatever camera_matrix/image
-        # size a caller sends, per aruco_pose.py's own scale_camera_matrix
-        # design -- confirmed by reading it directly, not assumed).
+        # Detection-resolution downscaling. This project's sim and real
+        # environments are both CPU-only, and YOLO inference is the
+        # genuine compute bottleneck (a hardware/environment throughput
+        # ceiling, not a ROS-side bug) -- other tuning knobs
+        # (confidence_threshold, marker_check_every_n_frames, jpeg_quality,
+        # rolling_window_size, stable_drift_threshold_m) don't reduce the
+        # actual per-request YOLO forward-pass cost, but a smaller input
+        # image genuinely does: fewer pixels for the model to convolve
+        # over. 0 = disabled (send the frame at its native resolution) --
+        # opt-in, not a silent default change. When set, any value > 0
+        # also requires the corresponding rescale-back-to-native-resolution
+        # logic in _process_image/publish_detections_2d/publish_marker_pose
+        # below -- see scale_intrinsics_and_size()'s own doc comment for
+        # why this is handled entirely on this side, not
+        # inference_server.py's (that server already trusts whatever
+        # camera_matrix/image size a caller sends, per aruco_pose.py's own
+        # scale_camera_matrix design).
         self.detect_max_width_px = int(
             self.get_parameter("detect_max_width_px").value
         )
 
-        # Marker-cascade throttling (2026-07-27) -- live-lab testing found
-        # inference_server.py's /detect spending 0.17-0.36s/request on the
-        # ArUco marker cascade alone, even when no marker was present,
-        # starving cup_holder/hole detection of a smoother/faster stream.
-        # Confirmed via a dedicated code-reading pass that
+        # Marker-cascade throttling. inference_server.py's /detect can
+        # spend a substantial fraction of total request time on the ArUco
+        # marker cascade alone, even when no marker is present, starving
+        # cup_holder/hole detection of a smoother/faster stream.
         # calibration_broadcaster_node's per-waypoint sampling (a single
         # blocking wait per waypoint, 5-8s timeout) tolerates this
         # throttle fine, but calibration_orchestrator_node's image-based
-        # auto-centering (an iterative rapid move+detect loop) does NOT --
+        # auto-centering (an iterative rapid move+detect loop) does not --
         # see marker_check_full_rate_when_active below for how that's kept
         # safe.
         #
-        # 1 = check every frame (this endpoint's original, unthrottled
-        # behavior) -- so this param defaults conservatively even before
-        # considering the "active" override below.
+        # 1 = check every frame (unthrottled) -- so this param defaults
+        # conservatively even before considering the "active" override
+        # below.
         self.marker_check_every_n_frames = int(
             self.get_parameter("marker_check_every_n_frames").value
         )
@@ -426,40 +411,35 @@ class YoloMarkerBridgeNode(Node):
         # image_callback's skip_marker computation below.
         self._frame_count = 0
 
-        # Drop-stale-frames guard (2026-07-27) -- confirmed live: the whole
-        # pipeline (overlay_image, detections_2d, stable_positions) was
-        # only updating at ~2.7Hz with uneven 0.02-0.67s gaps, all in
-        # lockstep, causing everything on the overlay to appear to
-        # blink/vanish together. Root cause: image_sub's
-        # MutuallyExclusiveCallbackGroup QUEUES every incoming image
-        # message while a previous image_callback invocation is still
-        # blocked on requests.post() to inference_server.py (bounded by
-        # request_timeout_sec, up to 8s on real) -- so by the time a
-        # queued frame's turn comes, it's already stale (a much newer
-        # camera frame has since arrived), but it still gets processed and
-        # published anyway, burning an entire inference cycle on outdated
-        # data. Since the true bottleneck is the YOLO model's actual
-        # compute time (confirmed via inference_server.py's own timing
-        # log: ~0.4-0.6s/request), no amount of ROS-side concurrency makes
-        # inference itself faster -- queuing stale frames only adds
-        # latency, it never lets the pipeline "catch up". Fix: if a
-        # request is already in flight when a new frame arrives, skip that
-        # frame immediately instead of waiting to process it later -- see
-        # image_callback's guard at its top.
+        # Drop-stale-frames guard. image_sub's MutuallyExclusiveCallbackGroup
+        # queues every incoming image message while a previous
+        # image_callback invocation is still blocked on requests.post() to
+        # inference_server.py (bounded by request_timeout_sec, up to 8s on
+        # real) -- so by the time a queued frame's turn comes, it's already
+        # stale (a much newer camera frame has since arrived), but without
+        # this guard it would still get processed and published anyway,
+        # burning an entire inference cycle on outdated data. Since the
+        # true bottleneck is the YOLO model's actual compute time, no
+        # amount of ROS-side concurrency makes inference itself faster --
+        # queuing stale frames only adds latency, it never lets the
+        # pipeline catch up. Instead: if a request is already in flight
+        # when a new frame arrives, skip that frame immediately instead of
+        # waiting to process it later -- see image_callback's guard at its
+        # top.
         self._request_in_flight = False
 
-        # Stabilized-overlay feed (2026-07-27) -- depth_perception_node
-        # publishes a continuous, gap-free "held position" per instance
-        # (see visual_calibration_msgs/StablePositionArray.msg) built from
-        # THIS node's own detections_2d stream. Subscribing back to it here
-        # is a deliberate exception to this node's otherwise one-directional
-        # data flow (image in, poses/detections out): the user explicitly
-        # wants ONE overlay image showing both this frame's raw YOLO boxes
-        # AND depth_perception's stabilized dots, rather than two separate
-        # images to compare. Kept as loosely coupled as that requirement
-        # allows: this node only ever reads the published message contract
-        # (px/py/drifted/etc.), never depth_perception's internal state, and
-        # degrades gracefully (silently draws nothing extra) if
+        # Stabilized-overlay feed. depth_perception_node publishes a
+        # continuous, gap-free "held position" per instance (see
+        # visual_calibration_msgs/StablePositionArray.msg) built from this
+        # node's own detections_2d stream. Subscribing back to it here is a
+        # deliberate exception to this node's otherwise one-directional
+        # data flow (image in, poses/detections out): it lets one overlay
+        # image show both this frame's raw YOLO boxes and
+        # depth_perception's stabilized dots, rather than two separate
+        # images to compare. Kept as loosely coupled as that requires: this
+        # node only ever reads the published message contract
+        # (px/py/drifted/etc.), never depth_perception's internal state,
+        # and degrades gracefully (silently draws nothing extra) if
         # depth_perception_node isn't running at all -- see
         # latest_stable_positions_callback/publish_overlay_image_msg.
         self.stable_positions_topic = self.get_parameter(
@@ -471,30 +451,27 @@ class YoloMarkerBridgeNode(Node):
             self.stable_positions_callback, 10,
         )
 
-        # "extras" overlay toggle (2026-07-28) -- the magenta/cyan
-        # stable_positions markers are OFF by default now (per explicit
-        # request to reduce visual complexity: "let's have only the green
-        # centroid marker") and only drawn when this is explicitly true --
+        # "extras" overlay toggle -- the magenta/cyan stable_positions
+        # markers are off by default (keeping only the green centroid
+        # marker) and only drawn when this is explicitly true --
         # live-toggleable, same get_parameter-every-frame pattern as
         # "active"/"show_centering_crosshair" elsewhere in this project, no
-        # restart needed. Eventually flippable from the web app's own
-        # "Extras" switch (see CalibrationPanel.tsx) via the standard ROS
-        # set_parameters service -- no new topic needed, since this only
-        # gates DRAWING of data already flowing on stable_positions_topic.
+        # restart needed. Flippable from the web app's own "Extras" switch
+        # (see CalibrationPanel.tsx) via the standard ROS set_parameters
+        # service -- no new topic needed, since this only gates drawing of
+        # data already flowing on stable_positions_topic.
         self.show_extras_markers = bool(
             self.get_parameter("show_extras_markers").value
         )
 
-        # Calibration-aware suppression (2026-07-28) -- confirmed live: the
-        # magenta/cyan stable markers (and, per user request, this SHOULD
-        # extend to the raw green marker too during calibration/centering)
-        # kept showing a HELD position while the arm physically blocked the
-        # camera's view mid-calibration, which read as "still detecting"
-        # when nothing fresh was actually being seen. Mirrors
-        # depth_perception_node's own calibration_paused_ pattern exactly
-        # (same topic, same phase check) -- kept independent rather than
-        # shared, since this node has its own separate reason to care
-        # (suppressing DRAWING here, not suppressing PROCESSING there).
+        # Calibration-aware suppression -- without this, the stable
+        # markers (and the raw green marker) would keep showing a held
+        # position while the arm physically blocked the camera's view
+        # mid-calibration, which reads as "still detecting" when nothing
+        # fresh is actually being seen. Mirrors depth_perception_node's
+        # own calibration_paused_ pattern (same topic, same phase check)
+        # -- kept independent rather than shared, since this node
+        # suppresses drawing here, not processing.
         self.auto_calibrate_status_topic = self.get_parameter(
             "auto_calibrate_status_topic"
         ).value
@@ -530,33 +507,25 @@ class YoloMarkerBridgeNode(Node):
         else:
             self.overlay_image_pub = None
 
-        # Separate callback groups (2026-07-24 fixed one live bug via
-        # MultiThreadedExecutor + a shared group for both subscriptions;
-        # 2026-07-27 fixed a SECOND live bug this introduced) -- see
-        # main()'s doc comment for the full MultiThreadedExecutor story
-        # (image_callback blocks on a synchronous HTTP request for up to
-        # request_timeout_sec, which under single-threaded spin also
-        # blocked set_parameters).
+        # Separate callback groups -- see main()'s doc comment for the
+        # full MultiThreadedExecutor rationale (image_callback blocks on a
+        # synchronous HTTP request for up to request_timeout_sec, which
+        # under single-threaded spin would also block set_parameters).
         #
-        # image_sub and camera_info_sub were originally put in ONE shared
-        # MutuallyExclusiveCallbackGroup on the theory that they "don't
-        # need to run concurrently with each other" -- confirmed live
-        # WRONG: a MutuallyExclusiveCallbackGroup queues every callback
-        # sharing it, including different callbacks on different topics.
-        # camera_info publishes far more often than image_callback (bounded
-        # by request_timeout_sec, up to 3s per frame) can keep up with, so
-        # every camera_info message queued behind whichever image_callback
-        # was in flight -- and since new ones keep arriving faster than
-        # image_callback drains the queue, camera_info_callback could be
-        # starved indefinitely. Confirmed live: "No camera_info received
-        # yet" repeating forever despite `ros2 topic echo` proving the
-        # topic itself was publishing fine the whole time.
+        # image_sub and camera_info_sub each need their own group rather
+        # than sharing one: a MutuallyExclusiveCallbackGroup queues every
+        # callback sharing it, including different callbacks on different
+        # topics. camera_info publishes far more often than image_callback
+        # (bounded by request_timeout_sec, up to 3s per frame) can keep up
+        # with, so sharing a group would let every camera_info message
+        # queue behind whichever image_callback is in flight, potentially
+        # starving camera_info_callback indefinitely.
         #
         # camera_info_callback is cheap (three numpy assignments, no I/O)
-        # and needs to run promptly/often -- it now gets its OWN group, so
+        # and needs to run promptly/often -- it gets its own group, so
         # it's never queued behind an in-flight image_callback. image_sub
-        # keeps its own group too (still separate from the node's default
-        # group, preserving the 2026-07-24 fix for set_parameters).
+        # keeps its own group too, separate from the node's default group
+        # (needed for set_parameters to remain responsive).
         self._image_callback_group = MutuallyExclusiveCallbackGroup()
         self._camera_info_callback_group = MutuallyExclusiveCallbackGroup()
         self.image_sub = self.create_subscription(
@@ -570,10 +539,10 @@ class YoloMarkerBridgeNode(Node):
             callback_group=self._camera_info_callback_group,
         )
 
-        # ~/detect_marker_once (2026-08-04) -- on-demand, single-shot
-        # hybrid detection for calibration_broadcaster_node's
-        # hybrid_per_waypoint_enabled mode (see DetectMarkerOnce.srv's own
-        # doc comment). Needs its OWN callback group, same reasoning as
+        # ~/detect_marker_once -- on-demand, single-shot hybrid detection
+        # for calibration_broadcaster_node's hybrid_per_waypoint_enabled
+        # mode (see DetectMarkerOnce.srv's own doc comment). Needs its own
+        # callback group, same reasoning as
         # image_sub/camera_info_sub's split above: handle_detect_marker_once
         # blocks (waiting on self._fresh_frame_event, then on a synchronous
         # requests.post()) for potentially several seconds, and must not be
@@ -663,20 +632,20 @@ class YoloMarkerBridgeNode(Node):
     def _send_detect_request(self, cv_image, skip_marker):
         """Shared request-building/POST/parse logic for one frame -- used
         by both _process_image (continuous mode) and
-        handle_detect_marker_once (per-waypoint on-demand mode, 2026-08-04),
-        so both send byte-identical requests to inference_server.py and
-        apply the exact same downscale/rescale correction, rather than two
-        divergent copies of this logic.
+        handle_detect_marker_once (per-waypoint on-demand mode), so both
+        send byte-identical requests to inference_server.py and apply the
+        exact same downscale/rescale correction, rather than two divergent
+        copies of this logic.
 
         Returns (result_dict, error_message) -- exactly one is None.
         result_dict is inference_server.py's parsed JSON response, already
         rescaled back to cv_image's true native resolution (a no-op if
         detect_max_width_px didn't trigger this frame).
         """
-        # Detection-resolution downscaling (2026-07-28) -- see
-        # detect_max_width_px's own __init__ comment for the full
-        # rationale. detect_image/detect_camera_matrix are what's actually
-        # SENT to inference_server.py; cv_image itself is left untouched
+        # Detection-resolution downscaling -- see detect_max_width_px's
+        # own __init__ comment for the full rationale. detect_image/
+        # detect_camera_matrix are what's actually sent to
+        # inference_server.py; cv_image itself is left untouched
         # (still needed at full resolution for the overlay draw in
         # _process_image's caller). rescale_factor is applied to every 2D
         # pixel field in the response before anything downstream ever sees
@@ -801,7 +770,7 @@ class YoloMarkerBridgeNode(Node):
         if self._waiting_for_fresh_frame:
             self._fresh_frame_event.set()
 
-        # Marker-cascade throttling decision (2026-07-27) -- see
+        # Marker-cascade throttling decision -- see
         # marker_check_every_n_frames/marker_check_full_rate_when_active's
         # own comments in __init__ for the full rationale. "active" is
         # re-read live here (not cached), matching the same fresh-read
@@ -826,18 +795,16 @@ class YoloMarkerBridgeNode(Node):
             )
             return
 
-        # Quadrant-label every "hole" entry ONCE per frame, here -- writes a
-        # "hole_number" key directly onto each result["hole"][i] dict so
+        # Quadrant-label every "hole" entry once per frame, here -- writes
+        # a "hole_number" key directly onto each result["hole"][i] dict so
         # publish_detections_2d/publish_overlay_image_msg below both read
-        # the SAME assignment rather than each independently re-deriving it.
-        # This single-call-per-frame structure is required (not just
-        # tidier) by the 2026-07-30 hysteresis fix: assign_hole_quadrants
-        # now advances self._prev_holes as persistent cross-frame state, so
-        # calling it twice within the same frame (as publish_overlay_image_msg
-        # used to, by rebuilding its own throwaway Detection2D list) would
-        # make the second call see the first call's own output as "the
-        # previous frame," silently corrupting the hysteresis memory every
-        # single frame. See assign_hole_quadrants's own doc comment for the
+        # the same assignment rather than each independently re-deriving
+        # it. This single-call-per-frame structure is required, not just
+        # tidier: assign_hole_quadrants advances self._prev_holes as
+        # persistent cross-frame state, so calling it twice within the
+        # same frame would make the second call see the first call's own
+        # output as "the previous frame," corrupting the hysteresis memory
+        # every frame. See assign_hole_quadrants's own doc comment for the
         # full mechanism.
         self._latest_cup_holder_bbox = (
             result["cup_holder"][0].get("bbox")
@@ -855,12 +822,11 @@ class YoloMarkerBridgeNode(Node):
 
         # Overlay: independent of "active" -- an operator debugging hybrid
         # mode still wants the visual confirmation even if this node isn't
-        # currently the one publishing marker_pose (see publish_overlay_image's
-        # declare_parameter comment above). Published whenever there's
-        # anything to draw -- aruco_marker corners/axes, per-hole quadrant
-        # labels, OR depth_perception's stabilized positions (2026-07-27) --
+        # currently the one publishing marker_pose. Published whenever
+        # there's anything to draw -- aruco_marker corners/axes, per-hole
+        # quadrant labels, or depth_perception's stabilized positions --
         # that last condition is why a stabilized dot can still be drawn/
-        # published even on a frame where THIS frame's result has neither
+        # published even on a frame where this frame's result has neither
         # aruco_marker nor hole at all.
         if self.overlay_image_pub is not None and (
             "aruco_marker" in result or "hole" in result
@@ -873,30 +839,29 @@ class YoloMarkerBridgeNode(Node):
         self.publish_detections_2d(msg, result)
 
     def handle_detect_marker_once(self, request, response):
-        """~/detect_marker_once (2026-08-04) -- see DetectMarkerOnce.srv's
-        own doc comment for the full rationale (calibration_broadcaster_
-        node's hybrid_per_waypoint_enabled mode). Waits for the NEXT camera
-        frame to arrive after this call started (not whatever frame was
-        already buffered — that could be stale by an arbitrary amount if
-        this node was otherwise idle, e.g. inference_server.py just got
-        SIGCONT'd and the caller wants a frame taken AFTER the arm settled
+        """~/detect_marker_once -- see DetectMarkerOnce.srv's own doc
+        comment for the full rationale (calibration_broadcaster_node's
+        hybrid_per_waypoint_enabled mode). Waits for the next camera frame
+        to arrive after this call started (not whatever frame was already
+        buffered — that could be stale by an arbitrary amount if this
+        node was otherwise idle, e.g. inference_server.py just got
+        SIGCONT'd and the caller wants a frame taken after the arm settled
         at this waypoint), then runs exactly one detection with
         skip_marker forced False (the per-waypoint caller wants the
-        cascade to actually run every time, regardless of the continuous-
-        mode marker_check_every_n_frames throttle — that throttle exists
-        to bound CONTINUOUS load, which is irrelevant here since this is
-        already a single on-demand call).
+        cascade to run every time, regardless of the continuous-mode
+        marker_check_every_n_frames throttle — that throttle exists to
+        bound continuous load, which is irrelevant for a single on-demand
+        call).
 
-        Does NOT publish to marker_pose/detections_2d at all -- per-waypoint
+        Does not publish to marker_pose/detections_2d at all -- per-waypoint
         hybrid mode's whole point is bypassing those continuous-topic
-        consumers, not feeding them an extra sample. DOES publish a
-        picture-in-picture update to overlay_image on success (2026-08-04,
-        see _publish_hybrid_pip_overlay) -- that one exception exists
-        purely so a human watching the live overlay feed can actually see
-        what the hybrid cascade is detecting during a real run, since
-        publish_overlay_image_msg's own continuous-mode drawing is
-        suppressed for the whole run (see that function's calibration-
-        suppression doc comment).
+        consumers, not feeding them an extra sample. Does publish a
+        picture-in-picture update to overlay_image on success (see
+        _publish_hybrid_pip_overlay) so a human watching the live overlay
+        feed can see what the hybrid cascade is detecting during a real
+        run, since publish_overlay_image_msg's own continuous-mode
+        drawing is suppressed for the whole run (see that function's
+        calibration-suppression doc comment).
         """
         # Reset before waiting -- a stale set() from a previous call (or
         # from _process_image running concurrently while no one was
@@ -934,8 +899,8 @@ class YoloMarkerBridgeNode(Node):
             return response
 
         if "aruco_marker" not in result:
-            # aruco_marker_failure_reason (2026-08-04) distinguishes WHY --
-            # "no_yolo_bbox" (YOLO never found a candidate box at all) vs.
+            # aruco_marker_failure_reason distinguishes why -- "no_yolo_bbox"
+            # (YOLO never found a candidate box at all) vs.
             # "no_classical_match" (YOLO found a box, but classical
             # detection failed on every enhancement variant tried within
             # it) -- see inference_server.py's own /detect handler and
@@ -959,24 +924,22 @@ class YoloMarkerBridgeNode(Node):
         return response
 
     def _publish_hybrid_pip_overlay(self, image_msg, cv_image, marker_result):
-        """Picture-in-picture (2026-08-04): composites the SAME corner-
-        annotated cascade crop this call is about to return in
-        cascade_image_b64 (drawn once, at the actual moment of detection,
-        inside aruco_pose.py's estimate_marker_pose -- see that function's
-        own doc comment) into the top-right corner of the live
-        /aruco_perception/overlay_image
-        stream, so a viewer can actually SEE the hybrid cascade's
-        corner-detection quality during a real ~/calibrate run --
-        previously invisible entirely, since publish_overlay_image_msg
-        (the continuous-mode overlay path) unconditionally suppresses ALL
-        drawing while self._calibration_running is true (see that
-        function's own doc comment), and this on-demand path never
-        published to overlay_image at all before this change. Only ever
-        called from handle_detect_marker_once's success path -- one PiP
-        update per waypoint, not continuous; the box will visibly hold
-        between waypoints until the next detection replaces it, which is
-        expected given hybrid mode is inherently once-per-waypoint, not
-        per-frame.
+        """Picture-in-picture: composites the same corner-annotated
+        cascade crop this call is about to return in cascade_image_b64
+        (drawn once, at the actual moment of detection, inside
+        aruco_pose.py's estimate_marker_pose -- see that function's own
+        doc comment) into the top-right corner of the live
+        /aruco_perception/overlay_image stream, so a viewer can see the
+        hybrid cascade's corner-detection quality during a real
+        ~/calibrate run -- otherwise invisible, since
+        publish_overlay_image_msg (the continuous-mode overlay path)
+        unconditionally suppresses all drawing while
+        self._calibration_running is true (see that function's own doc
+        comment). Only ever called from handle_detect_marker_once's
+        success path -- one PiP update per waypoint, not continuous; the
+        box will visibly hold between waypoints until the next detection
+        replaces it, which is expected given hybrid mode is inherently
+        once-per-waypoint, not per-frame.
 
         Best-effort: any failure here is logged, never raised -- this is a
         pure visualization aid, must never be able to fail the actual
@@ -1048,52 +1011,50 @@ class YoloMarkerBridgeNode(Node):
         rolls or views from a mirrored/opposite angle -- so a plain 2-axis
         image-space split (above/below a horizontal line, left/right of a
         vertical line) is robust, unlike on a moving wrist camera where it
-        wouldn't be. This part of the design is UNCHANGED from the original
-        version of this function.
+        wouldn't be.
 
         Reference point for the horizontal/vertical split: the cup_holder's
         own detected bbox center, if a cup_holder is currently cached (see
         below), else the centroid of this frame's own hole detections (mean
         cx, mean cy) -- still a reasonable reference since holes are
-        arranged around the cup_holder. NOTE: reading self._latest_cup_holder_bbox
-        here (rather than a `result` dict as the original signature took)
-        is a deliberate narrowing -- this method only ever needs the bbox,
-        never the rest of the /detect response, so cup_holder_bbox is
-        threaded through explicitly by the caller instead.
+        arranged around the cup_holder. Reading self._latest_cup_holder_bbox
+        here (rather than the full /detect response dict) is a deliberate
+        narrowing -- this method only ever needs the bbox, so
+        cup_holder_bbox is threaded through explicitly by the caller
+        instead.
 
-        Hysteresis fix (2026-07-30) -- the flicker bug this was written
-        for: with NO cross-frame memory, a hole sitting near either
-        reference line gets independently reclassified from scratch every
-        frame, so ordinary per-frame detection noise in cx/cy (a few
-        pixels, same source as any YOLO bbox-center jitter) can flip which
-        side of ref_x/ref_y it lands on from one frame to the next, even
-        though the physical hole never moved. depth_perception_node's
-        rolling_windows_ keys its drift-gated median filter by
-        (class_name, hole_number) -- if that key's identity itself
-        flickers between two different physical holes, the filter mixes
-        position samples from two different objects into one "instance,"
-        corrupting it. (Confirmed sibling bug/fix: sim's
-        cup_holder_detector_node.cpp::assignHoleQuadrants() got its own fix
-        for a related but DISTINCT problem this same day -- an ellipse-
-        fit-distortion issue specific to sim's wrist-camera viewing angle,
-        not this frame-to-frame flicker mechanism; that fix does not apply
-        here and this one does not apply there, per that function's own
-        doc comment.)
+        Cross-frame hysteresis: with no cross-frame memory, a hole sitting
+        near either reference line would get independently reclassified
+        from scratch every frame, so ordinary per-frame detection noise in
+        cx/cy (a few pixels, same source as any YOLO bbox-center jitter)
+        could flip which side of ref_x/ref_y it lands on from one frame to
+        the next, even though the physical hole never moved.
+        depth_perception_node's rolling_windows_ keys its drift-gated
+        median filter by (class_name, hole_number) -- if that key's
+        identity flickers between two different physical holes, the
+        filter mixes position samples from two different objects into one
+        "instance," corrupting it. (sim's own
+        cup_holder_detector_node.cpp::assignHoleQuadrants() addresses a
+        related but distinct problem -- an ellipse-fit-distortion issue
+        specific to sim's wrist-camera viewing angle, not this
+        frame-to-frame flicker mechanism; that fix does not apply here and
+        this one does not apply there, per that function's own doc
+        comment.)
 
-        Fix mechanics: nearest-centroid-match this frame's holes against
+        Mechanics: nearest-centroid-match this frame's holes against
         self._prev_holes (last frame's already-decided {"cx","cy",
         "hole_number"} dicts), then apply a pixel deadband
         (hole_quadrant_hysteresis_px) around each reference line -- a
         matched hole only flips to the other side of a line if its new
-        position crosses that line by MORE than the deadband, not the
+        position crosses that line by more than the deadband, not the
         instant it crosses zero. An unmatched hole (no previous-frame hole
         within reasonable range -- practically: this is the first frame
         with any holes at all, or self._prev_holes was empty) has no prior
         label to hold onto, so it's classified by the plain rule with no
-        hysteresis applied, same as the original behavior.
+        hysteresis applied.
 
         Nearest-centroid matching (rather than e.g. matching by whichever
-        hole_number a candidate WOULD get under the plain rule) is used
+        hole_number a candidate would get under the plain rule) is used
         because a hole flickering between two labels is exactly the
         scenario where "what label would the plain rule assign" is
         unreliable -- centroid position is continuous frame-to-frame even
@@ -1103,7 +1064,7 @@ class YoloMarkerBridgeNode(Node):
         skipping any pair where either side is already claimed) rather
         than each hole independently taking its own single nearest
         neighbor -- the latter would let two different current-frame holes
-        both match the SAME previous-frame hole (e.g. if hole A moves
+        both match the same previous-frame hole (e.g. if hole A moves
         closer to hole B's old position than to its own old position),
         corrupting one hole's hysteresis anchor with another physical
         hole's history. Not the full Hungarian/optimal assignment: at most
@@ -1113,19 +1074,18 @@ class YoloMarkerBridgeNode(Node):
         practice, and stays fast (this runs every frame -- not worth
         adding a scipy dependency for at this scale; see
         rotation_matrix_to_quaternion's own doc comment for this file's
-        general stance on new dependencies this close to the deadline).
+        general stance on new dependencies).
         """
         if not hole_dicts:
             # No holes this frame -- reset the memory rather than leaving a
-            # stale self._prev_holes around. Deliberate: an empty frame (or
-            # a run of them) means whatever hysteresis anchor existed is no
-            # longer trustworthy anyway (the physical scene may have
-            # changed by the time holes reappear), and holding onto stale
-            # positions risks matching a REAPPEARING hole to a stale,
-            # unrelated (cx, cy) by nearest-centroid distance. Starting
-            # fresh (no hysteresis on the very next frame with holes) is
-            # the safer failure mode -- matches this function's original,
-            # pre-fix behavior for that first frame either way.
+            # stale self._prev_holes around. An empty frame (or a run of
+            # them) means whatever hysteresis anchor existed is no longer
+            # trustworthy anyway (the physical scene may have changed by
+            # the time holes reappear), and holding onto stale positions
+            # risks matching a reappearing hole to a stale, unrelated
+            # (cx, cy) by nearest-centroid distance. Starting fresh (no
+            # hysteresis on the next frame with holes) is the safer
+            # failure mode.
             self._prev_holes = None
             return
 
@@ -1216,16 +1176,12 @@ class YoloMarkerBridgeNode(Node):
         cup_holder/hole were requested by depth-perception (its own
         hole/cupholder 3D pose pipeline looks up depth at each detection's
         cx/cy, using bbox for a more robust multi-pixel sample).
-        aruco_marker was added 2026-07-23 so
-        calibration_orchestrator_node's image-based centering
-        (centerOnMarkerUsingImage) works identically in hybrid mode as in
-        classical mode -- that method only ever reads the marker's pixel
-        centroid via this topic's "aruco_marker" class_name entry (see
-        ArucoDetectorNode::imageCallback's matching classical-side publish,
-        aruco_detector_node.cpp), which this node never emitted before,
-        silently making auto-centering fail/time out whenever hybrid mode
-        was active (confirmed via calibration_orchestrator_node.hpp's own
-        "classical detector only for now" doc comment, now resolved).
+        aruco_marker is included so calibration_orchestrator_node's
+        image-based centering (centerOnMarkerUsingImage) works identically
+        in hybrid mode as in classical mode -- that method only ever reads
+        the marker's pixel centroid via this topic's "aruco_marker"
+        class_name entry (see ArucoDetectorNode::imageCallback's matching
+        classical-side publish, aruco_detector_node.cpp).
         Always publishes, every frame, even with an empty detections[]
         when nothing was found -- a continuous stream consumers filter/vote
         over, not a detected-vs-absent gap they'd need to distinguish from
@@ -1267,12 +1223,11 @@ class YoloMarkerBridgeNode(Node):
                 # "hole" entries: read the "hole_number" already written
                 # onto this SAME dict by _process_image's single
                 # assign_hole_quadrants call for this frame (see that
-                # method's own doc comment for the 2026-07-30 hysteresis
-                # fix this supports -- calling assign_hole_quadrants a
-                # second time here, as this file used to, would corrupt
-                # its cross-frame memory). cup_holder/aruco_marker: left at
-                # 0 (unset/not-applicable) -- only one of each ever exists
-                # in frame, no ambiguity to label.
+                # method's own doc comment -- calling assign_hole_quadrants
+                # a second time here would corrupt its cross-frame
+                # memory). cup_holder/aruco_marker: left at 0
+                # (unset/not-applicable) -- only one of each ever exists in
+                # frame, no ambiguity to label.
                 det.hole_number = int(d.get("hole_number", 0)) if class_name == "hole" else 0
                 array_msg.detections.append(det)
 
@@ -1294,14 +1249,14 @@ class YoloMarkerBridgeNode(Node):
         rather than downstream in a consumer. Draws on a COPY of cv_image
         (never mutates the frame used for the /detect request above).
 
-        Calibration/self-centering suppression (2026-07-28): while
+        Calibration/self-centering suppression: while
         self._calibration_running is true (an ~/auto_calibrate run is
         actively in progress, including its auto-centering stage -- see
-        auto_calibrate_status_callback), NO markers of any kind are drawn
-        -- confirmed live that a HELD/stable marker looked indistinguishable
+        auto_calibrate_status_callback), no markers of any kind are drawn.
+        Without this, a held/stable marker would look indistinguishable
         from a genuinely fresh detection while the arm physically blocked
         the camera's view mid-calibration, misleadingly reading as "still
-        detecting". The plain camera frame still publishes underneath (same
+        detecting." The plain camera frame still publishes underneath (same
         "never stop the stream, just stop drawing on it" convention as the
         marker-not-found case below) so a viewer doesn't see a frozen image,
         just a temporarily plain one.
@@ -1342,14 +1297,12 @@ class YoloMarkerBridgeNode(Node):
         if "hole" in result:
             # Reads the SAME "hole_number" already written onto each
             # result["hole"][i] dict by _process_image's single
-            # assign_hole_quadrants call for this frame -- does NOT call it
-            # again here. Pre-2026-07-30 this function recomputed its own
-            # throwaway quadrant assignment independently; that became
-            # actively wrong once assign_hole_quadrants started advancing
-            # persistent hysteresis state (self._prev_holes), since a
-            # second same-frame call would have seen the first call's own
+            # assign_hole_quadrants call for this frame -- does not call it
+            # again here. A second same-frame call would corrupt
+            # assign_hole_quadrants' persistent hysteresis state
+            # (self._prev_holes), since it would see the first call's own
             # output as "the previous frame" -- see _process_image's own
-            # comment on why this is now computed exactly once per frame.
+            # comment on why this is computed exactly once per frame.
             for d in result["hole"]:
                 label = str(d.get("hole_number", 0))
                 cx, cy = float(d.get("cx", 0.0)), float(d.get("cy", 0.0))
@@ -1368,23 +1321,23 @@ class YoloMarkerBridgeNode(Node):
                 )
                 cv2.circle(overlay, (int(cx), int(cy)), 4, (0, 255, 0), -1)
 
-        # depth_perception_node's stabilized positions (2026-07-27) --
-        # drawn in a DISTINCT color (cyan/magenta) from the green raw-YOLO
-        # markers above, specifically so the two are visually
-        # distinguishable on one image: this is the "held last known
-        # position" the flicker-fix mechanism produces, not this frame's
-        # raw detection. Drawn regardless of whether "hole"/"aruco_marker"
-        # were present in THIS frame's result at all -- that's the whole
-        # point of subscribing to a continuous stream instead of deriving
-        # this from `result` -- so a stabilized dot keeps showing even on
-        # a frame where YOLO found nothing. No-op (nothing extra drawn) if
-        # depth_perception_node has never published anything yet.
+        # depth_perception_node's stabilized positions -- drawn in a
+        # distinct color (cyan/magenta) from the green raw-YOLO markers
+        # above, so the two are visually distinguishable on one image:
+        # this is the "held last known position" the flicker-fix
+        # mechanism produces, not this frame's raw detection. Drawn
+        # regardless of whether "hole"/"aruco_marker" were present in this
+        # frame's result at all, since that's the point of subscribing to
+        # a continuous stream instead of deriving this from `result` -- a
+        # stabilized dot keeps showing even on a frame where YOLO found
+        # nothing. No-op (nothing extra drawn) if depth_perception_node
+        # has never published anything yet.
         #
-        # Gated behind show_extras_markers (2026-07-28, default OFF) -- per
-        # explicit request to reduce visual complexity ("let's have only
-        # the green centroid marker") -- live re-read every frame (never
-        # cached), same pattern as "active", so a future web "Extras"
-        # switch takes effect on the very next frame with no restart.
+        # Gated behind show_extras_markers (default off), keeping only the
+        # green centroid marker unless explicitly enabled -- live re-read
+        # every frame (never cached), same pattern as "active", so a web
+        # "Extras" switch takes effect on the very next frame with no
+        # restart.
         self.show_extras_markers = bool(self.get_parameter("show_extras_markers").value)
         if self.show_extras_markers and self._latest_stable_positions is not None:
             for position in self._latest_stable_positions.positions:
@@ -1424,19 +1377,16 @@ class YoloMarkerBridgeNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = YoloMarkerBridgeNode()
-    # MultiThreadedExecutor, not plain rclpy.spin() (2026-07-24, fixed a
-    # live bug) -- image_callback blocks on a synchronous requests.post()
-    # to inference_server.py for up to request_timeout_sec (currently 3s,
-    # see yolo_marker_bridge_{sim,real}.yaml). Under single-threaded spin,
-    # that blocks EVERY other callback on this node too, including the
-    # ROS-standard set_parameters service calibration_orchestrator_node's
-    # ~/set_detector_mode uses to flip "active" -- confirmed live: that
-    # call timed out (orchestrator's own 2s wait, shorter than this node's
-    # 3s worst-case block) with "Failed to activate yolo_marker_bridge_node:
-    # timed out waiting for response" even though the node was genuinely
-    # up and healthy the whole time. A multi-threaded executor lets the
-    # parameter-service callback run concurrently on a different thread
-    # instead of queueing behind an in-flight HTTP request.
+    # MultiThreadedExecutor, not plain rclpy.spin(): image_callback blocks
+    # on a synchronous requests.post() to inference_server.py for up to
+    # request_timeout_sec (currently 3s, see
+    # yolo_marker_bridge_{sim,real}.yaml). Under single-threaded spin,
+    # that would block every other callback on this node too, including
+    # the ROS-standard set_parameters service
+    # calibration_orchestrator_node's ~/set_detector_mode uses to flip
+    # "active". A multi-threaded executor lets the parameter-service
+    # callback run concurrently on a different thread instead of queueing
+    # behind an in-flight HTTP request.
     executor = rclpy.executors.MultiThreadedExecutor()
     executor.add_node(node)
     try:

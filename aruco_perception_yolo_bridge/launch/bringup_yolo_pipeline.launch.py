@@ -1,17 +1,18 @@
-"""NEW, additive file — does not replace or modify yolo_marker_bridge.launch.py,
-start_inference_server.sh, or wait_for_inference_server.sh, all left
-untouched. See visual_calibration_moveit/launch/bringup_full_sim_README.md
-(and bringup_full_real_README.md) for the full staged-bringup design this
-file is part of.
+"""Combines inference_server.py + yolo_marker_bridge_node into one launch
+file, additive alongside yolo_marker_bridge.launch.py,
+start_inference_server.sh, and wait_for_inference_server.sh (none of which
+this file replaces or modifies). See
+visual_calibration_moveit/launch/bringup_full_sim_README.md (and
+bringup_full_real_README.md) for the full staged-bringup design this file
+is part of.
 
-Combines inference_server.py + yolo_marker_bridge_node into one launch file.
-inference_server.py is NOT a ROS node (plain Flask process inside
-~/yolo_venv, never imports rclpy — see start_inference_server.sh's header
-and error-mitigation.md #15), so it cannot be started via launch_ros's Node
-action at all — started here via ExecuteProcess instead, invoking the
-venv's python3 interpreter directly (NOT `source .../activate`, which is a
-shell-only construct ExecuteProcess doesn't get for free without wrapping
-in `bash -c`).
+inference_server.py is not a ROS node (plain Flask process inside
+~/yolo_venv, never imports rclpy — see start_inference_server.sh's
+header), so it cannot be started via launch_ros's Node action at all --
+started here via ExecuteProcess instead, invoking the venv's python3
+interpreter directly (not `source .../activate`, which is a shell-only
+construct ExecuteProcess doesn't get for free without wrapping in
+`bash -c`).
 
 Readiness gate mirrors wait_for_inference_server.sh: poll GET
 http://127.0.0.1:8601/health for `"status": "ok"` in the response body,
@@ -37,9 +38,7 @@ from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.substitutions import FindPackageShare
 
 
-# Moved 8600 -> 8601 (2026-07-28) -- a stale, never-killed old
-# inference_server.py silently squatted on 8600. Must match
-# YOLO-pipeline/config/server_{sim,real}.yaml's own port.
+# Must match YOLO-pipeline/config/server_{sim,real}.yaml's own port.
 HEALTH_URL = "http://127.0.0.1:8601/health"
 INFERENCE_SERVER_WAIT_TIMEOUT_SEC = 30.0
 INFERENCE_SERVER_POLL_INTERVAL_SEC = 1.0

@@ -27,13 +27,13 @@ together, solve for the one unknown link (`camera ↔ base_link`).
 
 ```mermaid
 sequenceDiagram
-    participant User as Caller (CLI/web)
+    participant Orch as calibration_orchestrator_node
     participant CB as calibration_broadcaster_node
     participant TP as trajectory_planner
     participant Arm as UR3e arm
     participant Det as aruco_detector_node
 
-    User->>CB: ~/calibrate action goal
+    Orch->>CB: ~/calibrate action goal (empty)
     CB->>TP: ~/get_polygon_waypoints (read-only, no motion)
     TP-->>CB: list of waypoint poses
 
@@ -45,13 +45,24 @@ sequenceDiagram
         CB->>Det: wait for a FRESH marker_pose
         Det-->>CB: camera -> marker pose
         CB->>CB: chain with base_link -> marker (TF)<br/>= one sample of base_link -> camera
-        CB-->>User: feedback (samples_collected/total)
+        CB-->>Orch: feedback (samples_collected/total)
+        Orch-->>Orch: relay as AutoCalibrate::Feedback
     end
 
     CB->>CB: average all samples (position + orientation)
-    CB->>User: result (success, max/mean spread)
+    CB-->>Orch: Calibrate::Result (success, max/mean spread)
     CB->>CB: broadcast static TF base_link -> camera
 ```
+
+`calibration_orchestrator_node` is the typical caller shown above — it is
+an action client of `~/calibrate` (see
+[orchestrator.md](./orchestrator.md)) as one step of its own
+`~/auto_calibrate` sequence, relaying `Calibrate`'s feedback/result into
+its own `AutoCalibrate` feedback/result. `~/calibrate` remains a normal,
+independently-callable action server in its own right — nothing about it
+requires going through the orchestrator, and it's commonly called directly
+for manual/debug runs (see `startcalibration` in
+[manual_bringup.md](./manual_bringup.md)).
 
 ## Step by step
 

@@ -1,8 +1,8 @@
-# Moves the arm to a LIVE-looked-up TF frame — "cup_holder" or
+# Moves the arm to a live-looked-up TF frame — "cup_holder" or
 # "hole_1".."hole_4", the exact child_frame_id names
-# depth_perception_node::broadcastInstanceTfs() publishes on /tf (2026-07-29)
-# — NOT a static preset_poses_{sim,real}.yaml entry, since these positions
-# are only known once calibration + depth-perception have actually detected
+# depth_perception_node::broadcastInstanceTfs() publishes on /tf — not a
+# static preset_poses_{sim,real}.yaml entry, since these positions are
+# only known once calibration + depth-perception have actually detected
 # them, and would go stale in a YAML file if the camera/table setup ever
 # changes. Looks up move_group's own planning frame (base_link) ->
 # instance_name via TF at the moment this is called (fresh every time, no

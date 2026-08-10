@@ -1,15 +1,10 @@
-"""Top-level staged bringup, sim variant, Python form. NEW, additive file —
-does not replace or modify anything; sim_tmux_base.sh/sim_tmux_trajcal.sh
-and all per-package launch files remain fully independent and untouched.
-See bringup_full_sim_README.md (same directory) for the full design and
-the dependency-chain diagram this file encodes.
+"""Top-level staged bringup for simulation: orchestrator pipeline and YOLO
+perception pipeline from a single `ros2 launch` call.
 
-Does NOT start Gazebo or move_group — those come from
+Does not start Gazebo or move_group — those come from
 the_construct_office_gazebo / sim_ur3e_moveit_config, neither a
-visual_calibration/ package, so out of scope for this staged-bringup pass
-(same as today: start the base session — or just Gazebo + move_group
-manually — first, THEN this file). Everything from planning_scene_setup
-onward is covered:
+visual_calibration/ package. Start those first, then this file. Full
+dependency chain encoded by the includes below:
 
   bringup_orchestrator_pipeline.launch.py (this include)
     -> bringup_moveit_pipeline.launch.py
@@ -28,14 +23,6 @@ onward is covered:
     -> [gate: inference_server.py /health up]
     -> [gate: move_group up]
     -> yolo_marker_bridge.launch.py
-
-Compare against bringup_full_sim.xml (same directory, same sequence) — see
-that file's own header for the tradeoff this pair exists to let you check
-empirically (XML <include> has no cross-include readiness-waiting
-mechanism; every gate here already lives inside the included files
-themselves, so in principle both variants behave identically, but this is
-exactly the thing to verify side by side before trusting either as a
-replacement for the tmux-script chain).
 """
 
 from launch import LaunchDescription

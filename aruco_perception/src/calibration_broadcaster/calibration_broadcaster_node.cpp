@@ -63,13 +63,10 @@ CalibrationBroadcasterNode::CalibrationBroadcasterNode()
     create_client<visual_calibration_msgs::srv::SignalInferenceServer>(
     "/calibration_orchestrator_node/signal_inference_server");
 
-  // Which of kSumNormalize/kMarkley selectAveragingMethod() actually picked
-  // (2026-08-03) — added after discovering neither the raw priority values
-  // nor the resulting method were logged anywhere, making a test run's log
-  // alone insufficient to confirm which averaging method it actually
-  // exercised (e.g. a "markley_priority-1" test run silently falling back
-  // to kSumNormalize if orientation_sum_normalize_priority wasn't also set
-  // to 0 — see selectAveragingMethod's own tie-break: sum_normalize wins
+  // Logs which of kSumNormalize/kMarkley selectAveragingMethod() actually
+  // picked, along with the raw priorities, so a captured log alone is
+  // enough to confirm which averaging method a given run exercised — see
+  // selectAveragingMethod's own tie-break rule (sum_normalize wins
   // whenever its priority is <= markley's).
   RCLCPP_INFO(
     get_logger(),
@@ -118,36 +115,27 @@ void CalibrationBroadcasterNode::handleAccepted(
     goal_handle}.detach();
 }
 
-// Guarantees two things run on EVERY exit path out of executeCalibration
-// (2026-08-04) — that function has several early `return`s on failure
-// (service unavailable, sample timeout, phase failure, cancellation) in
-// addition to its normal success path ending in finishCalibration();
-// inserting cleanup calls before every individual return would be fragile
-// (easy to miss one on a future edit) — a destructor-based guard makes it
-// structurally impossible to skip instead:
-// 1. saveDebugImageGrid() — per hybrid_per_waypoint_enabled's design
-//    ("whatever was collected before a failure is still worth saving").
-// 2. Resume inference_server.py if THIS run itself was in hybrid mode
-//    (isHybridPerWaypointEnabled(), captured at construction time — see
-//    that flag's own comment on why a captured snapshot, not a live
-//    re-check, is used here) — per-waypoint bracketing always leaves the
-//    model SIGSTOPped after its last sample; without this, continuous
-//    cup_holder/hole detection (yolo_marker_bridge_node's own
-//    image_callback, independent of this hybrid mechanism) would silently
-//    stop working after every hybrid calibration run, since it keeps
-//    calling into a paused process. Not gated behind
-//    isHybridPerWaypointEnabled() again here (a live re-check) — the web
-//    switch could have flipped mid-run; this guard's job is to clean up
-//    whatever state THIS run itself left behind, not to reflect
-//    whatever the CURRENT live setting happens to be by the time it runs.
+// RAII guard that guarantees two things run on every exit path out of
+// executeCalibration (that function has several early returns on failure
+// — service unavailable, sample timeout, phase failure, cancellation — in
+// addition to its normal success path ending in finishCalibration()):
+// 1. saveDebugImageGrid() — whatever was collected before a failure is
+//    still worth saving.
+// 2. Resume inference_server.py if this run itself was in hybrid mode
+//    (isHybridPerWaypointEnabled(), captured at construction time so the
+//    guard cleans up state this specific run left behind, not whatever
+//    the live setting happens to be by the time it runs) — per-waypoint
+//    bracketing always leaves the model SIGSTOPped after its last sample;
+//    without this, continuous cup_holder/hole detection
+//    (yolo_marker_bridge_node's own image_callback, independent of this
+//    hybrid mechanism) would silently stop working after every hybrid
+//    calibration run, since it keeps calling into a paused process.
 //
-// Declared directly in namespace aruco_perception (NOT an anonymous
-// namespace, unlike this file's other local helpers) so its friend
-// declaration inside CalibrationBroadcasterNode (see that class's own
-// comment) actually names the SAME type — an anonymous-namespace
-// definition here would be a distinct type from the one the friend
-// declaration forward-declares in the enclosing namespace, silently
-// failing to grant access (confirmed via a live compile error).
+// Declared directly in namespace aruco_perception, not an anonymous
+// namespace like this file's other local helpers, so its friend
+// declaration inside CalibrationBroadcasterNode names the same type — an
+// anonymous-namespace definition here would be a distinct type from the
+// one the friend declaration forward-declares in the enclosing namespace.
 struct EndOfRunCleanupGuard
 {
   EndOfRunCleanupGuard(CalibrationBroadcasterNode * node, bool was_hybrid_this_run)
@@ -166,10 +154,9 @@ struct EndOfRunCleanupGuard
 void CalibrationBroadcasterNode::executeCalibration(
   const std::shared_ptr<GoalHandleCalibrate> goal_handle)
 {
-  // Captured ONCE here, at the very start — see EndOfRunCleanupGuard's own
-  // doc comment for why this snapshot (not a live re-check in the
-  // destructor) is what decides whether to resume inference_server.py at
-  // the end.
+  // Captured once, at the start — see EndOfRunCleanupGuard for why this
+  // snapshot (not a live re-check in the destructor) decides whether to
+  // resume inference_server.py at the end.
   EndOfRunCleanupGuard end_of_run_cleanup_guard(this, isHybridPerWaypointEnabled());
 
   collected_positions_.clear();
@@ -177,13 +164,9 @@ void CalibrationBroadcasterNode::executeCalibration(
   debug_grid_images_.clear();
   stable_agreement_count_ = 0;
 
-  // Logged once, up front, for this run (2026-08-04) — isHybridPerWaypointEnabled()
-  // is checked many times over a run (once per sample), which would be
-  // noisy to log every time; this single line at the start gives a clear,
-  // easy-to-find answer to "was this particular run in hybrid mode" when
-  // inspecting a captured log, without needing to infer it indirectly
-  // from whether sampleOnceAtCurrentWaypoint's own per-sample timing
-  // lines happen to appear.
+  // Logged once, up front: gives an easy-to-find answer to "was this run
+  // in hybrid mode" in a captured log without inferring it from whether
+  // per-sample timing lines happen to appear.
   RCLCPP_INFO(
     get_logger(), "executeCalibration starting: hybrid_per_waypoint_enabled=%s, "
     "min_samples_to_finish=%d, samples_per_waypoint=%d, "
@@ -229,26 +212,20 @@ void CalibrationBroadcasterNode::executeCalibration(
   }
 
   // Sample once at the center pose itself, right after it's known — the
-  // arm is already there (center_pose IS trajectory_planner's own current
-  // pose, per polygonWaypointsAroundStandoff's 2026-07-22 redesign), so
-  // this needs no additional move, just an immediate marker_pose wait +
-  // record before the polygon phase's first corner move begins. Counted
-  // toward the same running total as every other sample.
+  // arm is already there (center_pose is trajectory_planner's own current
+  // pose), so this needs no additional move, just an immediate
+  // marker_pose wait + record before the polygon phase's first corner
+  // move begins. Counted toward the same running total as every other
+  // sample.
   //
   // Retried up to config_.cal_ready_hybrid_marker_detection_retry times
-  // before giving up, via sampleWithRetry (2026-08-04, originally
-  // center-pose-only, now shared with every waypoint in runPolygonPhase/
-  // runRandomPhase too — see that config field's and sampleWithRetry's own
-  // doc comments) — the center pose is this run's FIRST sample, so unlike
-  // every later waypoint (which already soft-fails-and-continues via
-  // min_samples_to_finish), a single miss here previously aborted the
-  // WHOLE run before it even started. Confirmed live on real: "Timed out
-  // waiting for a fresh marker_pose at the center pose" ended a run
-  // outright even though the marker was genuinely in view — a transient
-  // miss (e.g. one slow/bad frame), not a real "marker not visible"
-  // situation. Cached at startup like min_samples_to_finish (see this
-  // field's own doc comment on CalibrationBroadcasterConfig) — set to 1
-  // to fully restore today's original no-retry behavior.
+  // before giving up, via sampleWithRetry (shared with every waypoint in
+  // runPolygonPhase/runRandomPhase) — the center pose is this run's first
+  // sample, so unlike every later waypoint (which already soft-fails-and-
+  // continues via min_samples_to_finish), a single miss here would abort
+  // the whole run before it even started even on a transient one-bad-frame
+  // miss, not a real "marker not visible" situation. Set to 1 to fully
+  // disable retry.
   {
     const rclcpp::Time now = get_clock()->now();
     const std::optional<geometry_msgs::msg::PoseStamped> center_marker_pose =
@@ -310,27 +287,25 @@ void CalibrationBroadcasterNode::executeCalibration(
     }
   }
 
-  // Orientation sweep phase (2026-07-29): runs once here, regardless of
-  // WHICH prior phase last ran or whether it stopped early or ran to
-  // completion — neither polygon nor random phase varies orientation at
-  // all (randomPoseNear only offsets X/Y/Z, see its own doc comment), so
-  // this is the only source of orientation-diverse samples. Gated by
-  // config_.orientation_sweep_enabled (default off in sim, on in real —
-  // see CalibrationBroadcasterConfig's doc comment). Soft-fails per probe
-  // (skips, doesn't abort the run) — see runOrientationSweepPhase's own
-  // doc comment — so no phase_result/goal_handle->abort branch is needed
-  // here the way the two phases above need one.
+  // Orientation sweep phase: runs once here regardless of which prior
+  // phase last ran or whether it stopped early or ran to completion —
+  // neither polygon nor random phase varies orientation at all
+  // (randomPoseNear only offsets X/Y/Z), so this is the only source of
+  // orientation-diverse samples. Gated by config_.orientation_sweep_enabled.
+  // Soft-fails per probe (skips, doesn't abort the run — see
+  // runOrientationSweepPhase), so no phase_result/goal_handle->abort
+  // branch is needed here the way the two phases above need one.
   if (config_.orientation_sweep_enabled) {
     runOrientationSweepPhase(
       goal_handle, center_pose, static_cast<int>(collected_positions_.size()));
   }
 
-  // Discard-and-continue's actual pass/fail gate (2026-08-04) — see
-  // config_.min_samples_to_finish's own doc comment. Only checked when
-  // opted in (> 0); at the default 0, every prior s==0 failure already
+  // Discard-and-continue's actual pass/fail gate — see
+  // config_.min_samples_to_finish's doc comment. Only checked when opted
+  // in (> 0); at the default 0, every prior first-attempt failure already
   // hard-aborted via runPolygonPhase/runRandomPhase's own early return, so
   // execution would never reach here with too few samples in the first
-  // place — this check is a no-op in that case, not redundant with it.
+  // place.
   if (config_.min_samples_to_finish > 0 &&
     static_cast<int>(collected_positions_.size()) < config_.min_samples_to_finish)
   {
@@ -373,13 +348,10 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
     // rather than failing or stopping early.
     const geometry_msgs::msg::Pose & target = waypoints[i % waypoints.size()];
 
-    // Captured BEFORE the move, not after tracePathBlocking() returns —
+    // Captured before the move, not after tracePathBlocking() returns —
     // waitForFreshMarkerPose's whole purpose is rejecting any marker_pose
     // that could have arrived during the move, so the timestamp boundary
-    // must predate the move starting, not just predate it settling (a
-    // regression risk introduced by extracting tracePathBlocking() as a
-    // shared helper during the 2026-07-22 two-phase redesign — fixed
-    // here; see error-mitigation.md #19 for why this matters).
+    // must predate the move starting, not just its settling.
     const rclcpp::Time before_move = get_clock()->now();
     if (!tracePathBlocking(target)) {
       out_result = std::make_shared<Calibrate::Result>();
@@ -388,27 +360,18 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
       return false;
     }
 
-    // Take config_.samples_per_waypoint samples at this SAME settled pose
-    // (2026-07-29 — no additional move between them) before advancing to
-    // the next waypoint, mitigating a single bad/missed detection being
-    // this waypoint's only data point. Both/all go into the same
-    // collected_ pool as every other sample — no same-waypoint agreement
-    // check, rejectOutliers() sorts out any disagreement between them
-    // later.
+    // Take config_.samples_per_waypoint samples at this same settled pose
+    // (no additional move between them) before advancing to the next
+    // waypoint, mitigating a single bad/missed detection being this
+    // waypoint's only data point. All samples go into the same collected_
+    // pool — no same-waypoint agreement check; rejectOutliers() sorts out
+    // any disagreement between them later.
     //
-    // sample_boundary tracks the freshness cutoff for THIS waypoint's next
-    // wait — starts at before_move (s==0, same as before this loop
-    // existed), then advances to "now" after each successful wait. Fixed
-    // 2026-07-29: originally every s reused the same before_move boundary
-    // unconditionally, which meant s==1 (and beyond) could — and reliably
-    // did, live — pass the ">before_move" check against the SAME still-
-    // cached message s==0 already consumed, since nothing in that
-    // condition required the message to be NEW relative to the previous
-    // sample, only new relative to before_move. Confirmed live: every
-    // waypoint's 2 samples showed byte-identical deviation, meaning both
-    // were the same underlying detection counted twice, not 2 independent
-    // measurements — silently doubling every sample's weight (good or
-    // bad) rather than adding real new information.
+    // sample_boundary tracks the freshness cutoff for this waypoint's next
+    // wait — starts at before_move, then advances to "now" after each
+    // successful wait, so each subsequent sample within the same waypoint
+    // must observe a genuinely new marker_pose message rather than the
+    // same cached one the previous sample already consumed.
     rclcpp::Time sample_boundary = before_move;
     for (int s = 0; s < config_.samples_per_waypoint; ++s) {
       const std::optional<geometry_msgs::msg::PoseStamped> marker_pose = sampleWithRetry(
@@ -416,29 +379,23 @@ bool CalibrationBroadcasterNode::runPolygonPhase(
 
       if (!marker_pose.has_value()) {
         if (s > 0 || config_.min_samples_to_finish > 0) {
-          // Soft-fail (2026-07-29 for s>0; extended 2026-08-04 to s==0
-          // too, when config_.min_samples_to_finish is opted in — see
-          // that field's own doc comment for the full rationale). The
-          // marker can genuinely drop out of view/fail detection at any
-          // single waypoint — for s>0 that was already known to be
-          // non-fatal (samples from every prior waypoint are unaffected);
-          // for s==0 (this waypoint's ONLY attempt failing, the common
-          // case under hybrid_per_waypoint_enabled with
-          // samples_per_waypoint=1) it's now equally non-fatal whenever
-          // the opt-in is active, deferring the actual pass/fail decision
-          // to executeCalibration's own end-of-run min_samples_to_finish
-          // check instead of aborting immediately on the first miss.
+          // Soft-fail: the marker can genuinely drop out of view/fail
+          // detection at any single waypoint. For s>0, samples from every
+          // prior waypoint are unaffected. For s==0 (this waypoint's only
+          // attempt failing), this is only non-fatal when
+          // min_samples_to_finish is opted in, deferring the actual
+          // pass/fail decision to executeCalibration's end-of-run check
+          // instead of aborting immediately on the first miss.
           RCLCPP_WARN(
             get_logger(), "Polygon-phase sample %d: marker lost after %d/%d samples at this "
             "waypoint — keeping what was collected, moving to the next waypoint",
             i + 1, s, config_.samples_per_waypoint);
 
-          // Web-UI-visible status (2026-08-04) — samples_collected/
-          // samples_total unchanged (this event didn't add a sample), but
-          // current_status carries the skip so an operator watching the
-          // left panel sees WHY progress isn't advancing on this
-          // waypoint, instead of the UI looking silently stuck. See
-          // Calibrate.action's own doc comment on this field.
+          // Web-UI-visible status: samples_collected/samples_total are
+          // unchanged (this event didn't add a sample), but current_status
+          // carries the skip so an operator watching the UI sees why
+          // progress isn't advancing on this waypoint. See Calibrate.action's
+          // doc comment on this field.
           {
             auto skip_feedback = std::make_shared<Calibrate::Feedback>();
             skip_feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
@@ -521,7 +478,7 @@ bool CalibrationBroadcasterNode::runRandomPhase(
     const geometry_msgs::msg::Pose candidate =
       randomPoseNear(center_pose, config_.random_phase_max_offset_m);
 
-    // Captured BEFORE the move — see runPolygonPhase's identical comment
+    // Captured before the move — see runPolygonPhase's identical comment
     // on why this must predate the move starting, not just its settling.
     const rclcpp::Time before_move = get_clock()->now();
     if (!tracePathBlocking(candidate)) {
@@ -530,12 +487,11 @@ bool CalibrationBroadcasterNode::runRandomPhase(
       // cartesian_min_fraction check) is treated the same as an
       // invisible-marker candidate: discarded, not counted, retried with
       // a new random candidate, bounded by the same consecutive-failure
-      // cap (2026-07-23 — a random offset can point in any direction, so
-      // occasionally landing on one direction's Cartesian-path limit is
-      // expected, not a reason to abort an otherwise-successful run). No
-      // return-to-center needed here — planAndExecuteCartesian refuses
-      // BEFORE calling execute() on an incomplete path, so the arm never
-      // actually moved; it's already still at the last good pose.
+      // cap. A random offset can point in any direction, so occasionally
+      // landing on one direction's Cartesian-path limit is expected, not
+      // a reason to abort an otherwise-successful run. No return-to-center
+      // needed here — planAndExecuteCartesian refuses before calling
+      // execute() on an incomplete path, so the arm never actually moved.
       ++consecutive_failures;
       RCLCPP_INFO(
         get_logger(), "Random-phase candidate's move failed (attempt %d/%d consecutive) — "
@@ -554,9 +510,9 @@ bool CalibrationBroadcasterNode::runRandomPhase(
 
     // isMarkerVisibleNow polls the continuous marker_pose topic —
     // meaningless under hybrid_per_waypoint_enabled (nothing publishes
-    // that topic in this mode; see runOrientationSweepPhase's identical
-    // fix/comment). Skipped there; sampleOnceAtCurrentWaypoint's own
-    // std::nullopt return in the loop below already covers "not visible."
+    // that topic in this mode). Skipped there; sampleOnceAtCurrentWaypoint's
+    // own std::nullopt return in the loop below already covers "not
+    // visible."
     if (!isHybridPerWaypointEnabled() && !isMarkerVisibleNow(before_move)) {
       // Discarded, not counted — return to center immediately (no point
       // probing further out when not visible at all here) and try a new
@@ -585,14 +541,11 @@ bool CalibrationBroadcasterNode::runRandomPhase(
 
     consecutive_failures = 0;
 
-    // Take config_.samples_per_waypoint samples at this SAME visible
-    // candidate pose (2026-07-29 — no additional move between them, same
-    // reasoning as runPolygonPhase's identical change) before moving to
-    // the next random candidate. sample_boundary advances after each
-    // successful wait — see runPolygonPhase's identical variable/fix for
-    // why reusing before_move unconditionally across all samples_per_
-    // waypoint iterations was a bug (every sample after the first could
-    // return the SAME still-cached message, confirmed live).
+    // Take config_.samples_per_waypoint samples at this same visible
+    // candidate pose (no additional move between them, same reasoning as
+    // runPolygonPhase) before moving to the next random candidate.
+    // sample_boundary advances after each successful wait — see
+    // runPolygonPhase's identical pattern.
     rclcpp::Time sample_boundary = before_move;
     for (int s = 0; s < config_.samples_per_waypoint; ++s) {
       const std::optional<geometry_msgs::msg::PoseStamped> marker_pose = sampleWithRetry(
@@ -600,25 +553,18 @@ bool CalibrationBroadcasterNode::runRandomPhase(
         "waypoint " + std::to_string(samples_already_collected + i + 1) + " (random)");
       if (!marker_pose.has_value()) {
         if (s > 0 || config_.min_samples_to_finish > 0) {
-          // Soft-fail (2026-07-29 for s>0; extended 2026-08-04 to s==0
-          // too, when config_.min_samples_to_finish is opted in — see
-          // that field's own doc comment, and runPolygonPhase's identical
-          // extension, for the full rationale). isMarkerVisibleNow() above
-          // only checks visibility ONCE, before this loop starts — it does
-          // not guarantee the marker stays visible/detectable across every
-          // sample. Confirmed live, repeatedly: the marker can genuinely
-          // drop out of view between sample s=0 and s=1 at a random-phase
-          // candidate (position offset from cal_ready can be enough to
-          // lose it), and previously this hard-failed the ENTIRE
-          // calibration run over losing just the 2nd of 2 samples at ONE
-          // candidate — discarding 21+ good samples already collected.
+          // Soft-fail, same rationale as runPolygonPhase. isMarkerVisibleNow()
+          // above only checks visibility once, before this loop starts —
+          // it does not guarantee the marker stays visible/detectable
+          // across every sample; the position offset at a random-phase
+          // candidate can be enough to lose it between s=0 and s=1.
           RCLCPP_WARN(
             get_logger(), "Random-phase sample %d: marker lost after %d/%d samples at this "
             "candidate — keeping what was collected, moving to the next candidate",
             samples_already_collected + i + 1, s, config_.samples_per_waypoint);
 
-          // Web-UI-visible status (2026-08-04) — see runPolygonPhase's
-          // identical addition/comment for the full rationale.
+          // Web-UI-visible status — see runPolygonPhase's identical
+          // addition.
           {
             auto skip_feedback = std::make_shared<Calibrate::Feedback>();
             skip_feedback->samples_collected = static_cast<uint32_t>(collected_positions_.size());
@@ -810,17 +756,14 @@ geometry_msgs::msg::Pose CalibrationBroadcasterNode::rotatedPoseNear(
   // exactly at base_pose's origin (a pure orientation probe, not a
   // combined position+orientation move).
   //
-  // Axis convention: is_pitch rotates around the local Y axis (tf2::Vector3(0,1,0)),
-  // roll around the local X axis (tf2::Vector3(1,0,0)) — the standard
-  // aerospace/robotics convention (pitch = rotation about Y, roll =
-  // rotation about X, when Z is the forward/approach axis). NOT verified
-  // against config_.end_effector_frame's ("robotiq_85_base_link") actual
-  // URDF-defined joint axis orientation — that would require walking the
-  // full parent-joint <origin rpy=...> chain, not done here. If the first
-  // live sweep-phase test moves the wrist in the direction labeled "roll"
-  // when you expected "pitch" (or vice versa), swap is_pitch's axis
-  // mapping below (X<->Y) — this is the one thing about this function
-  // that's a documented assumption, not a confirmed fact.
+  // Axis convention: is_pitch rotates around the local Y axis
+  // (tf2::Vector3(0,1,0)), roll around the local X axis
+  // (tf2::Vector3(1,0,0)) — the standard aerospace/robotics convention
+  // (pitch = rotation about Y, roll = rotation about X, when Z is the
+  // forward/approach axis). This has not been verified against the
+  // end-effector frame's actual URDF-defined joint axis orientation; if a
+  // sweep-phase probe moves the wrist in the direction labeled "roll" when
+  // "pitch" was expected (or vice versa), swap the axis mapping below.
   const tf2::Vector3 axis = is_pitch ? tf2::Vector3(0, 1, 0) : tf2::Vector3(1, 0, 0);
   const tf2::Quaternion offset_rotation(axis, angle_deg * M_PI / 180.0);
 
@@ -866,12 +809,11 @@ std::optional<geometry_msgs::msg::PoseStamped> CalibrationBroadcasterNode::waitF
 
 namespace
 {
-/// Standard base64 -> raw bytes decode (2026-08-04) — no existing
-/// dependency in this package already provides one (confirmed via grep),
-/// and the payload here (one JPEG crop per waypoint, DetectMarkerOnce.srv's
-/// cascade_image_b64 field) doesn't justify pulling in a new library
-/// dependency for it. Inverse of Python's base64.b64encode, used
-/// symmetrically on inference_server.py's _encode_image_b64 side.
+/// Standard base64 -> raw bytes decode, used for DetectMarkerOnce.srv's
+/// cascade_image_b64 field. Inverse of Python's base64.b64encode, used
+/// symmetrically on inference_server.py's _encode_image_b64 side. A small
+/// self-contained implementation rather than a new library dependency,
+/// since the payload (one JPEG crop per waypoint) doesn't justify one.
 std::vector<uchar> decodeBase64(const std::string & encoded)
 {
   static const std::string kChars =
@@ -934,16 +876,12 @@ CalibrationBroadcasterNode::sampleOnceAtCurrentWaypoint(
     return waitForFreshMarkerPose(after);
   }
 
-  // Per-waypoint SIGCONT/SIGSTOP bracketing (2026-08-04) — see
-  // signalInferenceServerViaOrchestrator's own doc comment.
+  // Per-waypoint SIGCONT/SIGSTOP bracketing — see
+  // signalInferenceServerViaOrchestrator.
   auto send_signal = [this](bool stop) {signalInferenceServerViaOrchestrator(stop);};
 
-  // Timing (2026-08-04) — no timeout enforced yet on the detect call below
-  // (future.get() blocks unconditionally), per explicit request: measure
-  // real per-sample cost first, THEN pick a bounded timeout value/param on
-  // a later change once actual numbers are known, rather than guessing a
-  // number now. Logged unconditionally (not just on failure) so a full
-  // run's log gives a real distribution to look at, not just outliers.
+  // Timing is logged unconditionally (not just on failure) so a full run's
+  // log gives a real distribution to look at, not just outliers.
   const rclcpp::Time call_start = get_clock()->now();
 
   send_signal(false);  // SIGCONT — resume inference_server.py for this one call
@@ -961,11 +899,7 @@ CalibrationBroadcasterNode::sampleOnceAtCurrentWaypoint(
   auto request = std::make_shared<visual_calibration_msgs::srv::DetectMarkerOnce::Request>();
   auto future = detect_marker_once_client_->async_send_request(request);
 
-  // Bounded wait (2026-08-04, was previously an unbounded future.get() —
-  // see config_.detect_call_timeout_sec's own doc comment) — real timing
-  // logs across several test runs showed 4.30s-10.51s per call; this
-  // param defaults well above that observed range plus a safety margin,
-  // not tuned to the tightest possible value.
+  // Bounded wait — see config_.detect_call_timeout_sec.
   const auto wait_status = future.wait_for(
     std::chrono::duration<double>(config_.detect_call_timeout_sec));
   const rclcpp::Time after_detect = get_clock()->now();
@@ -1033,16 +967,12 @@ CalibrationBroadcasterNode::sampleOnceAtCurrentWaypoint(
 std::optional<geometry_msgs::msg::PoseStamped> CalibrationBroadcasterNode::sampleWithRetry(
   const rclcpp::Time & after, const std::string & waypoint_label)
 {
-  // Extended from center-pose-only to EVERY waypoint (2026-08-04) — see
-  // CalibrationBroadcasterConfig::cal_ready_hybrid_marker_detection_retry's
-  // own doc comment. A miss at ANY single waypoint is often a transient
-  // one-bad-frame issue (confirmed live: repeated "YOLO found no
-  // aruco_marker candidate" misses with normal cascade timing and no lock
-  // contention — a real detection-quality miss on that particular frame,
-  // not a systemic slowdown), so retrying with a fresh frame before
-  // falling through to the caller's own existing soft-fail/hard-fail
-  // handling gives each waypoint more than one chance at a genuinely new
-  // frame before being counted as lost.
+  // A miss at any single waypoint is often a transient one-bad-frame
+  // detection-quality issue rather than a systemic problem, so retrying
+  // with a fresh frame before falling through to the caller's own
+  // soft-fail/hard-fail handling gives each waypoint more than one chance
+  // before being counted as lost — see
+  // CalibrationBroadcasterConfig::cal_ready_hybrid_marker_detection_retry.
   const int max_attempts = std::max(1, config_.cal_ready_hybrid_marker_detection_retry);
   std::optional<geometry_msgs::msg::PoseStamped> result;
   for (int attempt = 1; attempt <= max_attempts; ++attempt) {
@@ -1069,26 +999,16 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
     return;
   }
 
-  // Normalize every tile to a common FIXED width AND height (2026-08-04,
-  // fixed a live crash) — the original version only forced a common width
-  // and let each tile's height scale proportionally to its own source
-  // image's aspect ratio, which meant real tiles could legitimately end up
-  // with DIFFERENT heights from each other (not just from the blank
-  // padding tile) — hconcat requires every image in a row to share the
-  // exact same height, and any row mixing differently-scaled tiles crashed
-  // with "Assertion failed: src[i].rows == src[0].rows" (confirmed live).
-  // Fix: letterbox every tile into an identical kTileWidth x kTileHeight
-  // canvas (preserving each source image's own aspect ratio via uniform
-  // scale-to-fit, centered, black bars on the short axis) rather than
-  // trusting proportional resize to ever coincidentally match.
+  // Every tile is normalized to a common fixed width and height: hconcat
+  // requires every image in a row to share the exact same height, so each
+  // tile is letterboxed into an identical kTileWidth x kTileHeight canvas
+  // (preserving its own aspect ratio via uniform scale-to-fit, centered,
+  // black bars on the short axis) rather than relying on proportional
+  // resize to coincidentally match across tiles.
   //
-  // kTileWidth/kTileHeight (2026-08-04, bumped from the raw source crop's
-  // own tiny size, e.g. ~110x90px) — the un-scaled crop made every label
-  // ("waypoint 8 (random): upscale_4x+clahe") wider than the tile itself,
-  // so text ran into/behind the neighboring tile in the assembled grid
-  // (visually confirmed: "waypoi..." cut off mid-word). Fixed size instead
-  // of scaling off the source crop, so tile size no longer depends on
-  // whatever resolution the camera/crop happened to produce.
+  // kTileWidth/kTileHeight are a fixed size well above the raw source
+  // crop's typical resolution, so each tile has enough room for its
+  // burned-in label text without running into the neighboring tile.
   const int kTileWidth = 320;
   const int kTileHeight = 240;
   const int kTilesPerRow = 4;
@@ -1097,11 +1017,10 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
   const cv::Scalar kLabelTextColor(0, 255, 0);
   const cv::Scalar kVariantTextColor(0, 200, 255);
   const cv::Scalar kTimingTextColor(255, 200, 0);
-  // Three lines now (2026-08-04, was two: "label"/"variant") — "wp:
-  // <waypoint label>" / "cascade: <variant>" / "detect: <N.NNs>" (how long
-  // THIS waypoint's YOLO+cascade call took — see DetectMarkerOnce.srv's
-  // own detect_time_s doc comment for exactly what this measures), one per
-  // line so all three stay readable at this tile size without truncation.
+  // Three label lines per tile: "wp: <waypoint label>" / "cascade:
+  // <variant>" / "detect: <N.NNs>" (how long this waypoint's YOLO+cascade
+  // call took — see DetectMarkerOnce.srv's detect_time_s doc comment),
+  // one per line so all three stay readable at this tile size.
   const int kLabelLineHeight = 20;
   const int kLabelStripHeight = kLabelLineHeight * 3 + 6;
 
@@ -1127,10 +1046,9 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
     const int y_offset = (kTileHeight - scaled.rows) / 2;
     scaled.copyTo(canvas(cv::Rect(x_offset, y_offset, scaled.cols, scaled.rows)));
 
-    // Label strip burned in at the bottom of each tile (2026-08-04) — self-
-    // contained labeling per user's explicit request ("just for visual
-    // inspection, or even to show during presentation"), so the single
-    // saved grid image needs no separate caption file to be meaningful.
+    // Label strip burned in at the bottom of each tile: self-contained
+    // labeling so the single saved grid image needs no separate caption
+    // file to be meaningful for visual inspection.
     cv::Mat labeled(kTileHeight + kLabelStripHeight, kTileWidth, CV_8UC3, kBgColor);
     canvas.copyTo(labeled(cv::Rect(0, 0, kTileWidth, kTileHeight)));
     cv::putText(
@@ -1147,10 +1065,8 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
       labeled, timing_line, cv::Point(4, kTileHeight + kLabelLineHeight * 3 - 2),
       cv::FONT_HERSHEY_SIMPLEX, 0.42, kTimingTextColor, 1, cv::LINE_AA);
 
-    // Margin border around each tile (2026-08-04) — otherwise adjacent
-    // tiles sit flush against each other with no visual separation, which
-    // is part of what made the previous labels look like they ran into
-    // the next tile even before the two issues above.
+    // Margin border around each tile, so adjacent tiles in the assembled
+    // grid have visual separation instead of sitting flush together.
     cv::Mat bordered(
       labeled.rows + kTileMarginPx * 2, labeled.cols + kTileMarginPx * 2, CV_8UC3, kBgColor);
     labeled.copyTo(bordered(cv::Rect(kTileMarginPx, kTileMarginPx, labeled.cols, labeled.rows)));
@@ -1179,9 +1095,7 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
   cv::Mat grid;
   cv::vconcat(rows, grid);
 
-  // /home/user/ros2_ws/log/tmux/real (2026-08-04) — the rosject's own
-  // runtime log directory, per explicit user confirmation (NOT this local
-  // checkout's own _errors/real/ archive convention, a separate thing).
+  // The rosject's runtime log directory.
   const std::string kOutputDir = "/home/user/ros2_ws/log/tmux/real";
   const std::string kFilename = "hybrid_per_waypoint_debug_grid.png";
   const std::string output_path = kOutputDir + "/" + kFilename;
@@ -1196,16 +1110,13 @@ void CalibrationBroadcasterNode::saveDebugImageGrid()
       debug_grid_images_.size(), output_path.c_str());
   }
 
-  // Second write, to the web app's own static-asset directory (2026-08-04)
-  // — so the browser-side UI can show this same PNG directly as a plain
-  // static image URL (webpage_ws/app/public/ is Vite's static-asset dir,
-  // already used for other runtime-written, gitignored content like
-  // public/robot/ — see webpage_ws/app/.gitignore), with no rosbridge/
-  // base64-over-topic transport needed. Live-read (not cached in config_)
-  // so it can be pointed at a different path via `ros2 param set` without
-  // a restart. Empty string (default) disables this second write entirely
-  // — this stays purely additive to the log-directory write above, which
-  // always happens regardless. Best-effort: logs, does not fail the run.
+  // Second write, to the web app's own static-asset directory, so the
+  // browser-side UI can show this same PNG directly as a plain static
+  // image URL with no rosbridge/base64-over-topic transport needed.
+  // Live-read (not cached in config_) so it can be pointed at a different
+  // path via `ros2 param set` without a restart. Empty string (default)
+  // disables this second write; the log-directory write above always
+  // happens regardless. Best-effort: logs, does not fail the run.
   std::string web_output_dir;
   get_parameter_or("debug_grid_web_output_dir", web_output_dir, std::string(""));
   if (!web_output_dir.empty()) {
@@ -1271,19 +1182,12 @@ bool CalibrationBroadcasterNode::recordSample(
   tf2::Transform known_to_marker;
   tf2::fromMsg(known_to_marker_tf.transform, known_to_marker);
 
-  // marker_frame_orientation_offset_rpy_deg (2026-08-05) — see this
-  // field's own doc comment on CalibrationBroadcasterConfig for the full
-  // rationale (real's marker_frame == robotiq_85_base_link directly, an
-  // unmeasured stand-in for the marker's true mounted orientation).
-  // Post-multiplied onto known_to_marker's ROTATION only, translation
-  // untouched — this rotates the marker frame's own LOCAL axes by the
-  // offset (i.e. "the physical marker actually sits rotated this much
-  // more, relative to robotiq_85_base_link's own axes, than we're
-  // otherwise assuming"), matching how a real fixed joint's own rpy would
-  // compose if one existed (see rg2_gripper.urdf.xacro's
-  // ${prefix}_aruco_joint for the sim equivalent this stands in for).
-  // [0,0,0] (default) is an exact no-op — today's original behavior,
-  // unchanged, until this is tuned.
+  // marker_frame_orientation_offset_rpy_deg — see
+  // CalibrationBroadcasterConfig for the full rationale. Post-multiplied
+  // onto known_to_marker's rotation only, translation untouched — this
+  // rotates the marker frame's own local axes by the offset, matching how
+  // a real fixed joint's own rpy would compose if one existed. [0,0,0]
+  // (default) is an exact no-op.
   const auto & offset_rpy = config_.marker_frame_orientation_offset_rpy_deg;
   if (offset_rpy[0] != 0.0 || offset_rpy[1] != 0.0 || offset_rpy[2] != 0.0) {
     tf2::Quaternion offset_q;
@@ -1423,12 +1327,11 @@ std::vector<tf2::Quaternion> CalibrationBroadcasterNode::clampYawRoll(
     roll_cos_sum += std::cos(roll);
   }
 
-  // Forced yaw/roll test bypass (2026-08-03, real-only — see
-  // CalibrationBroadcasterConfig::yaw_roll_clamp_forced_yaw_deg's own doc
-  // comment) — NaN (default/unset) means "use the circular mean computed
-  // above for that axis," same as before this bypass existed. A non-NaN
-  // value skips straight to the known, physically-measured mount constant
-  // instead, so this run's own (possibly noisy) samples never factor into
+  // Forced yaw/roll override — see
+  // CalibrationBroadcasterConfig::yaw_roll_clamp_forced_yaw_deg. NaN
+  // (default/unset) means "use the circular mean computed above for that
+  // axis." A non-NaN value skips straight to a known, physically-measured
+  // mount constant instead, so this run's own samples never factor into
   // that axis at all.
   const bool yaw_forced = !std::isnan(config_.yaw_roll_clamp_forced_yaw_deg);
   const bool roll_forced = !std::isnan(config_.yaw_roll_clamp_forced_roll_deg);
@@ -1481,16 +1384,12 @@ std::vector<size_t> CalibrationBroadcasterNode::rejectOutliers() const
     return all_indices;
   }
 
-  // Per-axis median position (2026-08-04, was the arithmetic mean) — a
-  // single wild sample (e.g. a bad hybrid detection) can drag a mean far
-  // enough that EVERY other, genuinely-good sample's deviation from it
-  // exceeds threshold too, causing the "kept < 2, abort rejection"
-  // fallback below to discard the whole rejection pass and keep the
-  // outlier in the final average (confirmed against a real run: one
-  // 45cm/62deg-off sample among 10 pushed all 9 good samples' deviations
-  // to 4-9cm/4-8deg, all above the 2cm/5deg threshold). The median is
-  // unmoved by a single outlier — sorting is the standard, no third-party
-  // dependency needed for N=10-ish sample counts.
+  // Per-axis median position, not the arithmetic mean: a single wild
+  // sample can drag a mean far enough that every other, genuinely-good
+  // sample's deviation from it also exceeds threshold, causing the
+  // "kept < 2, abort rejection" fallback below to discard the whole
+  // rejection pass and keep the outlier in the final average. The median
+  // is unmoved by a single outlier.
   const auto median_of = [](std::vector<double> values) {
     std::sort(values.begin(), values.end());
     const size_t n = values.size();
@@ -1512,13 +1411,12 @@ std::vector<size_t> CalibrationBroadcasterNode::rejectOutliers() const
   median_position.z = median_of(zs);
 
   // Orientation has no simple per-component median (SO(3) isn't a vector
-  // space), so use the geometric median/medoid instead: the ACTUAL sample
-  // whose summed angular deviation to every other sample is smallest.
-  // Like the position median above, one wild orientation can only ever
-  // pull this pick towards itself a little (via its own single deviation
-  // term) — it can never become the medoid itself unless most samples
-  // actually agree with it, unlike a mean/eigenvalue average which every
-  // sample (including the outlier) directly perturbs.
+  // space), so use the geometric median/medoid instead: the actual sample
+  // whose summed angular deviation to every other sample is smallest. One
+  // wild orientation can only pull this pick toward itself a little (via
+  // its own single deviation term) — it can't become the medoid unless
+  // most samples actually agree with it, unlike a mean/eigenvalue average
+  // which every sample (including the outlier) directly perturbs.
   size_t medoid_index = 0;
   double best_total_deviation_deg = std::numeric_limits<double>::infinity();
   for (size_t i = 0; i < count; ++i) {
@@ -1674,36 +1572,32 @@ ClusteredPose CalibrationBroadcasterNode::computeClusteredPose(
 void CalibrationBroadcasterNode::finishCalibration(
   const std::shared_ptr<GoalHandleCalibrate> & goal_handle)
 {
-  // Runs BEFORE rejectOutliers()/averaging, so both operate on a yaw/roll
-  // signal with fake (corner-detection-noise-induced) variation already
-  // removed — see clampYawRoll()'s and config_.yaw_roll_clamp_enabled's
-  // own doc comments. Overwrites collected_orientations_ in place (a
-  // no-op when the clamp is disabled — clampYawRoll returns its input
-  // unchanged) since rejectOutliers()/every downstream call reads that
-  // member vector directly, not a passed-in argument.
+  // Runs before rejectOutliers()/averaging, so both operate on a yaw/roll
+  // signal with corner-detection-noise-induced variation already removed
+  // — see clampYawRoll() and config_.yaw_roll_clamp_enabled. Overwrites
+  // collected_orientations_ in place (a no-op when the clamp is disabled)
+  // since rejectOutliers()/every downstream call reads that member vector
+  // directly, not a passed-in argument.
   collected_orientations_ = clampYawRoll(collected_orientations_);
 
   const std::vector<size_t> kept_indices = rejectOutliers();
   const bool rejection_changed_anything = kept_indices.size() != collected_positions_.size();
 
-  // use_clustering_average is READ LIVE here, not cached in config_ —
-  // deliberately, so the web UI's DevSpace drawer switch takes effect on
-  // the very next ~/calibrate run without a node restart, unlike every
-  // other field in CalibrationBroadcasterConfig (see that struct's own
-  // comment on this field).
+  // use_clustering_average is read live here, not cached in config_, so
+  // the web UI's switch takes effect on the very next ~/calibrate run
+  // without a node restart — see CalibrationBroadcasterConfig.
   const bool use_clustering = get_parameter("use_clustering_average").as_bool();
 
   geometry_msgs::msg::Vector3 average_position;
   tf2::Quaternion averaged_orientation;
-  // The set of indices actually contributing to the final average — either
-  // every kept_index (Mean method) or just the winning cluster's members
-  // (Clustering method, 2026-07-29 — see computeClusteredPose()'s doc
-  // comment for why orientation is now part of clustering too, not just
-  // position). Spread/is_high_confidence below is computed against
-  // whichever set actually produced the broadcast result, not always the
-  // full kept_indices — a low spread among only the winning cluster's
-  // members is the whole point of clustering, and reporting spread against
-  // the UNCLUSTERED full set would defeat that.
+  // The set of indices actually contributing to the final average: either
+  // every kept_index (mean method) or just the winning cluster's members
+  // (clustering method — see computeClusteredPose()). Spread/
+  // is_high_confidence below is computed against whichever set actually
+  // produced the broadcast result, not always the full kept_indices — a
+  // low spread among only the winning cluster's members is the point of
+  // clustering, and reporting spread against the unclustered full set
+  // would defeat that.
   std::vector<size_t> contributing_indices;
 
   if (use_clustering) {
@@ -1753,10 +1647,11 @@ void CalibrationBroadcasterNode::finishCalibration(
       angularDeviationDeg(collected_orientations_[i], averaged_orientation));
   }
 
-  // orientation_result kept for its mean_spread_deg (still reported/logged
-  // below) — max_spread_deg is superseded by max_orientation_spread_deg
-  // above, which (unlike this) is computed against contributing_indices
-  // and the FINAL averaged_orientation, not always the full kept set.
+  // orientation_result is kept for its mean_spread_deg (still reported/
+  // logged below) — max_spread_deg is superseded by
+  // max_orientation_spread_deg above, which is computed against
+  // contributing_indices and the final averaged_orientation, not always
+  // the full kept set.
   std::vector<tf2::Quaternion> kept_orientations_for_mean;
   kept_orientations_for_mean.reserve(kept_indices.size());
   for (const size_t i : kept_indices) {
@@ -1779,18 +1674,13 @@ void CalibrationBroadcasterNode::finishCalibration(
   // CalibrationBroadcasterConfig::broadcast_frame_suffix.
   broadcast_tf.child_frame_id = last_sample_.header.frame_id + config_.broadcast_frame_suffix;
   broadcast_tf.transform.translation = average_position;
-  // averaged_orientation (NOT orientation_result.averaged) — this is the
-  // actual bug this whole change fixes: orientation_result is always the
-  // Mean-method average over every kept sample, regardless of
-  // use_clustering_average; broadcasting IT here would silently discard
-  // clustering's whole point for orientation specifically (the position
-  // would correctly reflect the winning cluster, but the rotation would
-  // still be dragged by orientation outliers clustering was supposed to
-  // exclude — exactly the camera roll error this change was written to
-  // fix). averaged_orientation is the one that's actually
-  // clustering-aware (equal to orientation_result.averaged when
-  // use_clustering_average is false, since contributing_indices ==
-  // kept_indices in that branch — see the if/else above).
+  // Broadcasts averaged_orientation, not orientation_result.averaged:
+  // orientation_result is always the mean-method average over every kept
+  // sample regardless of use_clustering_average, so broadcasting it here
+  // would silently discard clustering's effect on orientation.
+  // averaged_orientation is the clustering-aware value (equal to
+  // orientation_result.averaged when use_clustering_average is false,
+  // since contributing_indices == kept_indices in that branch).
   broadcast_tf.transform.rotation = tf2::toMsg(averaged_orientation);
 
   static_broadcaster_.sendTransform(broadcast_tf);
@@ -1822,9 +1712,9 @@ void CalibrationBroadcasterNode::finishCalibration(
   result->success = true;
   result->message = "Broadcasting static TF '" + config_.known_chain_frame + "' -> '" +
     broadcast_tf.child_frame_id + "'";
-  // max_orientation_spread_deg (NOT orientation_result.max_spread_deg) —
-  // same reasoning as broadcast_tf.transform.rotation above: this must
-  // reflect spread against the ACTUAL broadcast result, which
+  // Reports max_orientation_spread_deg, not orientation_result.max_spread_deg
+  // — same reasoning as broadcast_tf.transform.rotation above: this must
+  // reflect spread against the actual broadcast result, which
   // orientation_result does not when clustering is active.
   result->max_spread_deg = max_orientation_spread_deg;
   result->mean_spread_deg = orientation_result.mean_spread_deg;
@@ -1843,13 +1733,11 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
   config.known_chain_frame = get_parameter("known_chain_frame").as_string();
   config.marker_frame = get_parameter("marker_frame").as_string();
 
-  // marker_frame_orientation_offset_rpy_deg (2026-08-05) — see this
-  // field's own doc comment on CalibrationBroadcasterConfig. get_parameter_or
-  // (not get_parameter): absent from sim's yaml entirely (real-only —
-  // sim's marker_frame is a properly-measured rg2_gripper_aruco_link, no
-  // correction needed there), and automatically_declare_parameters_from_
-  // overrides(true) means get_parameter() on an undeclared key would
-  // otherwise throw.
+  // marker_frame_orientation_offset_rpy_deg — see this field's own doc
+  // comment on CalibrationBroadcasterConfig. get_parameter_or (not
+  // get_parameter): this key may be absent from a given deployment's
+  // yaml, and automatically_declare_parameters_from_overrides(true) means
+  // get_parameter() on an undeclared key would otherwise throw.
   std::vector<double> marker_frame_orientation_offset_rpy_deg_vec;
   get_parameter_or(
     "marker_frame_orientation_offset_rpy_deg", marker_frame_orientation_offset_rpy_deg_vec,
@@ -1905,26 +1793,22 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
   config.samples_per_waypoint =
     static_cast<int>(get_parameter("samples_per_waypoint").as_int());
 
-  // hybrid_per_waypoint_enabled deliberately NOT read here (2026-08-04,
-  // changed from restart-only) — see CalibrationBroadcasterConfig's own
-  // doc comment on this: it's read LIVE via isHybridPerWaypointEnabled()
-  // at the point of use instead, same convention as use_clustering_average.
+  // hybrid_per_waypoint_enabled is deliberately not read here — see
+  // CalibrationBroadcasterConfig: it's read live via
+  // isHybridPerWaypointEnabled() at the point of use instead, same
+  // convention as use_clustering_average.
 
-  // get_parameter_or since detect_call_timeout_sec is absent from sim's
-  // yaml entirely (real-only, see this field's own doc comment) and
-  // automatically_declare_parameters_from_overrides(true) means
-  // get_parameter() on an undeclared key would throw.
+  // get_parameter_or since this key may be absent from a given
+  // deployment's yaml (automatically_declare_parameters_from_overrides(true)
+  // means get_parameter() on an undeclared key would throw).
   get_parameter_or("detect_call_timeout_sec", config.detect_call_timeout_sec, 30.0);
 
-  // get_parameter_or (not get_parameter) — same reasoning as
-  // hybrid_per_waypoint_enabled directly above: absent from sim's yaml,
-  // real-only. Default 0 = today's original strict behavior (see this
-  // field's own doc comment).
+  // get_parameter_or, same reasoning as above. Default 0 = strict
+  // behavior (see this field's own doc comment).
   get_parameter_or("min_samples_to_finish", config.min_samples_to_finish, 0);
 
-  // get_parameter_or, same reasoning as above — real-only in practice.
-  // Default 3 (see this field's own doc comment for why 1 == today's
-  // original no-retry behavior).
+  // get_parameter_or, same reasoning as above. Default 3 (see this
+  // field's own doc comment for why 1 disables retry).
   get_parameter_or(
     "cal_ready_hybrid_marker_detection_retry",
     config.cal_ready_hybrid_marker_detection_retry, 3);
@@ -1940,10 +1824,8 @@ CalibrationBroadcasterConfig CalibrationBroadcasterNode::loadConfigFromParams() 
 
   config.yaw_roll_clamp_enabled = get_parameter("yaw_roll_clamp_enabled").as_bool();
 
-  // get_parameter_or (not get_parameter) since these are absent from
-  // sim's yaml entirely (real-only test hook — see this field's own doc
-  // comment) and automatically_declare_parameters_from_overrides(true)
-  // means get_parameter() on an undeclared key would throw.
+  // get_parameter_or since these keys may be absent from a given
+  // deployment's yaml — see this field's own doc comment.
   get_parameter_or(
     "yaw_roll_clamp_forced_yaw_deg", config.yaw_roll_clamp_forced_yaw_deg,
     std::numeric_limits<double>::quiet_NaN());

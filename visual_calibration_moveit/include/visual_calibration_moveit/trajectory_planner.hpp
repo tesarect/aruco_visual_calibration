@@ -52,10 +52,7 @@ geometry_msgs::msg::Pose offsetInFrontOf(
 
 /// Per-environment (sim/real) tuning for planAndExecuteInFrontOf, meant to
 /// be loaded from a parameter file — sim and real need different values
-/// since the real robot's geometry isn't calibrated yet (different camera
-/// frame name, mounting, standoff, facing). Room to grow (tolerances,
-/// retries, waypoint offsets) as the recalibration workflow is built out
-/// in later tasks.
+/// since their camera frame name, mounting, standoff, and facing differ.
 struct StandoffConfig
 {
   /// TF frame to stand off in front of, e.g. the camera's optical frame.
@@ -134,61 +131,55 @@ struct PlannerConfig
   /// Minimum achieved fraction of a straight-line Cartesian path (see
   /// planAndExecuteCartesian's min_fraction parameter) required to execute
   /// it at all — below this, the path is refused rather than executed
-  /// partially. Was a hardcoded 0.95 default until 2026-07-22; made
-  /// configurable after real-world testing showed some short (few-cm)
-  /// Cartesian moves near cal_ready achieve well under 95% (e.g. 50-83%)
+  /// partially. Configurable rather than a fixed threshold because some
+  /// short (few-cm) Cartesian moves near cal_ready achieve well under 95%
   /// even though the target itself is individually reachable via
   /// joint-space planning — a real geometric limitation of the
   /// straight-line path from that specific start pose, not a bug.
-  /// LOWERING THIS IS A SAFETY TRADEOFF, not a pure tuning knob: a lower
-  /// value means MORE incomplete paths get executed rather than refused,
+  /// Lowering this is a safety tradeoff, not a pure tuning knob: a lower
+  /// value means more incomplete paths get executed rather than refused,
   /// i.e. the arm can stop short of the intended waypoint at an
   /// unplanned intermediate pose (exactly what the refusal exists to
   /// prevent — see planAndExecuteCartesian's doc comment). Only lower
   /// this if you've deliberately decided that tradeoff is acceptable for
   /// your use case/environment.
   double cartesian_min_fraction = 0.95;
-  /// Escalating-retry budget for joint-space planning (2026-07-30) — see
+  /// Escalating-retry budget for joint-space planning — see
   /// planWithEscalatingTime's doc comment. Each retry multiplies
   /// planning_time_s by planning_time_retry_multiplier (e.g. 3.0s base x
   /// [1, 3, 5] = 3s, 9s, 15s attempts) up to
   /// max_planning_time_retries additional tries after the first,
-  /// num_planning_attempts unchanged across all of them. Motivated by a
-  /// live real-robot failure: OMPL's own log showed "Unable to find
-  /// solution by any of the threads in 3.03 seconds" (a genuine search
-  /// timeout, not a hard reachability/collision error) for
-  /// ~/move_to_instance's hover-pose leg — a longer budget is a
-  /// legitimate next thing to try for a target near the edge of what
-  /// RRTstar can solve quickly, before concluding the target is
-  /// genuinely unreachable. Sequence of multipliers rather than a single
-  /// escalation, since guessing the right timeout upfront isn't
-  /// possible — this tries progressively harder instead of picking one
-  /// fixed larger value that might still be too short (or unnecessarily
-  /// long for an easy target that just needed 2 tries). Default 0 empty
-  /// multipliers vector (see loadPlannerConfigFromParams) = no retries,
-  /// today's exact single-attempt behavior preserved unless explicitly
-  /// configured otherwise.
+  /// num_planning_attempts unchanged across all of them. A target near
+  /// the edge of what RRTstar can solve quickly may genuinely need a
+  /// longer search budget rather than being unreachable at all (OMPL can
+  /// report a plain search timeout, not a hard reachability/collision
+  /// error, for such targets). A sequence of multipliers, rather than a
+  /// single escalation, since a good fixed timeout isn't known upfront —
+  /// this tries progressively harder instead of picking one fixed larger
+  /// value that might still be too short (or unnecessarily long for an
+  /// easy target that only needed a couple of tries). Default empty
+  /// multipliers vector (see loadPlannerConfigFromParams) means no
+  /// retries, single-attempt behavior.
   std::vector<double> planning_time_retry_multipliers;
 };
 
-/// Tuning for ~/move_to_instance's hover-descend-stay-return approach
-/// (2026-07-30, sequence extended 2026-08-02) — every instance move
-/// (cup_holder or hole_1..hole_4) first goes to a single shared pose
-/// hover_offset_m above cup_holder's own current TF (same X/Y/orientation
-/// as cup_holder, only Z raised) — cup_holder specifically, not the
-/// per-call target instance, so hole_1..hole_4 all approach from the SAME
-/// known-safe point directly above the holder, regardless of which hole
-/// was requested. Tried via Cartesian planning first, falling back to
-/// joint-space if the Cartesian attempt fails (2026-08-02 — was
-/// joint-space-only before; inverted since a straight-line approach is
-/// preferable when it works, with joint-space as the more-likely-to-
-/// succeed fallback, not the primary path). From there, a Cartesian move
-/// descends descend_offset_m straight down (in the planning frame's Z)
-/// toward the requested instance's own X/Y, stays instance_stay_seconds,
-/// returns to the SAME hover pose (not a fresh TF lookup), then optionally
-/// moves to instance_return_preset_name — see handleMoveToInstance's doc
-/// comment for the exact 5-step sequence and pose math. Loaded from a
-/// parameter file alongside StandoffConfig/PolygonConfig.
+/// Tuning for ~/move_to_instance's hover-descend-stay-return approach:
+/// every instance move (cup_holder or hole_1..hole_4) first goes to a
+/// single shared pose hover_offset_m above cup_holder's own current TF
+/// (same X/Y/orientation as cup_holder, only Z raised) — cup_holder
+/// specifically, not the per-call target instance, so hole_1..hole_4 all
+/// approach from the same known-safe point directly above the holder,
+/// regardless of which hole was requested. Tried via Cartesian planning
+/// first, falling back to joint-space if the Cartesian attempt fails — a
+/// straight-line approach is preferable when it works, with joint-space
+/// as the more-likely-to-succeed fallback, not the primary path. From
+/// there, a Cartesian move descends descend_offset_m straight down (in
+/// the planning frame's Z) toward the requested instance's own X/Y, stays
+/// instance_stay_seconds, returns to the same hover pose (not a fresh TF
+/// lookup), then optionally moves to instance_return_preset_name — see
+/// handleMoveToInstance's doc comment for the exact 5-step sequence and
+/// pose math. Loaded from a parameter file alongside StandoffConfig/
+/// PolygonConfig.
 struct HoverConfig
 {
   /// Height (meters) above cup_holder's own TF the approach leg targets.
@@ -198,37 +189,36 @@ struct HoverConfig
   /// toward the requested instance's own Z. Independent from
   /// hover_offset_m so the descent doesn't have to travel the hover
   /// height's full distance (e.g. a hover well above the holder, but a
-  /// shorter final approach into a hole) — NOT clamped against
+  /// shorter final approach into a hole) — not clamped against
   /// hover_offset_m, a misconfigured descend_offset_m taller than
   /// hover_offset_m would overshoot below the instance's own Z.
   double descend_offset_m = 0.15;
   /// How long (seconds) to stay at the descended goal before returning to
-  /// the hover pose (2026-08-02, explicit request — "stay there for 3-4
-  /// sec"). Exact value left as a config decision, not prescribed here —
-  /// see trajectory_planner_sim.yaml/_real.yaml's own comment.
+  /// the hover pose. Exact value left as a config decision, not
+  /// prescribed here — see trajectory_planner_sim.yaml/_real.yaml's own
+  /// comment.
   double instance_stay_seconds = 3.0;
   /// Preset name (from preset_poses_{sim,real}.yaml, via PresetPoses — see
-  /// planAndExecuteToPreset). NO LONGER USED by handleMoveToInstance as of
-  /// 2026-08-06 — step 5 now always lifts to base_link's Z plane and waits
-  /// for the next command instead (see handleMoveToInstance's own doc
-  /// comment), per explicit request that the arm never auto-leave the
-  /// lifted pose on a timeout. Left here only in case a future caller wants
-  /// a configurable post-sequence preset again.
+  /// planAndExecuteToPreset). No longer used by handleMoveToInstance —
+  /// step 5 now always lifts to base_link's Z plane and waits for the
+  /// next command instead (see handleMoveToInstance's own doc comment),
+  /// so the arm never auto-leaves the lifted pose on a timeout. Left here
+  /// only in case a future caller wants a configurable post-sequence
+  /// preset again.
   std::string instance_return_preset_name;
   /// Safety margin (meters) subtracted from StandoffConfig::max_reach_m to
-  /// get the clamp radius for the descend leg only (2026-08-06, explicit
-  /// request: "it should not fail, instead reach the defined safest
-  /// distance"). If the descend pose (instance's own X/Y, hover-derived Z)
-  /// is farther from the planning frame's origin than
-  /// (max_reach_m - reach_safety_margin_m), it's pulled back along the
-  /// straight line FROM THE HOVER POSE TO THE DESCEND POSE (not toward the
-  /// planning-frame origin — that would move it sideways to a different
-  /// X/Y, not just stop the vertical descent short) until it sits exactly
-  /// at that clamp radius — so the arm still visibly reaches toward the
-  /// goal and stops at the closest safely-reachable point on the way,
-  /// rather than refusing the whole move. 0.0 (default) — combined with
-  /// StandoffConfig::max_reach_m — disables clamping (i.e. only clamps if
-  /// explicitly configured with a positive margin).
+  /// get the clamp radius for the descend leg only. If the descend pose
+  /// (instance's own X/Y, hover-derived Z) is farther from the planning
+  /// frame's origin than (max_reach_m - reach_safety_margin_m), it's
+  /// pulled back along the straight line from the hover pose to the
+  /// descend pose (not toward the planning-frame origin — that would move
+  /// it sideways to a different X/Y, not just stop the vertical descent
+  /// short) until it sits exactly at that clamp radius — so the arm still
+  /// visibly reaches toward the goal and stops at the closest
+  /// safely-reachable point on the way, rather than refusing the whole
+  /// move. 0.0 (default), combined with StandoffConfig::max_reach_m,
+  /// disables clamping (only clamps if explicitly configured with a
+  /// positive margin).
   double reach_safety_margin_m = 0.0;
 };
 
@@ -243,14 +233,14 @@ struct SequenceConfig
   /// Absolute Z coordinate (in the planning frame, i.e. base_link's own
   /// Z — 0.0 means level with base_link's origin) the arm lifts to after
   /// stay_seconds_at_goal, keeping the goal's X/Y/orientation unchanged.
-  /// NOT a relative offset added to the goal's Z — an absolute target
+  /// Not a relative offset added to the goal's Z — an absolute target
   /// height, per project convention ("lift to roughly base_link's Z
   /// plane").
   double lift_target_z_m = 0.0;
   /// How long to wait at the lifted pose, with no new sequenced goal
   /// arriving, before automatically moving to the "standby" preset.
   double lift_wait_seconds = 8.0;
-  /// Global settle delay applied inside tracePath(), after EVERY
+  /// Global settle delay applied inside tracePath(), after every
   /// successful waypoint move (single or multi-waypoint calls alike —
   /// home, cal_ready, sequenced goals, and each polygon corner all funnel
   /// through tracePath()). No race condition to guard against here: the
@@ -272,17 +262,16 @@ struct SequenceConfig
 /// TrajectoryPlanner has no built-in understanding of the robot's task —
 /// it doesn't know what "calibration" or "inspection" means, only "move to
 /// this pose". This enum is the small amount of bookkeeping it keeps about
-/// its OWN recent activity, so it can automatically stay-then-lift-then-
+/// its own recent activity, so it can automatically stay-then-lift-then-
 /// standby after a "sequenced goal" (see TracePath.srv's is_sequenced_goal
 /// field) without a caller having to drive every step of that dance
 /// itself. In plain terms: the node remembers "did I just visit a regular
 /// goal, and if so, what pose was that", and runs two timers off of that
 /// one fact — it is not reasoning about the overall workflow, just
-/// reacting mechanically to a flag it's told. Unlike an earlier version of
-/// this design, it does NOT return to wherever the arm happened to be
-/// before the goal — every sequenced goal always resolves to the SAME two
-/// destinations (a lift straight up from the goal, then "standby"), never
-/// an arbitrary prior pose.
+/// reacting mechanically to a flag it's told. It does not return to
+/// wherever the arm happened to be before the goal — every sequenced goal
+/// always resolves to the same two destinations (a lift straight up from
+/// the goal, then "standby"), never an arbitrary prior pose.
 enum class ArmState
 {
   /// No sequenced goal is pending stay/lift/standby handling — this is
@@ -332,11 +321,11 @@ public:
   /// specifies the exact joint values directly. Use this (via a joint-value
   /// preset, see planAndExecuteToPreset) when a specific joint
   /// configuration — not just a Cartesian pose — has been verified to work
-  /// (e.g. cal_ready's joint-value preset, added 2026-07-20 after
-  /// confirming two different joint-space paths to the SAME Cartesian
-  /// cal_ready pose produced joint configurations differing by 90-250° on
-  /// several joints, only one of which left enough margin for the
-  /// downstream Cartesian polygon-corner moves to succeed).
+  /// (e.g. cal_ready's joint-value preset: two different joint-space paths
+  /// to the same Cartesian cal_ready pose can produce joint configurations
+  /// differing by tens to hundreds of degrees on several joints, only one
+  /// of which leaves enough margin for the downstream Cartesian
+  /// polygon-corner moves to succeed).
   /// joint_values.size() must equal the planning group's DOF count (6 for
   /// ur_manipulator) — returns false without planning if it doesn't.
   bool planAndExecute(const std::vector<double> & joint_values);
@@ -349,9 +338,8 @@ public:
   /// Cartesian path would stop short of target_pose, at an undefined
   /// intermediate point, which is unsafe to treat as "the waypoint" for
   /// calibration sampling. No automatic fallback to joint-space planning
-  /// on an incomplete path (see progress.md's Feature Additions for that
-  /// as a possible future addition) — callers needing that today should
-  /// retry via planAndExecute() themselves.
+  /// on an incomplete path — callers needing that today should retry via
+  /// planAndExecute() themselves.
   bool planAndExecuteCartesian(
     const geometry_msgs::msg::Pose & target_pose,
     double min_fraction = 0.95);
@@ -388,10 +376,10 @@ public:
     uint8_t planning_mode =
     visual_calibration_msgs::srv::TracePath::Request::PLANNING_MODE_CARTESIAN);
 
-  /// Computes and returns polygonWaypointsAroundStandoff's waypoints AND
-  /// the center pose they were generated around, WITHOUT moving the arm —
+  /// Computes and returns polygonWaypointsAroundStandoff's waypoints and
+  /// the center pose they were generated around, without moving the arm —
   /// lets a caller (e.g. calibration_broadcaster_node) drive the polygon
-  /// waypoints one at a time itself via ~/trace_path, AND generate its
+  /// waypoints one at a time itself via ~/trace_path, and generate its
   /// own additional offset poses from the same center (e.g. a random-pose
   /// sampling phase) without duplicating this node's standoff/polygon
   /// geometry math or config, or making a second "get current pose"
@@ -403,19 +391,19 @@ public:
     rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0)) const;
 
   /// Computes the standoff pose (see offsetInFrontOf) from the configured
-  /// StandoffConfig WITHOUT moving the arm. If the camera_frame TF lookup
+  /// StandoffConfig without moving the arm. If the camera_frame TF lookup
   /// fails, falls back to the "standoff" entry in preset_poses_ (see
   /// PresetPoses) — used_fallback in the returned pair distinguishes which
-  /// source was used. Returns std::nullopt only if NEITHER a live TF
-  /// lookup NOR a "standoff" preset was available.
+  /// source was used. Returns std::nullopt only if neither a live TF
+  /// lookup nor a "standoff" preset was available.
   std::optional<std::pair<geometry_msgs::msg::Pose, bool /*used_fallback*/>> getStandoffPose(
     rclcpp::Duration tf_timeout = rclcpp::Duration::from_seconds(3.0)) const;
 
-  /// Returns the named preset's pose (see PresetPoses) WITHOUT moving the
+  /// Returns the named preset's pose (see PresetPoses) without moving the
   /// arm. Returns std::nullopt if no preset with that name was loaded.
   std::optional<geometry_msgs::msg::Pose> getPresetPose(const std::string & name) const;
 
-  /// Returns the named preset's joint values (see PresetPoses) WITHOUT
+  /// Returns the named preset's joint values (see PresetPoses) without
   /// moving the arm. Returns std::nullopt if no joint-value preset with
   /// that name was loaded (including if that name only has a Cartesian
   /// pose preset — see getPresetPose).
@@ -426,7 +414,7 @@ public:
   /// see that overload's doc comment) if one is loaded for name;
   /// otherwise falls back to the Cartesian pose preset (via
   /// planAndExecute(pose)) if one is loaded instead. Returns false without
-  /// planning if NEITHER a joint-value nor a Cartesian preset exists for
+  /// planning if neither a joint-value nor a Cartesian preset exists for
   /// name. Callers that need TF-first-then-preset-fallback behavior (e.g.
   /// cal_ready's live camera_frame lookup) should use getStandoffPose()/
   /// planAndExecuteInFrontOf() instead — this method only ever consults
@@ -435,7 +423,7 @@ public:
 
 private:
   /// Shared retry loop for planAndExecute(Pose)/planAndExecute(joint_values)
-  /// (2026-07-30) — both overloads set an identical target-independent
+  /// — both overloads set an identical target-independent
   /// MoveGroupInterface plan() call, just with a pose vs. joint-value
   /// goal already applied via setPoseTarget()/setJointValueTarget()
   /// before calling this. Tries plan() once at planner_config_.planning_time_s,
@@ -445,14 +433,14 @@ private:
   /// fixed across every try. Stops and returns true on the first
   /// successful plan; returns false only if every attempt (base +
   /// all retries) fails. Logs each retry so a real escalation is visible
-  /// in the node's own log, not just MoveGroupInterface's. Does NOT touch
+  /// in the node's own log, not just MoveGroupInterface's. Does not touch
   /// execute() — the caller (planAndExecute) still owns plan+execute
   /// sequencing, this only owns the plan() retry loop itself.
   bool planWithEscalatingTime(moveit::planning_interface::MoveGroupInterface::Plan & plan);
 
   /// Computes polygon_config_.num_corners waypoints forming a regular
   /// polygon of radius polygon_config_.radius_m, in the arm's own current
-  /// pose's local X/Y plane, centered on that current pose (NOT the
+  /// pose's local X/Y plane, centered on that current pose (not the
   /// camera's TF — see this function's body comment for why). Every corner
   /// keeps the same orientation as the center — only position varies.
   /// Corners are visited in angular order (not skipping around), so
@@ -501,25 +489,24 @@ private:
     std::shared_ptr<visual_calibration_msgs::srv::MoveToPreset::Response> response);
 
   /// Handles a MoveToInstance service request. 5-step hover-descend-stay-
-  /// return-lift sequence (2026-07-30, extended 2026-08-02 and 2026-08-06 —
-  /// see HoverConfig's doc comment for the tuning fields):
+  /// return-lift sequence (see HoverConfig's doc comment for the tuning
+  /// fields):
   ///   1. Looks up move_group_interface_.getPlanningFrame() -> "cup_holder"
   ///      via tf_buffer_ (fresh every call), builds a hover pose directly
   ///      above it (same X/Y as cup_holder, Z raised by
-  ///      hover_config_.hover_offset_m; orientation is NOT taken from
+  ///      hover_config_.hover_offset_m; orientation is not taken from
   ///      cup_holder's own TF — see gripperFacingDownOrientation()'s doc
   ///      comment in trajectory_planner.cpp for why and what's used
   ///      instead: a fixed orientation with end_effector_frame's local +X
   ///      pointing straight down, roll left unconstrained). Reached via
-  ///      planAndExecuteCartesian() FIRST (straight-line, preferred when
+  ///      planAndExecuteCartesian() first (straight-line, preferred when
   ///      it works), falling back to joint-space planAndExecute() if the
-  ///      Cartesian attempt fails (2026-08-02 — was joint-space-only
-  ///      before; this shared hover point needs to be reliably reachable
-  ///      regardless of which instance was requested or where the arm
-  ///      started, so a free-space fallback exists for when a straight
-  ///      line isn't achievable from the current pose).
+  ///      Cartesian attempt fails — this shared hover point needs to be
+  ///      reliably reachable regardless of which instance was requested
+  ///      or where the arm started, so a free-space fallback exists for
+  ///      when a straight line isn't achievable from the current pose.
   ///   2. Looks up move_group_interface_.getPlanningFrame() ->
-  ///      request->instance_name (same as step 1, but for the ACTUAL
+  ///      request->instance_name (same as step 1, but for the actual
   ///      target — cup_holder itself, or a specific hole_N). Builds a
   ///      descend pose: the instance's own X/Y, Z = hover pose's Z minus
   ///      hover_config_.descend_offset_m, same fixed facing-down
@@ -528,7 +515,7 @@ private:
   ///      above the target. If this descend pose is farther from the
   ///      planning frame's origin than (standoff_config_.max_reach_m -
   ///      hover_config_.reach_safety_margin_m), it's clamped back along the
-  ///      hover_pose -> descend_pose line to that radius BEFORE planning —
+  ///      hover_pose -> descend_pose line to that radius before planning —
   ///      see HoverConfig::reach_safety_margin_m's own doc comment — so an
   ///      out-of-reach goal still gets visibly approached and stopped at
   ///      the closest safe point, instead of failing outright.
@@ -538,7 +525,7 @@ private:
   ///      waypoint_settle_seconds sleep: the response can't return until
   ///      this step's done anyway, and MultiThreadedExecutor keeps other
   ///      callbacks unblocked).
-  ///   4. Returns to the EXACT SAME hover_pose computed in step 1 (not a
+  ///   4. Returns to the exact same hover_pose computed in step 1 (not a
   ///      fresh TF lookup, not a fixed absolute-Z lift like the separate,
   ///      unused-today is_sequenced_goal machinery does — see
   ///      onSequencedGoalReached's own doc comment) via
@@ -546,13 +533,12 @@ private:
   ///   5. Lifts straight up from the hover pose to base_link's own Z plane
   ///      (sequence_config_.lift_target_z_m, same absolute-Z convention as
   ///      the separate is_sequenced_goal machinery, but applied here
-  ///      directly as a one-shot planAndExecuteCartesian() call, NOT via
+  ///      directly as a one-shot planAndExecuteCartesian() call, not via
   ///      that machinery) and then simply returns success — no timeout, no
-  ///      automatic follow-up move of any kind (2026-08-06, explicit
-  ///      request: "wait for next command"). HoverConfig::
-  ///      instance_return_preset_name is no longer used by this step as of
-  ///      2026-08-06 (superseded by the lift; left in HoverConfig/config
-  ///      files only for any other future caller).
+  ///      automatic follow-up move of any kind; the arm waits for the next
+  ///      command. HoverConfig::instance_return_preset_name is no longer
+  ///      used by this step (superseded by the lift; left in
+  ///      HoverConfig/config files only for any other future caller).
   /// Fails (response->success = false) with a clear, stage-labeled message
   /// at the first failing step — including, at step 1, if cup_holder
   /// itself isn't currently tracked (no ~/calibrate run completed yet, or
@@ -560,11 +546,11 @@ private:
   /// cannot be computed at all without it, even when the actual requested
   /// instance is cup_holder itself. Logs each target's straight-line
   /// distance from the planning frame's origin against standoff_config_
-  /// .max_reach_m BEFORE attempting to plan to it (2026-08-02 — see this
-  /// method's own body comment) so a planning failure's log is
-  /// self-sufficient for telling "target was out of reach" apart from "in
-  /// range but no path found" without needing to cross-reference
-  /// move_group's separate OMPL log.
+  /// .max_reach_m before attempting to plan to it (see this method's own
+  /// body comment) so a planning failure's log is self-sufficient for
+  /// telling "target was out of reach" apart from "in range but no path
+  /// found" without needing to cross-reference move_group's separate
+  /// OMPL log.
   void handleMoveToInstance(
     const std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Request> request,
     std::shared_ptr<visual_calibration_msgs::srv::MoveToInstance::Response> response);
@@ -598,7 +584,7 @@ private:
   /// ArmState::SETTLED_AT_GOAL, and (re)starts stay_timer_ for
   /// sequence_config_.stay_seconds_at_goal, at the end of which
   /// onStayTimerFired runs. goal_pose is the pose the arm just reached —
-  /// stay_timer_'s lift is computed from THIS, not from any pose the arm
+  /// stay_timer_'s lift is computed from this, not from any pose the arm
   /// was at before the goal (this design does not track/return-to prior
   /// poses at all, see ArmState's doc comment).
   void onSequencedGoalReached(const geometry_msgs::msg::Pose & goal_pose);
@@ -609,7 +595,7 @@ private:
   /// transitions to ArmState::LIFTED_IDLE and starts lift_wait_timer_ for
   /// sequence_config_.lift_wait_seconds (see onLiftWaitTimerFired). On
   /// failure, reports via publishPlanningFailure (context "lift") and
-  /// returns to ArmState::IDLE — does NOT proceed to standby from a failed
+  /// returns to ArmState::IDLE — does not proceed to standby from a failed
   /// lift, since the arm's actual position at that point is uncertain.
   void onStayTimerFired();
 
@@ -627,28 +613,26 @@ private:
   /// convention) — called once, unconditionally, as the very first step of
   /// runStartupSequence(), before the home move. Unconditional (not an
   /// "if open, close" check) because the real gripper's /joint_states
-  /// entries were confirmed 2026-07-20 to report the same static value
-  /// regardless of actual open/closed state — there is no reliable signal
-  /// available today to check first, so this always commands closed
-  /// instead (harmless no-op if it's already closed). Runs on both sim and
-  /// real: on sim there is no robotiq_85_driver node subscribed to
-  /// ~/gripper/cmd, so the publish reaches zero subscribers and does
-  /// nothing — this is deliberately not gated by an env check (see
-  /// todo.txt B6). Does not wait for or verify the close completed (no
-  /// feedback signal exists to wait on) — only gives it a brief pause
-  /// (gripper_close_settle_seconds) before runStartupSequence proceeds to
-  /// the home move.
+  /// entries report the same static value regardless of actual
+  /// open/closed state — there is no reliable signal available to check
+  /// first, so this always commands closed instead (harmless no-op if
+  /// it's already closed). Runs on both sim and real: on sim there is no
+  /// robotiq_85_driver node subscribed to ~/gripper/cmd, so the publish
+  /// reaches zero subscribers and does nothing — this is deliberately not
+  /// gated by an env check. Does not wait for or verify the close
+  /// completed (no feedback signal exists to wait on) — only gives it a
+  /// brief pause (gripper_close_settle_seconds) before runStartupSequence
+  /// proceeds to the home move.
   void closeGripperOnStartup();
 
   /// Called once from the constructor. If move_to_home_on_startup (a
   /// declared param, see trajectory_planner_sim.yaml/_real.yaml) is true,
-  /// plans and executes to the "home" preset pose — an explicit, opt-in
-  /// reversal of this node's original "never move on startup" design (see
-  /// main.cpp's history / todo.txt item 1); the param makes the choice to
-  /// auto-move an auditable config decision rather than silent behavior.
-  /// On failure (missing "home" preset, or plan/execute failure), logs the
-  /// error and reports it via ~/planning_failure (see PlanningFailure.msg)
-  /// — does not throw, does not block node startup either way.
+  /// plans and executes to the "home" preset pose. The param makes the
+  /// choice to auto-move an auditable config decision rather than silent
+  /// behavior. On failure (missing "home" preset, or plan/execute
+  /// failure), logs the error and reports it via ~/planning_failure (see
+  /// PlanningFailure.msg) — does not throw, does not block node startup
+  /// either way.
   void runStartupSequence();
 
   /// Publishes name on ~/current_pose_name (transient_local, so a late
@@ -697,26 +681,23 @@ private:
   /// periodic DDS traffic alongside perception topics.
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr current_pose_name_pub_;
   /// Plain reliable QoS, published once per failure event — see
-  /// publishPlanningFailure's doc comment for why this is NOT
+  /// publishPlanningFailure's doc comment for why this is not
   /// transient_local (unlike current_pose_name_pub_).
   rclcpp::Publisher<visual_calibration_msgs::msg::PlanningFailure>::SharedPtr
     planning_failure_pub_;
   /// See closeGripperOnStartup — plain reliable QoS, one-shot at startup.
   /// Published on the absolute topic "/gripper/cmd" (not "~/gripper/cmd"),
-  /// matching real's robotiq_85_driver subscription exactly (see CLAUDE.md/
-  /// todo.txt B5, and the manual `ros2 topic pub /gripper/cmd
-  /// robotiq_85_msgs/msg/GripperCmd ...` command confirmed live 2026-07-20
-  /// to physically close the real gripper). On sim, nothing subscribes to
-  /// this topic, so the publish is a harmless no-op — see
-  /// closeGripperOnStartup's doc comment.
+  /// matching real's robotiq_85_driver subscription exactly. On sim,
+  /// nothing subscribes to this topic, so the publish is a harmless
+  /// no-op — see closeGripperOnStartup's doc comment.
   rclcpp::Publisher<robotiq_85_msgs::msg::GripperCmd>::SharedPtr gripper_cmd_pub_;
 
   /// Guards arm_state_/goal_pose_/stay_timer_/lift_wait_timer_ below.
-  /// Required since main.cpp switched to a MultiThreadedExecutor (see its
+  /// Required because main.cpp runs a MultiThreadedExecutor (see its
   /// comment) — service callbacks (handleTracePath) and timer callbacks
-  /// (onStayTimerFired/onLiftWaitTimerFired) can now genuinely run on
-  /// different threads concurrently, e.g. a new sequenced goal arriving
-  /// right as a pending timer fires.
+  /// (onStayTimerFired/onLiftWaitTimerFired) can run on different threads
+  /// concurrently, e.g. a new sequenced goal arriving right as a pending
+  /// timer fires.
   std::mutex state_mutex_;
   /// See ArmState's doc comment — this class's only memory of its own
   /// recent activity, used solely to drive the sequenced-goal stay/lift/
@@ -735,7 +716,7 @@ private:
   /// One-shot timer for SequenceConfig::lift_wait_seconds — see
   /// onStayTimerFired/onLiftWaitTimerFired. Cancelled and restarted by any
   /// new sequenced goal that arrives while pending (see
-  /// onSequencedGoalReached) — this cancel-and-restart IS the "idle"
+  /// onSequencedGoalReached) — this cancel-and-restart is the "idle"
   /// signal: the timer only ever fires if nothing new showed up in time.
   /// Guarded by state_mutex_.
   rclcpp::TimerBase::SharedPtr lift_wait_timer_;

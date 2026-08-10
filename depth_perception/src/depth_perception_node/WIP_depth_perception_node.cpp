@@ -1,49 +1,19 @@
-// STAGE 1 REBUILD (2026-08-05, branch tf-construction-rebuild).
+// Work-in-progress minimal rewrite of DepthPerceptionNode (not referenced
+// by CMakeLists.txt, so it does not build). Goal: make every step of the
+// pixel-to-3D-to-base_link computation independently observable from the
+// node's own log output, one small, testable stage at a time. See
+// CentroidBackProjection's doc comment (in the header) for what "every
+// step" means concretely.
 //
-// Why this file was rewritten from scratch instead of patched: a long
-// investigation session traced a real-robot symptom (cup_holder/hole TFs
-// visually displaced/mirrored in RViz relative to their true physical
-// positions) down to the old depth_perception_node.cpp's math — and found
-// NO bug there. Every formula was reproduced by hand against live
-// tf2_echo/log captures and matched exactly. The actual open question
-// (whether calibration_broadcaster_node's camera ORIENTATION result is
-// itself correct) could not be conclusively resolved from log archaeology
-// alone, because the old file's own logging only ever exposed FINAL
-// numbers (e.g. "cup_holder: frame(x=.., y=.., z=..)"), not the
-// intermediate pixel/depth/intrinsics inputs that produced them — so
-// verifying anything required either re-deriving inputs by inverting the
-// output formula (error-prone, confirmed to produce a physically
-// impossible result once this session) or writing an ad-hoc Python
-// capture script (resources/scripts/python/capture_tf_snapshot.py) just
-// to get one clean, single-moment snapshot.
+// Stage 1 scope: cup_holder centroid only. No holes, no TF broadcast, no
+// rolling-window/stability filtering, no overlay image yet.
 //
-// This rebuild's actual GOAL is not different math — it's making every
-// step of the computation independently observable from the node's own
-// log output, one small, testable stage at a time, so a future debugging
-// session never needs a special script to see what this node is actually
-// doing. See CentroidBackProjection's own doc comment (in the header) for
-// what "every step" means concretely.
-//
-// SCOPE OF THIS STAGE: cup_holder centroid only. No holes yet, no TF
-// broadcast yet, no rolling-window/stability filtering yet, no overlay
-// image yet. The old, full-featured file is preserved as
-// depth_perception_node.OLD_REFERENCE.{hpp,cpp} (NOT referenced by
-// CMakeLists.txt, so it does not build) purely as a reference for porting
-// the remaining features back in, stage by stage, once this stage is
-// confirmed correct on real hardware.
-//
-// STAGE 2 (2026-08-05): adds the camera-frame -> base_link conversion +
-// TF broadcast for cup_holder, confirmed correct on real hardware in
-// Stage 1 first (valid_samples=25/25 every reading, stable/repeatable
-// camera_frame(x,y,z) once the arm settled — see this branch's commit
-// log). Still cup_holder ONLY — no holes, no rolling-window/stability
-// filtering, no overlay image (deliberately deferred to a later stage,
-// per explicit request to keep each stage minimal and testable on its
-// own). cameraFrameToBaseLink logs the FULL calibrated camera TF used
-// (translation + RPY) alongside the result, so this stage's own log line
-// answers "what did calibration_broadcaster_node's camera orientation
-// actually look like at the moment this TF was computed" without a
-// separate tf2_echo capture.
+// Stage 2 adds the camera-frame -> base_link conversion + TF broadcast
+// for cup_holder. Still cup_holder only. cameraFrameToBaseLink logs the
+// full calibrated camera TF used (translation + RPY) alongside the
+// result, so this stage's own log line shows exactly what camera
+// orientation was used to compute a given TF, without a separate
+// tf2_echo capture.
 
 #include "depth_perception/depth_perception_node.hpp"
 
@@ -88,7 +58,7 @@ DepthPerceptionNode::DepthPerceptionNode()
 
   RCLCPP_INFO(
     get_logger(),
-    "depth_perception_node ready [STAGE 2 REBUILD, cup_holder-only] (rgb: '%s', depth: '%s', "
+    "depth_perception_node ready [stage 2, cup_holder-only] (rgb: '%s', depth: '%s', "
     "camera_info: '%s', detections_2d: '%s', depth_patch_half_size_px: %d, "
     "known_chain_frame: '%s', broadcast_frame_suffix: '%s')",
     config_.rgb_image_topic.c_str(), config_.depth_image_topic.c_str(),
@@ -247,9 +217,7 @@ CameraToBaseLinkResult DepthPerceptionNode::cameraFrameToBaseLink(
   result.cam_yaw_deg = yaw * 180.0 / M_PI;
 
   // base_link_point = camera_translation + camera_rotation * camera_frame_point
-  // — standard rigid-transform composition, identical math to the old
-  // file's own known_to_camera * camera_to_cup_holder (confirmed this
-  // session to be arithmetically correct, just under-logged).
+  // — standard rigid-transform composition.
   tf2::Vector3 p_cam(cam_x, cam_y, cam_z);
   tf2::Transform known_to_camera;
   known_to_camera.setOrigin(tf2::Vector3(t.x, t.y, t.z));
@@ -275,8 +243,7 @@ void DepthPerceptionNode::detections2dCallback(
 
   for (const auto & detection : msg->detections) {
     // Stage 1/2: cup_holder only. Holes/aruco_marker are skipped entirely
-    // for now — see this file's own top-of-file doc comment for the
-    // staged-rebuild plan.
+    // for now — see this file's top-of-file comment for the staged plan.
     if (detection.class_name != "cup_holder") {
       continue;
     }
@@ -298,11 +265,10 @@ void DepthPerceptionNode::detections2dCallback(
       cam_result.x, cam_result.y, cam_result.z, msg->header.frame_id);
 
     if (!base_result.valid) {
-      // Every intermediate quantity still logged, even on failure — this
-      // is exactly the "camera-frame math is fine, base_link conversion
+      // Every intermediate quantity is still logged, even on failure —
+      // this is the "camera-frame math is fine, base_link conversion
       // couldn't run" case (e.g. no ~/calibrate run completed yet this
-      // session) that used to be invisible without cross-referencing a
-      // separate warning line.
+      // session).
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 5000,
         "cup_holder centroid: pixel(cx=%.2f, cy=%.2f) depth_m=%.4f -> "
@@ -312,10 +278,9 @@ void DepthPerceptionNode::detections2dCallback(
       continue;
     }
 
-    // Every intermediate quantity, both stages, in ONE line — the whole
-    // point of this rebuild. A future debugging session can verify this
-    // by hand from this single line alone: no separate camera_info/TF
-    // capture, nothing implicit.
+    // Every intermediate quantity, both stages, in one line — the whole
+    // point of this rebuild: a debugging session can verify this by hand
+    // from this single line alone, no separate camera_info/TF capture.
     RCLCPP_INFO(
       get_logger(),
       "cup_holder centroid: pixel(cx=%.2f, cy=%.2f) patch_half_px=%d valid_samples=%d/%d "
@@ -340,8 +305,7 @@ void DepthPerceptionNode::detections2dCallback(
     cup_holder_tf.transform.translation.z = base_result.z;
     // Position-only — no orientation estimate exists for a bbox-centroid
     // detection, so this TF's rotation is left as the identity quaternion
-    // rather than fabricating a meaningless one (same convention the old
-    // file used).
+    // rather than fabricating a meaningless one.
     cup_holder_tf.transform.rotation.w = 1.0;
     instance_tf_broadcaster_.sendTransform(cup_holder_tf);
   }

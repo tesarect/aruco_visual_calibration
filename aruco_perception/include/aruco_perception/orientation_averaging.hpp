@@ -23,10 +23,10 @@ enum class OrientationAveragingMethod
   /// "Averaging Quaternions," JGCD 2007) — the proper SO(3) average,
   /// robust to widely-spread samples, unlike kSumNormalize above.
   /// Computes the dominant eigenvector of a 4x4 symmetric matrix built
-  /// from the samples' weighted outer products (see orientation_averaging
-  /// .cpp's markleyAverage() for the full algorithm and Eigen usage —
-  /// this package's first, added 2026-08-01). Equal-weighted (1/N) today;
-  /// no per-sample weighting exists anywhere in this codebase yet.
+  /// from the samples' weighted outer products (see
+  /// orientation_averaging.cpp's markleyAverage() for the full algorithm).
+  /// Equal-weighted (1/N) today; no per-sample weighting exists anywhere
+  /// in this codebase yet.
   kMarkley,
 };
 
@@ -34,7 +34,7 @@ enum class OrientationAveragingMethod
 /// how far each sample deviated from it (angular spread, in degrees) — a
 /// quality signal for whether the average is trustworthy, independent of
 /// which method produced it. Not yet used to auto-escalate between
-/// methods (see progress.md's Feature Additions) — logged for now.
+/// methods; logged for now.
 struct OrientationAveragingResult
 {
   tf2::Quaternion averaged;
@@ -57,12 +57,10 @@ OrientationAveragingResult averageQuaternions(
 
 /// Angular deviation (degrees) between two quaternions, accounting for the
 /// q/-q double-cover of SO(3) (returns the shorter of the two equivalent
-/// angles). Exposed (2026-07-29, for CalibrationBroadcasterNode::
-/// rejectOutliers' per-sample deviation check) — the exact same formula
-/// averageQuaternions() already uses internally to compute max_spread_deg/
-/// mean_spread_deg, so a caller needing a single sample-vs-reference
-/// deviation doesn't have to reimplement/duplicate the acos(dot(...))
-/// formula.
+/// angles). Exposed as the same formula averageQuaternions() uses
+/// internally to compute max_spread_deg/mean_spread_deg, so callers
+/// needing a single sample-vs-reference deviation (e.g.
+/// CalibrationBroadcasterNode::rejectOutliers) don't have to duplicate it.
 double angularDeviationDeg(const tf2::Quaternion & a, const tf2::Quaternion & b);
 
 }  // namespace aruco_perception

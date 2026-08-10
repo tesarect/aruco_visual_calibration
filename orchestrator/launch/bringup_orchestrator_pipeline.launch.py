@@ -1,23 +1,15 @@
-"""NEW, additive file — does not replace or modify calibration_orchestrator.launch.py,
-which is left untouched and still independently launchable. See
-visual_calibration_moveit/launch/bringup_full_sim_README.md (and
-bringup_full_real_README.md) for the full staged-bringup design this file
-is part of.
+"""Full pipeline bringup: MoveIt planning scene/trajectory planner, ArUco
+detection/calibration broadcast, and calibration orchestration from a
+single `ros2 launch` call.
+
+calibration_orchestrator.launch.py remains independently launchable.
 
 Cross-package: includes visual_calibration_moveit's bringup_moveit_pipeline
 (planning_scene_setup -> trajectory_planner, scene-content gated) and
 aruco_perception's bringup_aruco_pipeline (aruco_detector_node ->
-calibration_broadcaster_node, node-presence gated), THEN gates
-calibration_orchestrator_node on calibration_broadcaster_node AND
-trajectory_planner both being up — mirrors sim_tmux_trajcal.sh/
-real_tmux_trajcal.sh's pane 3 chain (`wait_for_node.sh
-calibration_broadcaster_node && wait_for_node.sh trajectory_planner`).
-
-This is the file that, once trusted, replaces the largest chunk of
-sim_tmux_trajcal.sh/real_tmux_trajcal.sh's pane count in one shot — it
-transitively brings up planning_scene_setup, trajectory_planner,
-aruco_detector_node, calibration_broadcaster_node, AND
-calibration_orchestrator_node from a single `ros2 launch` call.
+calibration_broadcaster_node, node-presence gated), then gates
+calibration_orchestrator_node on calibration_broadcaster_node and
+trajectory_planner both being up.
 """
 
 import time
@@ -37,9 +29,9 @@ NODE_WAIT_POLL_INTERVAL_SEC = 1.0
 
 
 def _wait_for_nodes(node_name_substrings, timeout_sec, interval_sec):
-    """Waits for EVERY name in node_name_substrings to appear in the ROS
-    graph (substring match, same semantics as wait_for_node.sh), not just
-    the first. Returns True only if all are found before timeout_sec.
+    """Waits for every name in node_name_substrings to appear in the ROS
+    graph (substring match), not just the first. Returns True only if all
+    are found before timeout_sec.
     """
     rclpy.init(args=None)
     node = RclpyNode("bringup_orchestrator_pipeline_node_wait")
@@ -75,8 +67,7 @@ def _launch_setup(context, *args, **kwargs):
     else:
         print(
             "[bringup_orchestrator_pipeline] Timed out waiting for dependencies — "
-            "starting calibration_orchestrator_node anyway (same 'continuing "
-            "anyway' convention as wait_for_node.sh).", flush=True,
+            "starting calibration_orchestrator_node anyway.", flush=True,
         )
 
     calibration_orchestrator_include = IncludeLaunchDescription(
@@ -122,8 +113,7 @@ def generate_launch_description():
         env_arg,
         moveit_pipeline_include,
         aruco_pipeline_include,
-        # See bringup_moveit_pipeline.launch.py's matching comment: this
-        # only guarantees both included pipelines' processes are STARTED
+        # Only guarantees both included pipelines' processes are STARTED
         # before the wait begins — the blocking wait inside _launch_setup
         # is what actually enforces the gate.
         OpaqueFunction(function=_launch_setup),

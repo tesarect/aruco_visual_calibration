@@ -116,53 +116,40 @@ void CupHolderDetectorNode::assignHoleQuadrants(
     return;
   }
 
-  // --- Label-flicker fix (2026-07-30) -------------------------------
-  // BUG (confirmed live + by code trace): the quadrant split below is a
-  // pure function of THIS frame's positions relative to THIS frame's own
-  // reference point, recomputed from scratch every frame with no memory
-  // of which physical hole previously held which number. A hole sitting
-  // near the ref_x or ref_y midline can have its top/left boolean flip
-  // from frame to frame on nothing more than a few pixels of detection
-  // jitter (contour noise, a slightly different Canny/threshold outcome,
-  // etc.) even though the physical hole hasn't meaningfully moved.
-  // depth_perception_node keys its rolling_windows_ map by
-  // TrackedInstanceKey{class_name, hole_number} — if hole_number flips,
-  // TWO DIFFERENT physical holes end up writing into the SAME rolling
-  // window across different frames, corrupting that one window's tracked
-  // position with data from two different objects, while holes far from
-  // any boundary (confidently classified every frame) stay stable. This
-  // matches the reported symptom exactly: hole_1/2/4 stable, hole_3
-  // (or whichever number sits at the boundary for this arrangement)
-  // intermittent/wrong.
+  // --- Persistent per-hole identity across frames --------------------
+  // The quadrant split below is a pure function of this frame's positions
+  // relative to this frame's own reference point. Recomputing it from
+  // scratch every frame, with no memory of which physical hole previously
+  // held which number, means a hole sitting near the ref_x or ref_y
+  // midline can flip its top/left classification from frame to frame on
+  // nothing more than a few pixels of detection jitter, even though the
+  // physical hole hasn't meaningfully moved. depth_perception_node keys
+  // its rolling_windows_ map by TrackedInstanceKey{class_name,
+  // hole_number}, so a flipped hole_number causes two different physical
+  // holes to write into the same rolling window across different frames.
   //
-  // FIX: give each physical hole a persistent identity across frames
-  // instead of reclassifying from scratch. Match this frame's holes to
-  // previous_holes_ (last frame's output, already labeled) by nearest-
-  // centroid-distance, and inherit the matched previous hole's
-  // hole_number directly — no top/left recomputation at all for a
-  // matched hole, so jitter around the ref_x/ref_y midline can no longer
-  // flip its label (the label isn't even a function of the midline once
-  // a hole has an established identity). Only holes with NO confident
-  // previous-frame match (first sighting of a hole, or previous_holes_ is
-  // empty because last frame had 0 holes) fall back to the original
-  // quadrant-split logic to bootstrap an initial label.
+  // To avoid this, each physical hole is given a persistent identity
+  // across frames instead of being reclassified from scratch: this
+  // frame's holes are matched to previous_holes_ (last frame's output,
+  // already labeled) by nearest-centroid distance, and a matched hole
+  // inherits the previous hole's hole_number directly with no top/left
+  // recomputation — so jitter around the midline can no longer flip its
+  // label. Only holes with no confident previous-frame match (first
+  // sighting of a hole, or previous_holes_ empty because last frame had 0
+  // holes) fall back to the quadrant-split logic to bootstrap a label.
   //
-  // Why nearest-centroid matching (not just "add a deadband around the
-  // midline"): a deadband only prevents a flip for a hole oscillating
-  // right at the boundary within one frame's jitter — it does nothing
-  // for the case of a hole legitimately, slowly drifting across the
-  // midline over many frames (e.g. during a slow wrist-camera scan
-  // sweep), where jitter can still occur right at the crossing point.
-  // Persistent identity via nearest-centroid handles both cases
-  // uniformly: a hole's label only changes when it's unambiguously
-  // closer to a DIFFERENT previous hole than to its own previous
-  // position, which requires far more motion than one frame of jitter.
+  // Nearest-centroid matching (rather than a deadband around the
+  // midline) also handles a hole slowly drifting across the midline over
+  // many frames, where jitter can occur right at the crossing point: a
+  // hole's label only changes when it becomes unambiguously closer to a
+  // different previous hole than to its own previous position, which
+  // requires far more motion than one frame of jitter.
   //
-  // Match gating (hole_reassign_max_dist_px, default = hole_max_radius_px,
-  // see its own doc comment for the scale justification): only accept a
-  // previous-frame match within this pixel distance. A greedy
+  // Match gating (hole_reassign_max_dist_px, default = hole_max_radius_px
+  // — see its own doc comment for the scale justification): only accept a
+  // previous-frame match within this pixel distance, via a greedy
   // nearest-available match (holes processed in ascending distance order,
-  // each previous hole usable at most once) — 4 holes max, so an O(n^2)
+  // each previous hole usable at most once). 4 holes max, so an O(n^2)
   // greedy pass is more than fast enough and there's no need for a full
   // Hungarian assignment here.
   const double max_dist_px = get_parameter("hole_reassign_max_dist_px").as_double();
@@ -208,29 +195,23 @@ void CupHolderDetectorNode::assignHoleQuadrants(
     prev_used[c.prev_idx] = true;
   }
 
-  // Bootstrap path — original from-scratch quadrant split, applied ONLY
-  // to holes that found no acceptable previous-frame match above (new
-  // hole appearing for the first time, or previous_holes_ was empty).
-  // Reference point: ALWAYS the mean (cx, cy) of THIS frame's own hole
-  // detections — NOT the cup_holder's own fitted center. CHANGED
-  // 2026-07-30: live-tested that the disc's rim contour is genuinely
-  // elliptical from sim's wrist-camera angle (perspective foreshortening —
-  // confirmed axes ~220x226px, not an artifact of dilate kernel size,
-  // consistent across 2/3/5px dilate), which pulls a fitEllipse/moments-
-  // based disc center away from the true visual center of the 4-hole
-  // arrangement. The 4 holes themselves detect cleanly and accurately via
-  // simple thresholding (no equivalent distortion) — using their own
+  // Bootstrap path — from-scratch quadrant split, applied only to holes
+  // that found no acceptable previous-frame match above (new hole
+  // appearing for the first time, or previous_holes_ was empty).
+  // Reference point: always the mean (cx, cy) of this frame's own hole
+  // detections, not the cup_holder's own fitted center. The disc's rim
+  // contour is genuinely elliptical from sim's wrist-camera angle
+  // (perspective foreshortening), which pulls a fitEllipse/moments-based
+  // disc center away from the true visual center of the 4-hole
+  // arrangement; the 4 holes themselves detect cleanly via simple
+  // thresholding with no equivalent distortion, so using their own
   // centroid as the quadrant reference sidesteps the disc-fit distortion
-  // entirely, at the cost of needing at least 1 hole detected (never an
-  // issue in practice: quadrant assignment is meaningless with 0 holes
-  // anyway, see the empty check above). This diverges from
-  // yolo_marker_bridge_node.py's assign_hole_quadrants(), which prefers
-  // the cup_holder's bbox center and only falls back to the hole-centroid
-  // when no cup_holder was found that frame — real's camera doesn't
-  // appear to hit this same perspective-distortion problem (wall-mounted,
-  // different geometry), so that node's own preference order is left
-  // unchanged; this is a SIM-specific divergence, not a claim that real's
-  // logic needs the same fix.
+  // entirely. This diverges from yolo_marker_bridge_node.py's
+  // assign_hole_quadrants(), which prefers the cup_holder's bbox center
+  // and only falls back to the hole-centroid when no cup_holder was found
+  // — real's wall-mounted camera doesn't have this sim-specific
+  // perspective-distortion problem, so that node's preference order is
+  // left unchanged.
   double sum_x = 0.0, sum_y = 0.0;
   for (const auto & hole : holes) {
     sum_x += hole.cx;
@@ -315,14 +296,11 @@ void CupHolderDetectorNode::imageCallback(const sensor_msgs::msg::Image::ConstSh
   const double hole_min_radius_px = get_parameter("hole_min_radius_px").as_double();
   const double hole_max_radius_px = get_parameter("hole_max_radius_px").as_double();
 
-  // Pass 1 — cup_holder: found via its RIM (edge), not flat brightness.
-  // 2026-07-30: live-tested that the disc has almost no brightness
-  // separation from the background wall in sim's actual lighting — no
-  // single cv::threshold cutoff can isolate it — but Canny cleanly finds
-  // its rim as a closed loop (confirmed via cup_holder_pipeline_debug.py).
-  // Blur first to avoid fragmenting the edge on per-pixel noise, dilate
-  // after to bridge any small gaps in the 1px Canny line so
-  // findContours sees one continuous closed shape.
+  // Pass 1 — cup_holder: found via its rim (edge), not flat brightness,
+  // since the disc has almost no brightness separation from the
+  // background wall in sim's lighting. Blur first to avoid fragmenting
+  // the edge on per-pixel noise, dilate after to bridge any small gaps in
+  // the 1px Canny line so findContours sees one continuous closed shape.
   cv::Mat cup_holder_blurred;
   const cv::Size blur_kernel(cup_holder_blur_kernel_px, cup_holder_blur_kernel_px);
   cv::GaussianBlur(gray, cup_holder_blurred, blur_kernel, 0);

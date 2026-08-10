@@ -85,10 +85,9 @@ void DepthPerceptionNode::rgbImageCallback(const sensor_msgs::msg::Image::ConstS
 void DepthPerceptionNode::depthImageCallback(const sensor_msgs::msg::Image::ConstSharedPtr & msg)
 {
   // toCvCopy (not toCvShare) is required here, unlike rgbImageCallback:
-  // we convert to a fixed CV_32FC1 representation below regardless of the
-  // incoming encoding, and toCvShare cannot perform a real pixel-format
-  // conversion (see aruco_perception's error-mitigation notes on this
-  // exact toCvShare-vs-toCvCopy distinction).
+  // this converts to a fixed CV_32FC1 representation below regardless of
+  // the incoming encoding, and toCvShare cannot perform a real
+  // pixel-format conversion.
   const cv_bridge::CvImageConstPtr cv_ptr = cv_bridge::toCvCopy(msg, msg->encoding);
 
   RCLCPP_INFO_THROTTLE(
@@ -99,9 +98,7 @@ void DepthPerceptionNode::depthImageCallback(const sensor_msgs::msg::Image::Cons
   // Store a CV_32F-meters copy for detections2dCallback to read. Scaling
   // by config_.depth_scale_to_meters here (once, at storage time) means
   // backProjectDetection() never needs to know or care what the source
-  // encoding/units were — see DepthPerceptionConfig::depth_scale_to_meters's
-  // own doc comment for why this defaults to 1.0 (32FC1 sim depth is
-  // already meters) but exists as a parameter regardless.
+  // encoding/units were — see DepthPerceptionConfig::depth_scale_to_meters.
   cv::Mat depth_meters;
   if (msg->encoding == "32FC1") {
     depth_meters = cv_ptr->image * config_.depth_scale_to_meters;
@@ -158,23 +155,20 @@ void DepthPerceptionNode::detections2dCallback(
     return;
   }
 
-  // Built up as one multi-line string and logged ONCE per callback
+  // Built up as one multi-line string and logged once per callback
   // (throttled), rather than calling RCLCPP_INFO_THROTTLE once per
   // detection inside the loop below. RCLCPP_INFO_THROTTLE's "have I
   // logged recently" bucket is keyed by call site (source line), not by
   // any argument — so if every detection in a frame shared one throttled
-  // call, they'd all contend for the SAME bucket and only the first
-  // detection in msg->detections (always cup_holder, per
-  // yolo_marker_bridge_node's publish order) would ever get through.
-  // Confirmed live 2026-07-27: exactly this symptom (hole detections
-  // present in /aruco_perception/detections_2d but never logged here).
+  // call, they'd all contend for the same bucket and only the first
+  // detection in msg->detections would ever get through.
   std::string log_lines;
 
-  // Collected alongside the main loop below (2026-08-04) so
-  // publishDepthOverlayImage can draw each detection's ACTUAL sampled
-  // patch (patch_half_px) without recomputing backProjectDetection's own
-  // radius-scaling logic a second time — one source of truth for what was
-  // actually sampled, not a duplicate/approximate copy for drawing.
+  // Collected alongside the main loop below so publishDepthOverlayImage
+  // can draw each detection's actual sampled patch (patch_half_px)
+  // without recomputing backProjectDetection's own radius-scaling logic
+  // a second time — one source of truth for what was actually sampled,
+  // not a duplicate/approximate copy for drawing.
   std::vector<OverlayDetection> overlay_detections;
   overlay_detections.reserve(msg->detections.size());
 
@@ -188,12 +182,12 @@ void DepthPerceptionNode::detections2dCallback(
 
     const std::array<double, 4> bbox = {
       detection.bbox[0], detection.bbox[1], detection.bbox[2], detection.bbox[3]};
-    // use_max_depth (2026-08-04) — see backProjectDetection's own doc
-    // comment: "hole" is a real cavity that a median-of-patch read can
-    // still bias toward the near wall/rim even with a correctly-sized
-    // patch (an oblique VIEWING-ANGLE problem, distinct from the earlier
-    // patch-SIZE fix); "cup_holder" is a flat surface with no equivalent
-    // wall to graze past, so it keeps the noise-robust median.
+    // See backProjectDetection's doc comment: "hole" is a real cavity
+    // where a median-of-patch read can still bias toward the near
+    // wall/rim even with a correctly-sized patch (an oblique
+    // viewing-angle problem, distinct from patch sizing); "cup_holder" is
+    // a flat surface with no equivalent wall to graze past, so it keeps
+    // the noise-robust median.
     const bool use_max_depth = (detection.class_name == "hole");
     double radius_px = 0.0;
     int patch_half_px = 0;
@@ -230,17 +224,16 @@ void DepthPerceptionNode::detections2dCallback(
         window_size, config_.rolling_window_size, drifted ? "DRIFT" : "held",
         detection.confidence, radius_px, patch_half_px, use_max_depth ? "max" : "median");
     } else {
-      // A single frame's failed back-projection does NOT touch that
-      // instance's rolling window — see updateRollingWindow's doc
-      // comment — so its existing stable estimate (if any) is left
-      // alone rather than being reported as missing here. NOTE: this
-      // "no detection at all this frame" case (a hole simply absent from
-      // msg->detections) never reaches this loop body in the first place
-      // — nothing is pushed into that instance's rolling window on such a
-      // frame, so RollingWindow::samples never contains a "missing" entry
-      // and median()/last_stable's drift check only ever sees real,
-      // valid back-projected points — confirmed 2026-07-27, this was
-      // already correct, not something this change needed to fix.
+      // A single frame's failed back-projection does not touch that
+      // instance's rolling window (see updateRollingWindow's doc
+      // comment), so its existing stable estimate (if any) is left alone
+      // rather than being reported as missing here. The "no detection at
+      // all this frame" case (a hole simply absent from msg->detections)
+      // never reaches this loop body at all — nothing is pushed into
+      // that instance's rolling window on such a frame, so
+      // RollingWindow::samples never contains a "missing" entry and
+      // median()/last_stable's drift check only ever sees real, valid
+      // back-projected points.
       std::snprintf(
         line, sizeof(line),
         "\n  %s at pixel (%.1f, %.1f): no valid depth in the sampled patch",
@@ -327,31 +320,28 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
   tf2::Transform known_to_camera;
   tf2::fromMsg(known_to_camera_tf.transform, known_to_camera);
 
-  // cup_holder anchors the 4 holes (2026-07-30) — find its current
-  // last_stable first so hole TFs below can be expressed relative to it
-  // (cup_holder -> hole_N) instead of each hole independently re-deriving
-  // its own base_link -> hole_N chain. All holes move together with the
-  // holder as one rigid unit in reality, so anchoring to the holder's own
-  // tracked centroid — rather than base_link — is both the physically
+  // cup_holder anchors the 4 holes — find its current last_stable first
+  // so hole TFs below can be expressed relative to it (cup_holder ->
+  // hole_N) instead of each hole independently re-deriving its own
+  // base_link -> hole_N chain. All holes move together with the holder
+  // as one rigid unit in reality, so anchoring to the holder's own
+  // tracked centroid, rather than base_link, is both the physically
   // correct parent and immune to the holder's own position noise being
   // double-counted in each hole's independent base_link chain.
   const TrackedInstanceKey cup_holder_key{"cup_holder", 0};
   const auto cup_holder_it = rolling_windows_.find(cup_holder_key);
 
-  // instance_stale_timeout_s (2026-08-06) — RollingWindow::last_stable has
-  // NO concept of staleness by design (see its own doc comment: it holds
-  // forever across brief detection gaps, on purpose, to fix flicker). That
-  // means an instance that stops being detected ENTIRELY (e.g. a hole
-  // becomes occupied/obstructed — confirmed live 2026-08-06: hole_4 absent
-  // from /aruco_perception/detections_2d entirely, yet still broadcasting
-  // a stale TF) would otherwise broadcast its last known position forever,
-  // with nothing to signal it should stop. This timeout adds exactly that
-  // missing signal: an instance whose RollingWindow::last_seen is older
-  // than this many seconds is treated as invalid here, regardless of what
-  // last_stable itself holds. 0.0 (default) disables this entirely — no
-  // behavior change from before this existed. Live-read every call,
-  // tunable via `ros2 param set /depth_perception_node
-  // instance_stale_timeout_s <value>` with NO node restart needed.
+  // RollingWindow::last_stable has no concept of staleness by design (it
+  // holds forever across brief detection gaps, on purpose, to avoid
+  // flicker). That means an instance that stops being detected entirely
+  // (e.g. a hole becomes occupied/obstructed) would otherwise broadcast
+  // its last known position forever, with nothing to signal it should
+  // stop. This timeout adds that missing signal: an instance whose
+  // RollingWindow::last_seen is older than this many seconds is treated
+  // as invalid here, regardless of what last_stable itself holds. 0.0
+  // (default) disables this entirely. Live-read every call, tunable via
+  // `ros2 param set /depth_perception_node instance_stale_timeout_s
+  // <value>` with no node restart needed.
   double instance_stale_timeout_s = 0.0;
   get_parameter_or("instance_stale_timeout_s", instance_stale_timeout_s, 0.0);
   const rclcpp::Time now = get_clock()->now();
@@ -366,37 +356,37 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     cup_holder_it != rolling_windows_.end() && cup_holder_it->second.last_stable.valid &&
     !isStale(cup_holder_it->second);
 
-  // Read LIVE every call (not cached in config_), specifically so it can
+  // Read live every call (not cached in config_), specifically so it can
   // be tuned via `ros2 param set` with no node restart — see this
   // param's own doc comment on DepthPerceptionConfig for why, and its
   // "does not actually change reachability" caveat. get_parameter_or
-  // since it's optional/absent from sim's own yaml (real-only) —
+  // since it's optional/absent from a given deployment's own yaml —
   // automatically_declare_parameters_from_overrides(true) means an
   // undeclared key would otherwise throw via get_parameter().
   double instance_tf_z_offset_m = 0.0;
   get_parameter_or("instance_tf_z_offset_m", instance_tf_z_offset_m, 0.0);
 
-  // Horizontal (X/Y) reachability clamp (2026-07-30) — same "explicitly
-  // requested cheat, not a real fix" spirit as instance_tf_z_offset_m
-  // above, live-read the same way. If cup_holder's horizontal distance
-  // from known_chain_frame's origin exceeds this radius, scale its X/Y
-  // back toward the origin (along the same direction, i.e. pulling it
-  // straight toward the arm's base) until it sits exactly at the radius —
-  // Z is untouched here (instance_tf_z_offset_m above already handles
-  // that axis separately). 0.0 (default) disables the clamp entirely —
-  // matches today's raw, unclamped position. Does NOT make the real
-  // physical holder/table any closer; it only changes the reported
-  // position the arm is told to reach, same caveat as the Z offset.
+  // Horizontal (X/Y) reachability clamp — same "workaround, not a
+  // position fix" spirit as instance_tf_z_offset_m above, live-read the
+  // same way. If cup_holder's horizontal distance from known_chain_frame's
+  // origin exceeds this radius, scale its X/Y back toward the origin
+  // (along the same direction, i.e. pulling it straight toward the arm's
+  // base) until it sits exactly at the radius — Z is untouched here
+  // (instance_tf_z_offset_m above already handles that axis separately).
+  // 0.0 (default) disables the clamp entirely, leaving the raw,
+  // unclamped position. Does not make the real physical holder/table any
+  // closer; it only changes the reported position the arm is told to
+  // reach, same caveat as the Z offset.
   double instance_tf_max_horizontal_dist_m = 0.0;
   get_parameter_or(
     "instance_tf_max_horizontal_dist_m", instance_tf_max_horizontal_dist_m, 0.0);
 
-  // instance_tf_xy_offset_m (2026-08-03) — see this param's own doc
-  // comment on DepthPerceptionConfig for the full rationale (compensates
-  // cup_holder's 2D pixel centroid bias). Read LIVE, same convention as
-  // the two params above. Declared as a 2-element double array
-  // ([x_offset_m, y_offset_m]); get_parameter_or's array overload requires
-  // the default argument's type to already match, hence the explicit
+  // instance_tf_xy_offset_m — see this param's doc comment on
+  // DepthPerceptionConfig for the full rationale (compensates cup_holder's
+  // 2D pixel centroid bias). Read live, same convention as the two
+  // params above. Declared as a 2-element double array ([x_offset_m,
+  // y_offset_m]); get_parameter_or's array overload requires the default
+  // argument's type to already match, hence the explicit
   // std::vector<double> default here.
   std::vector<double> instance_tf_xy_offset_m;
   get_parameter_or(
@@ -406,22 +396,21 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
   const double instance_tf_y_offset_m =
     instance_tf_xy_offset_m.size() > 1 ? instance_tf_xy_offset_m[1] : 0.0;
 
-  // instance_tf_pitch_down_deg (2026-08-06) — explicitly-requested manual
-  // correction for a suspected camera pitch error. Rotates the cup_holder's
-  // camera-frame ray downward (about the camera optical frame's X axis,
-  // i.e. toward +Y) by this many degrees, converts THAT rotated ray to
-  // known_chain_frame (base_link) via known_to_camera same as normal, then
-  // rescales the resulting known_chain_frame X/Y so its Z matches the
-  // ORIGINAL (unrotated) known_chain_frame Z — i.e. "pulled down" in the
-  // 2D image/camera-pitch sense, but still landing on the same real-world
-  // horizontal plane (the holder's own top surface) the unrotated reading
-  // already sat on, not sunk into the object. This MUST be done in
-  // known_chain_frame, not camera frame — rescaling in camera frame only
-  // preserves camera-frame Z, which is not the same plane once known_
-  // to_camera's own orientation error is factored in (confirmed bug: an
-  // earlier camera-frame-only version left the TF still buried in the
-  // object on real hardware). Live-read every call, same convention as
-  // instance_tf_z_offset_m above. 0.0 (default) disables this entirely.
+  // instance_tf_pitch_down_deg: manual correction for a suspected camera
+  // pitch error. Rotates the cup_holder's camera-frame ray downward
+  // (about the camera optical frame's X axis, i.e. toward +Y) by this
+  // many degrees, converts that rotated ray to known_chain_frame
+  // (base_link) via known_to_camera same as normal, then rescales the
+  // resulting known_chain_frame X/Y so its Z matches the original
+  // (unrotated) known_chain_frame Z — i.e. pulled down in the 2D
+  // image/camera-pitch sense, but still landing on the same real-world
+  // horizontal plane (the holder's own top surface) the unrotated
+  // reading already sat on, not sunk into the object. This must be done
+  // in known_chain_frame, not camera frame: rescaling in camera frame
+  // only preserves camera-frame Z, which is not the same plane once
+  // known_to_camera's own orientation error is factored in. Live-read
+  // every call, same convention as instance_tf_z_offset_m above. 0.0
+  // (default) disables this entirely.
   double instance_tf_pitch_down_deg = 0.0;
   get_parameter_or("instance_tf_pitch_down_deg", instance_tf_pitch_down_deg, 0.0);
 
@@ -491,13 +480,10 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     const double cup_holder_raw_z = known_to_cup_holder.getOrigin().z();
     const double cup_holder_z = cup_holder_raw_z + instance_tf_z_offset_m;
 
-    // Diagnostic logging (2026-08-03) — supports confirming/ruling out
-    // Bug 1 (cup_holder's 2D centroid bias) per-environment from a single
-    // log capture, without needing a screenshot. Raw vs. offset-applied,
-    // so a future comparison against ground truth (sim's own
-    // base_link -> wrist_rgbd_camera_link chain, or a real-world
-    // measurement) doesn't require re-running with print-debugging — see
-    // the fix's plan doc for the full log-first-then-tune rationale.
+    // Diagnostic logging: raw vs. offset-applied position, so a
+    // comparison against ground truth (sim's own base_link ->
+    // wrist_rgbd_camera_link chain, or a real-world measurement) doesn't
+    // require re-running with print-debugging.
     RCLCPP_INFO_THROTTLE(
       get_logger(), *get_clock(), 5000,
       "cup_holder TF: raw(x=%.4f, y=%.4f, z=%.4f) offset_applied(x=%.4f, y=%.4f, z=%.4f) "
@@ -512,12 +498,12 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     cup_holder_tf.child_frame_id = "cup_holder";
     cup_holder_tf.transform.translation.x = cup_holder_x;
     cup_holder_tf.transform.translation.y = cup_holder_y;
-    // instance_tf_z_offset_m (2026-07-30, default 0.0, live-read above) —
-    // does NOT reduce cup_holder's actual distance from known_chain_frame,
-    // only the reported/broadcast Z. hole_1..hole_4 inherit this
-    // automatically since they're parented to cup_holder, not
-    // known_chain_frame, directly (see this function's own comment on
-    // that re-anchoring) — no separate offset needed for them.
+    // instance_tf_z_offset_m does not reduce cup_holder's actual distance
+    // from known_chain_frame, only the reported/broadcast Z.
+    // hole_1..hole_4 inherit this automatically since they're parented
+    // to cup_holder, not known_chain_frame, directly (see this
+    // function's own comment on that re-anchoring) — no separate offset
+    // needed for them.
     cup_holder_tf.transform.translation.z = cup_holder_z;
     cup_holder_tf.transform.rotation.w = 1.0;
     instance_tf_broadcaster_.sendTransform(cup_holder_tf);
@@ -528,7 +514,7 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
       continue;
     }
 
-    // instance_stale_timeout_s (2026-08-06) — see this function's own
+    // instance_stale_timeout_s — see this function's own
     // cup_holder_valid comment above for the full rationale. Skips
     // broadcasting (and, since instance_tf_broadcaster_ only ever
     // publishes when reached, effectively stops updating) any hole not
@@ -561,33 +547,28 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     double offset_y = window.last_stable.y - cup_holder_point.y;
     const double offset_z = window.last_stable.z - cup_holder_point.z;
 
-    // instance_tf_hole_yaw_flip (2026-08-06, real-only — no entry in
-    // depth_perception_sim.yaml) — compensates a confirmed diagonal swap
-    // in hole placement on real hardware (hole_1<->hole_4, hole_2<->hole_3
-    // — a 180-degree rotation about the camera's own optical Z axis).
-    // hole_number itself is assigned correctly upstream, from plain 2D
+    // instance_tf_hole_yaw_flip (real-only, no entry in
+    // depth_perception_sim.yaml) — compensates a diagonal swap in hole
+    // placement on real hardware (hole_1<->hole_4, hole_2<->hole_3, a
+    // 180-degree rotation about the camera's own optical Z axis).
+    // hole_number itself is assigned correctly upstream from plain 2D
     // image-space quadrants (see yolo_marker_bridge_node.py's
-    // classify_hole_quadrants) — this is NOT a labeling bug. It's
-    // known_to_camera's own calibrated orientation (confirmed LOW
-    // CONFIDENCE, 17-20deg spread on real) landing near a half-turn on
-    // roll/yaw, which known_to_camera.getBasis() then faithfully applies
-    // to every hole's offset from cup_holder. Negating X and Y (Z
-    // untouched) before rotating is exactly a 180-degree yaw flip about
-    // the camera's optical axis — undoes the diagonal swap without
-    // touching cup_holder's own already-correct position (see
+    // classify_hole_quadrants) — this is not a labeling bug. It's
+    // known_to_camera's own calibrated orientation landing near a
+    // half-turn on roll/yaw when calibration confidence is low, which
+    // known_to_camera.getBasis() then faithfully applies to every hole's
+    // offset from cup_holder. Negating X and Y (Z untouched) before
+    // rotating is exactly a 180-degree yaw flip about the camera's
+    // optical axis — undoes the diagonal swap without touching
+    // cup_holder's own already-correct position (see
     // instance_tf_pitch_down_deg above, applied separately to cup_holder
     // only).
     //
-    // DEFAULT MUST BE false, NOT true — confirmed live 2026-08-06: sim's
-    // own calibration is consistently HIGH CONFIDENCE (~0.6deg orientation
-    // spread, no 180-degree-class error at all), so applying this flip
-    // there SWAPS otherwise-correctly-placed holes into the wrong
-    // position — the opposite of what it's meant to fix. An earlier
-    // version of this code defaulted to true, which silently broke sim's
-    // hole placement even though depth_perception_sim.yaml never
-    // references this param (get_parameter_or's default was the actual
-    // culprit, not a yaml value). depth_perception_real.yaml sets this to
-    // true explicitly, which is the only place it should be enabled.
+    // Default must be false, not true: sim's own calibration is
+    // consistently high confidence with no 180-degree-class orientation
+    // error, so applying this flip there swaps otherwise-correctly-placed
+    // holes into the wrong position. depth_perception_real.yaml sets this
+    // to true explicitly, which is the only place it should be enabled.
     bool instance_tf_hole_yaw_flip = false;
     get_parameter_or("instance_tf_hole_yaw_flip", instance_tf_hole_yaw_flip, false);
     if (instance_tf_hole_yaw_flip) {
@@ -609,13 +590,13 @@ void DepthPerceptionNode::broadcastInstanceTfs(const std_msgs::msg::Header & hea
     hole_tf.child_frame_id = "hole_" + std::to_string(key.hole_number);
     hole_tf.transform.translation.x = cup_holder_to_hole.x();
     hole_tf.transform.translation.y = cup_holder_to_hole.y();
-    // instance_tf_holes_flush_with_holder (2026-08-06, real-only) — forces
-    // every hole's Z offset from cup_holder to 0.0, so all 4 holes end up
-    // on the EXACT SAME Z plane as cup_holder itself (which already has
-    // its own correct height via instance_tf_pitch_down_deg above) instead
-    // of each hole keeping its own small, independently-noisy Z offset.
-    // Physically justified: the 4 holes and the holder rim are all part of
-    // the same rigid, flat-topped object — they SHOULD share one Z plane
+    // instance_tf_holes_flush_with_holder (real-only) — forces every
+    // hole's Z offset from cup_holder to 0.0, so all 4 holes end up on
+    // the exact same Z plane as cup_holder itself (which already has its
+    // own correct height via instance_tf_pitch_down_deg above) instead of
+    // each hole keeping its own small, independently-noisy Z offset.
+    // Physically justified: the 4 holes and the holder rim are all part
+    // of the same rigid, flat-topped object and should share one Z plane
     // in reality. true (default) enables this; set to false via
     // `ros2 param set /depth_perception_node
     // instance_tf_holes_flush_with_holder false` to fall back to each
@@ -757,13 +738,13 @@ BackProjectedPoint DepthPerceptionNode::backProjectDetection(
 {
   BackProjectedPoint result;
 
-  // Radius-scaled patch half-size (2026-08-03) — see this function's own
-  // doc comment in the header for the full rationale. bbox is
-  // [x1, y1, x2, y2]; width/height can legitimately differ (real's YOLO
-  // box is a true axis-aligned box, not a synthesized square), so `max`
-  // rather than assuming a square. Computed unconditionally, even on the
-  // early-return paths below, so the caller's diagnostic log always has a
-  // real value to report — not just on a successful back-projection.
+  // Radius-scaled patch half-size — see this function's doc comment in
+  // the header for the full rationale. bbox is [x1, y1, x2, y2];
+  // width/height can legitimately differ (real's YOLO box is a true
+  // axis-aligned box, not a synthesized square), so `max` rather than
+  // assuming a square. Computed unconditionally, even on the early-return
+  // paths below, so the caller's diagnostic log always has a real value
+  // to report, not just on a successful back-projection.
   const double radius_px = std::max(bbox[2] - bbox[0], bbox[3] - bbox[1]) / 2.0;
   const double scaled_half = config_.depth_patch_radius_scale_factor * radius_px;
   const int half = static_cast<int>(std::lround(
@@ -812,14 +793,13 @@ BackProjectedPoint DepthPerceptionNode::backProjectDetection(
     return result;
   }
 
-  // use_max_depth (2026-08-04, see this function's own header doc comment
-  // for the full rationale) — for a hole, a wall-grazing ray returns a
-  // SHORTER depth than one reaching the true (farther) floor, so the
-  // FARTHEST valid sample in the patch is the best available proxy for
-  // "the one ray that actually reached the floor." For cup_holder (a flat
-  // surface, no cavity to graze past), the median stays the noise-robust
-  // choice — max-of-patch there would just pick up a stray outlier spike
-  // instead of a real signal.
+  // See this function's header doc comment for the full rationale: for a
+  // hole, a wall-grazing ray returns a shorter depth than one reaching
+  // the true (farther) floor, so the farthest valid sample in the patch
+  // is the best available proxy for "the one ray that actually reached
+  // the floor." For cup_holder (a flat surface, no cavity to graze
+  // past), the median stays the noise-robust choice — max-of-patch there
+  // would just pick up a stray outlier spike instead of a real signal.
   float depth_m;
   if (use_max_depth) {
     depth_m = *std::max_element(samples.begin(), samples.end());
@@ -892,11 +872,10 @@ void DepthPerceptionNode::publishDepthOverlayImage(
   }
 
   // Colorize for display: normalize the actual depth range present in
-  // THIS frame to 0-255 (not a fixed min/max — the scene's real depth
+  // this frame to 0-255 (not a fixed min/max — the scene's real depth
   // range varies with camera distance/angle) then apply a perceptually
   // distinct colormap. COLORMAP_JET (blue=near, red=far) is OpenCV's most
-  // common depth-visualization choice — no existing convention in this
-  // codebase to match, since no depth visualization existed before this.
+  // common depth-visualization choice.
   cv::Mat normalized;
   cv::normalize(depth_copy, normalized, 0, 255, cv::NORM_MINMAX, CV_8UC1);
   cv::Mat overlay;
@@ -907,18 +886,15 @@ void DepthPerceptionNode::publishDepthOverlayImage(
       static_cast<int>(std::lround(detection.cx)), static_cast<int>(std::lround(detection.cy)));
 
     // Centroid dot — same green-circle convention yolo_marker_bridge_node.py's
-    // publish_overlay_image_msg already uses for hole markers on the COLOR
+    // publish_overlay_image_msg uses for hole markers on the color
     // overlay, so the two overlay streams read consistently to a viewer
     // comparing them side by side.
     cv::circle(overlay, center, 4, cv::Scalar(0, 255, 0), -1);
 
-    // The ACTUAL sampled patch (2026-08-04) — the single most diagnostic
-    // thing this overlay can show: exactly which pixels
-    // backProjectDetection read to produce this instance's depth value,
-    // drawn directly on the depth image itself so a viewer can see
-    // whether that patch is actually landing on the true floor/surface or
-    // grazing a wall/rim (see this fix's plan doc for the full
-    // investigation this overlay exists to support).
+    // The actual sampled patch: exactly which pixels backProjectDetection
+    // read to produce this instance's depth value, drawn directly on the
+    // depth image so a viewer can see whether that patch is landing on
+    // the true floor/surface or grazing a wall/rim.
     cv::rectangle(
       overlay,
       cv::Point(center.x - detection.patch_half_px, center.y - detection.patch_half_px),

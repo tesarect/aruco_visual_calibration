@@ -1,19 +1,13 @@
-"""Top-level staged bringup, real-robot variant, Python form. NEW, additive
-file — does not replace or modify anything; real_tmux_base.sh/
-real_tmux_trajcal.sh and all per-package launch files remain fully
-independent and untouched. See bringup_full_real_README.md (same
-directory) for the full design.
+"""Top-level staged bringup for the real robot: orchestrator pipeline
+(planning scene, trajectory planner, ArUco detection, calibration
+broadcast, calibration orchestrator) plus the YOLO perception pipeline,
+all with env fixed to "real".
 
-Identical structure to bringup_full_sim.launch.py (same file, see its
-header for the full dependency-chain diagram) — the only difference is
-env:=real is threaded through to every included pipeline, since every
-per-package bringup_*.launch.py already parameterizes on env. Does NOT
-start the Zenoh bridge, controller-activation (ensure_controller_active.sh),
-or move_group — none of those are visual_calibration/ packages, same
-out-of-scope reasoning as Gazebo/move_group in the sim variant. Start the
-real base session (or at minimum: Zenoh bridge, ensure_controller_active.sh,
-move_group) first, THEN this file — same ordering real_tmux_base.sh already
-requires before real_tmux_trajcal.sh today.
+Does not start the Zenoh bridge, controller activation, or move_group —
+none of those are visual_calibration/ packages. Those must already be
+running before this launch file, mirroring bringup_full_sim.launch.py's
+dependency-chain structure (see that file's header) with env:=real threaded
+through every included pipeline.
 """
 
 from launch import LaunchDescription

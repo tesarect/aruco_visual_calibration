@@ -205,25 +205,19 @@ bool TrajectoryPlanner::planWithEscalatingTime(
   // call is a second, defensive layer so a future regression there fails
   // loudly (MoveGroupInterface errors on an unknown pipeline id) instead
   // of silently routing pose-target goals to a pipeline that can't handle
-  // them (see move_group.launch.py's comment for the CHOMP incident this
-  // guards against). See PlannerConfig::planning_pipeline_id for why this
-  // must stay "ompl" — the only pipeline actually configured/loaded.
+  // them (see move_group.launch.py's comment). See
+  // PlannerConfig::planning_pipeline_id for why this must stay "ompl" —
+  // the only pipeline actually configured/loaded.
   move_group_interface_.setPlanningPipelineId(planner_config_.planning_pipeline_id);
   move_group_interface_.setPlannerId(planner_config_.planner_id);
   // num_planning_attempts > 1 lets MoveGroupInterface automatically keep
-  // the shortest-path plan among several tries within EACH time budget
-  // below, rather than settling for whichever is found first — this is
-  // what fixes the twisted/tangled real-robot paths that MoveIt's
-  // previous, entirely unconfigured defaults (RRTConnect, ~5s, 1 attempt,
-  // no optimization) produced. Stays fixed across every escalating-time
+  // the shortest-path plan among several tries within each time budget
+  // below, rather than settling for whichever is found first — this
+  // avoids the twisted/tangled paths an unconfigured/single-attempt
+  // planner run can produce. Stays fixed across every escalating-time
   // try below — only planning_time_s itself grows.
   move_group_interface_.setNumPlanningAttempts(planner_config_.num_planning_attempts);
 
-  // See PlannerConfig::planning_time_retry_multipliers's doc comment —
-  // base attempt first (multiplier effectively 1x), then one retry per
-  // configured multiplier, each a longer time budget than the last.
-  // Empty multipliers vector (the default) means exactly one attempt,
-  // identical to this function's pre-2026-07-30 behavior.
   for (size_t attempt = 0; attempt <= planner_config_.planning_time_retry_multipliers.size();
     ++attempt)
   {
@@ -239,14 +233,14 @@ bool TrajectoryPlanner::planWithEscalatingTime(
         node_->get_logger(),
         "Planning attempt %zu/%zu failed — retrying with a longer planning_time_s (%.1fs)",
         attempt, planner_config_.planning_time_retry_multipliers.size() + 1, time_budget_s);
-      // Web UI hook (2026-07-30) — CalibrationPanel shows "Planning
-      // failed, retrying" while a retry is in flight, so this isn't
-      // silent to the operator. Reuses the existing ~/planning_failure
-      // topic/message rather than adding a new one; "planning_retry" is a
-      // distinct context string from every OTHER publishPlanningFailure
-      // call site (e.g. "startup_home", "lift", "standby") specifically
-      // so the frontend can tell "still retrying, not a final failure"
-      // apart from a real terminal failure.
+      // Web UI hook: CalibrationPanel shows "Planning failed, retrying"
+      // while a retry is in flight, so this isn't silent to the operator.
+      // Reuses the existing ~/planning_failure topic/message rather than
+      // adding a new one; "planning_retry" is a distinct context string
+      // from every other publishPlanningFailure call site (e.g.
+      // "startup_home", "lift", "standby") specifically so the frontend
+      // can tell "still retrying, not a final failure" apart from a real
+      // terminal failure.
       publishPlanningFailure(
         "planning_retry",
         "Planning failed, retrying with a longer time budget (" +
@@ -305,8 +299,8 @@ bool TrajectoryPlanner::planAndExecute(const std::vector<double> & joint_values)
   // planWithEscalatingTime's doc comment. setJointValueTarget() still
   // goes through the same OMPL pipeline/planner, just with a joint-space
   // goal instead of a pose goal that needs IK resolved first (so no
-  // IK-branch ambiguity for THIS move — see this overload's header
-  // comment — though the plan from wherever the arm currently is TO
+  // IK-branch ambiguity for this move — see this overload's header
+  // comment — though the plan from wherever the arm currently is to
   // these joint values still goes through normal RRTstar planning, same
   // as any other joint-space move).
   moveit::planning_interface::MoveGroupInterface::Plan plan;
@@ -543,19 +537,15 @@ TrajectoryPlanner::polygonWaypointsAroundStandoff(rclcpp::Duration tf_timeout) c
   // calibration_broadcaster_node already checks per-sample.
   //
   // Looked up via tf_buffer_ (same pattern as getStandoffPose()'s
-  // camera_frame lookup just below in this file), NOT
+  // camera_frame lookup just below in this file), not
   // move_group_interface_.getCurrentState()/getCurrentPose() — those
   // route through MoveGroupInterface's internal CurrentStateMonitor, whose
   // /joint_states subscription shares this node's single default
   // MutuallyExclusive callback group with every service handler,
-  // including this one. Calling a blocking current-state wait FROM a
+  // including this one. Calling a blocking current-state wait from a
   // service callback in that setup deadlocks: the subscription callback
   // that would satisfy the wait can never run while this callback is the
-  // one blocking, so it hangs forever regardless of any timeout argument
-  // (confirmed via diagnostic logging, 2026-07-22 — see plan file
-  // transient-humming-donut.md's "Known open issue"/"Root cause confirmed"
-  // sections; this is the same class of deadlock main.cpp's own comment
-  // documents for a different, since-refactored-away call site).
+  // one blocking, so it hangs forever regardless of any timeout argument.
   // tf_buffer_'s /tf subscription has no such dependency, and this exact
   // lookup pattern is already proven working elsewhere in this file.
   const std::string & planning_frame = move_group_interface_.getPlanningFrame();
@@ -758,39 +748,36 @@ double distanceFromPlanningOrigin(const geometry_msgs::msg::Pose & pose)
     pose.position.z * pose.position.z);
 }
 
-/// Fixed goal orientation for ~/move_to_instance's hover/descend poses
-/// (2026-08-02) — replaces the earlier identity-quaternion goal, which
-/// forced end_effector_frame into a physically arbitrary orientation
-/// (zero rotation relative to the planning frame's own axes, unrelated to
-/// how a gripper should actually approach a hole/holder) and correlated
-/// directly with live OMPL failures ("Unable to find solution", zero
-/// collision reported — not blocked by an obstacle, just an unnecessarily
-/// hard-to-satisfy target). Per explicit request: constrain ONLY
+/// Fixed goal orientation for ~/move_to_instance's hover/descend poses.
+/// An identity-quaternion goal forces end_effector_frame into a
+/// physically arbitrary orientation (zero rotation relative to the
+/// planning frame's own axes, unrelated to how a gripper should actually
+/// approach a hole/holder) and is prone to OMPL failures ("Unable to find
+/// solution", not blocked by an obstacle, just an unnecessarily
+/// hard-to-satisfy target). Instead, this constrains only
 /// end_effector_frame's own local +X axis (its "palm-facing" axis, per
-/// this project's REP-103 convention — confirmed via the rg2_gripper/
-/// robotiq_85 mount joint chains from tool0) to point straight down
+/// this project's REP-103 convention) to point straight down
 /// (world/planning-frame -Z), leaving roll about that axis and every
-/// other rotational DOF free — deliberately NOT trying to also match
-/// yaw/pitch of tool0 or anything else, since cup_holder/hole TFs carry
-/// no real orientation data to match in the first place (position-only
-/// detection — see broadcastInstanceTfs's own doc comment).
+/// other rotational DOF free — deliberately not also matching yaw/pitch
+/// of tool0 or anything else, since cup_holder/hole TFs carry no real
+/// orientation data to match in the first place (position-only detection
+/// — see broadcastInstanceTfs's own doc comment).
 ///
 /// Constructed directly (not via any TF or tool0 mount-chain math) so the
-/// SAME quaternion is correct regardless of which link end_effector_frame
+/// same quaternion is correct regardless of which link end_effector_frame
 /// actually is (rg2_gripper_aruco_link on sim, robotiq_85_base_link on
 /// real — their tool0 mount rotations differ, but this goal doesn't
 /// reference tool0 at all): pick local X -> world (0,0,-1), local Y ->
-/// world (0,1,0) (arbitrary valid completion — this is the "roll" choice
-/// left unconstrained, picked once for determinism, not because it's
-/// special), local Z -> world (1,0,0) via cross product to keep the frame
-/// right-handed. This is ONE valid fixed choice among infinitely many
-/// (any roll about the down axis would equally satisfy "palm facing
-/// down") — a genuinely free/tolerance-based orientation constraint
+/// world (0,1,0) (an arbitrary valid completion — this is the "roll"
+/// choice left unconstrained, picked once for determinism), local Z ->
+/// world (1,0,0) via cross product to keep the frame right-handed. This
+/// is one valid fixed choice among infinitely many (any roll about the
+/// down axis would equally satisfy "palm facing down") — a genuinely
+/// free/tolerance-based orientation constraint
 /// (moveit_msgs::OrientationConstraint via setPathConstraints) would let
-/// OMPL pick whichever roll is easiest to reach, but was explicitly
-/// deferred in favor of this simpler fixed-quaternion approach as a first
-/// thing to try (no existing precedent for path constraints anywhere in
-/// this codebase yet).
+/// OMPL pick whichever roll is easiest to reach, but this simpler
+/// fixed-quaternion approach is used instead (no existing precedent for
+/// path constraints anywhere in this codebase yet).
 geometry_msgs::msg::Quaternion gripperFacingDownOrientation()
 {
   tf2::Quaternion q;
@@ -813,11 +800,11 @@ void TrajectoryPlanner::handleMoveToInstance(
   const std::string & planning_frame = move_group_interface_.getPlanningFrame();
 
   // Logged unconditionally (not just on failure) for every pose this
-  // handler attempts to plan to (2026-08-02) — see this method's own doc
-  // comment. standoff_config_.max_reach_m is the same UR3e datasheet
-  // reach figure planAndExecuteInFrontOf already checks (trajectory_planner
-  // .cpp's distance_from_origin check) — reused here as a soft signal
-  // only (logged, never refused — max_reach_m is an approximation, not a
+  // handler attempts to plan to — see this method's own doc comment.
+  // standoff_config_.max_reach_m is the same UR3e datasheet reach figure
+  // planAndExecuteInFrontOf already checks (this file's own
+  // distance_from_origin check) — reused here as a soft signal only
+  // (logged, never refused — max_reach_m is an approximation, not a
   // guaranteed cutoff; the real planner still gets the final say).
   auto logReachability = [this](const std::string & label, const geometry_msgs::msg::Pose & pose) {
     const double distance_m = distanceFromPlanningOrigin(pose);
@@ -838,10 +825,10 @@ void TrajectoryPlanner::handleMoveToInstance(
     }
   };
 
-  // Step 1: hover above cup_holder itself — the SAME shared approach
+  // Step 1: hover above cup_holder itself — the same shared approach
   // point regardless of which instance was actually requested (see
   // HoverConfig's doc comment) — looked up even when request->instance_name
-  // IS "cup_holder", since the hover pose is always derived from
+  // is "cup_holder", since the hover pose is always derived from
   // cup_holder's own TF, never from the requested instance's.
   geometry_msgs::msg::TransformStamped cup_holder_tf;
   try {
@@ -861,19 +848,18 @@ void TrajectoryPlanner::handleMoveToInstance(
   hover_pose.position.x = cup_holder_tf.transform.translation.x;
   hover_pose.position.y = cup_holder_tf.transform.translation.y;
   hover_pose.position.z = cup_holder_tf.transform.translation.z + hover_config_.hover_offset_m;
-  // gripperFacingDownOrientation() (2026-08-02), NOT cup_holder_tf's own
-  // rotation (always identity — position-only TF, see
-  // broadcastInstanceTfs's own doc comment) — see that function's own
-  // doc comment for why identity was a bad goal orientation and what
-  // this replaces it with.
+  // gripperFacingDownOrientation(), not cup_holder_tf's own rotation
+  // (always identity — position-only TF, see broadcastInstanceTfs's own
+  // doc comment) — see that function's own doc comment for why identity
+  // is a bad goal orientation and what this uses instead.
   hover_pose.orientation = gripperFacingDownOrientation();
 
   logReachability("hover", hover_pose);
 
-  // Cartesian first, joint-space fallback (2026-08-02 — was joint-space-only
-  // before). A straight-line approach is preferable when achievable; the
-  // free-space fallback exists for when it isn't from the arm's current
-  // pose, matching this method's own doc comment.
+  // Cartesian first, joint-space fallback: a straight-line approach is
+  // preferable when achievable; the free-space fallback exists for when
+  // it isn't from the arm's current pose, matching this method's own doc
+  // comment.
   move_group_interface_.setEndEffectorLink(standoff_config_.end_effector_frame);
   bool reached_hover = planAndExecuteCartesian(hover_pose, planner_config_.cartesian_min_fraction);
   if (!reached_hover) {
@@ -914,7 +900,7 @@ void TrajectoryPlanner::handleMoveToInstance(
   // vertical drop rather than also reorienting mid-approach.
   descend_pose.orientation = hover_pose.orientation;
 
-  // reach_safety_margin_m clamp (2026-08-06) — see HoverConfig::
+  // reach_safety_margin_m clamp — see HoverConfig::
   // reach_safety_margin_m's own doc comment. Only engages if the raw
   // descend_pose is actually beyond the clamp radius; otherwise
   // descend_pose is used as computed above, unchanged. Clamps along the
@@ -1001,17 +987,16 @@ void TrajectoryPlanner::handleMoveToInstance(
   }
 
   // Step 5: lift straight up from the hover pose to base_link's own Z
-  // plane (2026-08-06, explicit request: "lift up till gripper reaches
-  // baselinks zplan and wait for next command, no timeout, no preset").
-  // Reuses SequenceConfig::lift_target_z_m's existing absolute-Z
-  // convention (0.0 = level with the planning frame's own origin) but
-  // applies it directly here, as a plain one-shot Cartesian move — NOT via
-  // the separate ArmState/is_sequenced_goal machinery, which is timeout-
-  // driven (auto-moves to "standby" after lift_wait_seconds) and shared
-  // with TracePath's own sequenced-goal behavior; this deliberately stays
-  // independent of that so move_to_instance simply parks at the lifted
-  // pose and waits indefinitely for the next command, with no automatic
-  // follow-up move of any kind.
+  // plane, then park and wait for the next command (no timeout, no
+  // preset move). Reuses SequenceConfig::lift_target_z_m's existing
+  // absolute-Z convention (0.0 = level with the planning frame's own
+  // origin) but applies it directly here, as a plain one-shot Cartesian
+  // move — not via the separate ArmState/is_sequenced_goal machinery,
+  // which is timeout-driven (auto-moves to "standby" after
+  // lift_wait_seconds) and shared with TracePath's own sequenced-goal
+  // behavior; this deliberately stays independent of that so
+  // move_to_instance simply parks at the lifted pose and waits
+  // indefinitely for the next command, with no automatic follow-up move.
   geometry_msgs::msg::Pose lift_pose = hover_pose;
   lift_pose.position.z = sequence_config_.lift_target_z_m;
   if (!planAndExecuteCartesian(lift_pose, planner_config_.cartesian_min_fraction)) {
@@ -1074,10 +1059,9 @@ PlannerConfig TrajectoryPlanner::loadPlannerConfigFromParams() const
   config.num_planning_attempts =
     static_cast<int>(node_->get_parameter("num_planning_attempts").as_int());
   config.cartesian_min_fraction = node_->get_parameter("cartesian_min_fraction").as_double();
-  // get_parameter_or (not get_parameter) — this param is optional and
-  // absent from both trajectory_planner_sim.yaml/_real.yaml today; an
-  // empty default preserves the exact pre-2026-07-30 single-attempt
-  // behavior for any deployment that hasn't opted in yet. See
+  // get_parameter_or (not get_parameter) — this param is optional and may
+  // be absent from a given deployment's yaml; an empty default preserves
+  // single-attempt behavior for any deployment that hasn't opted in. See
   // PlannerConfig::planning_time_retry_multipliers's doc comment.
   node_->get_parameter_or(
     "planning_time_retry_multipliers", config.planning_time_retry_multipliers,

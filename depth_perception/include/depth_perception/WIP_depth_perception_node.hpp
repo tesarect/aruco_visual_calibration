@@ -19,26 +19,15 @@ namespace depth_perception
 {
 
 /*
- * STAGE 1 REBUILD (2026-08-05, branch tf-construction-rebuild) — see this
- * branch's own doc comment at the top of depth_perception_node.cpp for the
- * full rationale. This is a DELIBERATELY minimal rewrite, built up one
- * verifiable step at a time instead of porting the old file's full feature
- * set at once — the old file (preserved as depth_perception_node.
- * OLD_REFERENCE.{hpp,cpp}, excluded from the CMake build by not being
- * referenced there) had NO bug in its own arithmetic (confirmed via
- * extensive live numeric verification this session) but its final
- * broadcast TF's correctness depends entirely on calibration_broadcaster_
- * node's camera orientation, which could not be confidently root-caused
- * from log archaeology alone — see this branch's plan doc.
+ * Work-in-progress minimal rewrite of DepthPerceptionNode, built up one
+ * verifiable step at a time rather than the full feature set at once.
+ * Not referenced by CMakeLists.txt — excluded from the build.
  *
- * Stage 1 scope: cup_holder ONLY (no holes yet, no TF broadcast yet, no
- * rolling-window filtering yet) — just get the 2D-pixel-to-camera-frame-3D
- * computation right, with EVERY intermediate quantity logged in one line,
- * so a future debugging session never again needs a custom Python capture
- * script (see resources/scripts/python/capture_tf_snapshot.py, written
- * this same session specifically because the old file's own logging
- * didn't expose enough to debug cleanly) to see what this node actually
- * computed at a given moment.
+ * Stage 1 scope: cup_holder only (no holes yet, no TF broadcast yet, no
+ * rolling-window filtering yet) — get the 2D-pixel-to-camera-frame-3D
+ * computation right first, with every intermediate quantity logged in
+ * one line so a debugging session can verify the computation directly
+ * from ROS log output.
  */
 struct DepthPerceptionConfig
 {
@@ -58,7 +47,7 @@ struct DepthPerceptionConfig
   // yet — that returns in a later stage alongside hole support).
   int depth_patch_half_size_px = 2;
 
-  // --- Stage 2 additions (2026-08-05): camera-frame -> base_link TF ---
+  // --- Stage 2 additions: camera-frame -> base_link TF ---
   // TF frame calibration_broadcaster_node's own known_chain_frame names —
   // MUST match calibration_broadcaster_{sim,real}.yaml's own value
   // exactly ("base_link" in both envs, confirmed).
@@ -76,13 +65,11 @@ struct DepthPerceptionConfig
 };
 
 /*
- * One instance's back-projection result, INCLUDING every intermediate
- * quantity that went into it — not just the final camera-frame X/Y/Z (the
- * old file's own BackProjectedPoint had position only, which is why this
- * session needed a from-scratch capture script to see the pixel/depth
- * inputs alongside the output). Logging this struct's own fields directly
- * means a single log line always carries everything needed to
- * independently recompute/verify the result by hand.
+ * One instance's back-projection result, including every intermediate
+ * quantity that went into it, not just the final camera-frame X/Y/Z.
+ * Logging this struct's own fields directly means a single log line
+ * always carries everything needed to independently recompute/verify the
+ * result by hand.
  */
 struct CentroidBackProjection
 {
@@ -111,13 +98,12 @@ struct CentroidBackProjection
 };
 
 /*
- * Stage 2 (2026-08-05): the camera-frame -> base_link conversion result,
- * INCLUDING the exact calibrated camera TF used to produce it — same
- * "every intermediate quantity, not just the final number" philosophy as
+ * Stage 2: the camera-frame -> base_link conversion result, including the
+ * exact calibrated camera TF used to produce it, same "every intermediate
+ * quantity, not just the final number" philosophy as
  * CentroidBackProjection. A single log line built from this struct lets a
- * future debugging session verify the full chain (camera-frame point +
- * camera calibration -> base_link point) by hand, from ROS log output
- * alone, with no separate TF-echo capture needed.
+ * debugging session verify the full chain (camera-frame point + camera
+ * calibration -> base_link point) by hand, from ROS log output alone.
  */
 struct CameraToBaseLinkResult
 {
@@ -155,7 +141,7 @@ private:
   // every field of the result (not just x/y/z) is populated and logged.
   CentroidBackProjection backProjectCentroid(double cx_px, double cy_px) const;
 
-  // Stage 2 (2026-08-05): looks up calibration_broadcaster_node's
+  // Stage 2: looks up calibration_broadcaster_node's
   // broadcast camera TF (known_chain_frame -> header_frame_id +
   // broadcast_frame_suffix) and applies it to a camera-frame point,
   // returning EVERY intermediate quantity (see CameraToBaseLinkResult's

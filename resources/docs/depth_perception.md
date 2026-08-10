@@ -73,6 +73,20 @@ avoids double-counting the holder's own position noise in each hole's
 independent chain). This is a no-op (throttled log only) until at least
 one `~/calibrate` run has completed in the current session.
 
+`RollingWindow::last_stable` holds forever across a detection gap by
+design (that's what removes flicker — see above), which on its own means
+an instance that stops being detected entirely (e.g. a hole becomes
+occupied/obstructed) would broadcast its last known TF forever with
+nothing to signal it should stop. `instance_stale_timeout_s` (live-read,
+default `0.0` = disabled) adds that missing signal: an instance whose
+`RollingWindow::last_seen` (a "still being seen" heartbeat, updated on
+every actual detection regardless of whether the position itself
+drifted) is older than this many seconds is treated as invalid for TF
+broadcasting purposes — its frame is simply omitted from that call's
+broadcast — regardless of what `last_stable` itself still holds.
+Real-only in practice, added to stop broadcasting stale hole/cup_holder
+TFs once an object is removed from the scene.
+
 Several live-tunable (never cached, read via `get_parameter_or` every
 call) manual correction knobs are layered on top of the raw chained
 position, each added for a specific, explicitly-requested reason rather

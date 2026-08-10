@@ -82,26 +82,39 @@ Parameters: `msg`
 
 ### image_callback
 
-Per-frame pipeline: converts the image via `cv_bridge`, JPEG-encodes it,
-POSTs to the inference server with the latest known intrinsics, and — if
-`aruco_marker` is present in the response — publishes the marker pose (only
-if `active` is true) and the debug overlay (only if
-`publish_overlay_image` is true), then always publishes
-`cup_holder`/`hole`/`aruco_marker` detections onto `detections_2d_topic`
-regardless of `active`. A failed `cv_bridge` conversion, a failed/timed-out
-HTTP request, or a non-200/non-JSON response each log and skip the frame
-without crashing the node.
+Drop-stale-frames guard first: if a previous invocation's `/detect` call
+is still in flight (`_request_in_flight`), returns immediately rather
+than letting `image_sub`'s callback group queue this frame for later,
+stale, processing — see
+[../aruco_perception_yolo_bridge.md](../aruco_perception_yolo_bridge.md)'s
+"CPU-budget mitigations" section. Otherwise delegates to `_process_image`.
 
 Parameters: `msg`
 
 ### _process_image / _send_detect_request
 
-`_process_image` is `image_callback`'s shared core (caches the latest
-decoded frame for `handle_detect_marker_once`'s "wait for a fresh frame"
-guard, then runs the normal per-frame pipeline). `_send_detect_request`
-builds and POSTs the `/detect` request body — factored out so both the
-continuous per-frame path and `handle_detect_marker_once`'s on-demand path
-share one HTTP call implementation instead of two copies.
+`_process_image` is `image_callback`'s shared core: converts the image via
+`cv_bridge`, caches the latest decoded frame for
+`handle_detect_marker_once`'s "wait for a fresh frame" guard, computes the
+per-frame `skip_marker` throttling decision
+(`marker_check_every_n_frames`/`marker_check_full_rate_when_active`), calls
+`_send_detect_request`, then — if `aruco_marker` is present in the
+response — publishes the marker pose (only if `active` is true) and the
+debug overlay (only if there's anything to draw), and always publishes
+`cup_holder`/`hole`/`aruco_marker` detections onto `detections_2d_topic`
+regardless of `active`. A failed `cv_bridge` conversion or a failed
+`_send_detect_request` call each log and skip the frame without crashing
+the node.
+
+`_send_detect_request` builds and POSTs the `/detect` request body —
+factored out so both the continuous per-frame path and
+`handle_detect_marker_once`'s on-demand path share one HTTP call
+implementation instead of two copies. Applies `detect_max_width_px`
+downscaling to the outgoing frame/intrinsics if configured, and rescales
+every 2D pixel field in the response back to the source frame's native
+resolution before returning it — see
+[../aruco_perception_yolo_bridge.md](../aruco_perception_yolo_bridge.md)'s
+"CPU-budget mitigations" section for the full rationale.
 
 Parameters: `cv_image`, `skip_marker`
 

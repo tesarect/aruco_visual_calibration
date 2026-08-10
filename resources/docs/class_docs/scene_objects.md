@@ -40,13 +40,26 @@ parameters rather than one parameter per field name, since MoveIt2's
 
 ## Real (`scene_objects_real.yaml`)
 
-All five objects (`coffee_machine`, `cupholder`, `countertop`, `wall`,
-`camera`) are currently deliberately oversized generic boxes at rough
-estimated positions — not measured, and specifically NOT the old
-sim-copied mesh/box values that were here before (wrong shape at a wrong
-position gave false confidence). `camera` (added after the incident) is an
+`coffee_machine`, `cupholder`, `countertop`, `wall`, and `camera` are
+currently deliberately oversized generic boxes at rough estimated
+positions — not measured, and specifically NOT the old sim-copied
+mesh/box values that were here before (wrong shape at a wrong position
+gave false confidence). `camera` (added after the incident) is an
 unmeasured placeholder guarding against the wall-mounted D415 protruding
 into the arm's path.
+
+Two further box objects were added afterward, both from live-jogged
+positions rather than rough estimates:
+
+- `table_edge_guard` — a long box laid along the countertop's edge closest
+  to the arm's own `base_link` origin, resting on the table surface;
+  position/rotation were directly jogged and read back from RViz.
+- `base_slab` — a thin box directly below `base_link`, guarding against
+  the shoulder/upper-arm dipping down and clipping the table surface
+  right under the arm's own mount point (widening `countertop`'s own box
+  did not cover this, since the shoulder passes close to `base_link`'s
+  own origin, not necessarily within `countertop`'s box extent) — a rough
+  starting value, not yet confirmed against the real table height.
 
 Fields per object, same structure on both sim and real:
 

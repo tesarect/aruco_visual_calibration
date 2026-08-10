@@ -1,5 +1,5 @@
 # On-demand, single-shot hybrid (YOLO crop + image-enhancement cascade +
-# classical ArUco + solvePnP) marker detection — added 2026-08-04 for
+# classical ArUco + solvePnP) marker detection, used by
 # calibration_broadcaster_node's per-waypoint hybrid mode
 # (hybrid_per_waypoint_enabled), so exactly one detection happens per
 # waypoint instead of yolo_marker_bridge_node.py running its full pipeline
@@ -28,34 +28,31 @@ string cascade_variant_used
 # same encoding inference_server.py's /debug_sweep endpoint already uses
 # via _encode_image_b64, reused here rather than inventing a second image
 # transport). Empty string if success is false. This is the "how clean are
-# the corners" inspection image the calibration_broadcaster_node
-# accumulates across a run into one labeled grid, per user's explicit
-# request (2026-08-04) for visual confirmation + a presentation artifact —
-# not consumed by any other node.
+# the corners" inspection image calibration_broadcaster_node accumulates
+# across a run into one labeled grid, for visual confirmation and as a
+# presentation artifact — not consumed by any other node.
 string cascade_image_b64
 
-# Set ONLY when success is false (empty otherwise) — distinguishes WHY the
-# marker wasn't found (2026-08-04), mirroring
-# estimate_marker_pose_cascade's own two failure_reason values:
+# Set only when success is false (empty otherwise) — distinguishes why the
+# marker wasn't found, mirroring estimate_marker_pose_cascade's own two
+# failure_reason values:
 #   - "no_yolo_bbox": YOLO itself never found a candidate aruco_marker
 #     bounding box in this frame at all — the enhancement cascade never
 #     even ran.
-#   - "no_classical_match": YOLO DID find a bbox, but classical cv::aruco
+#   - "no_classical_match": YOLO did find a bbox, but classical cv::aruco
 #     detection failed on every enhancement variant tried within it.
-# Added after a live debugging session where this distinction was only
-# ever visible in inference_server.py's own stdout print() logs, which
-# weren't reliably captured in the same log file as everything else —
-# putting it in the response means calibration_broadcaster_node's own,
-# reliably-captured ROS log can report it directly.
+# Carried in the response (rather than only in inference_server.py's own
+# stdout logs) so calibration_broadcaster_node's own, reliably-captured
+# ROS log can report it directly.
 string failure_reason
 
-# How long the YOLO+cascade detection call itself took, in seconds
-# (2026-08-04) — inference_server.py's own internal timer around
-# estimate_marker_pose_cascade, NOT this service call's full round-trip
-# and NOT the SIGCONT/SIGSTOP process-signal overhead bracketing it (see
+# How long the YOLO+cascade detection call itself took, in seconds —
+# inference_server.py's own internal timer around
+# estimate_marker_pose_cascade, not this service call's full round-trip
+# and not the SIGCONT/SIGSTOP process-signal overhead bracketing it (see
 # calibration_broadcaster_node's own sampleOnceAtCurrentWaypoint timing
-# log for that separate, already-existing breakdown). Only meaningful
-# when success is true — 0.0 otherwise. Used by
-# calibration_broadcaster_node to label each tile in its combined-grid
-# debug image with how long that specific waypoint's detection took.
+# log for that separate breakdown). Only meaningful when success is true
+# — 0.0 otherwise. Used by calibration_broadcaster_node to label each
+# tile in its combined-grid debug image with how long that specific
+# waypoint's detection took.
 float64 detect_time_s

@@ -10,20 +10,15 @@
 # regardless of this switch (depth-perception needs that stream either way)
 # — this only ever affects the aruco_marker pose publish.
 #
-# REPURPOSED (2026-08-04): mode="hybrid" now ALSO sets
-# calibration_broadcaster_node's hybrid_per_waypoint_enabled=true (and
-# mode="classical" sets it false) — this is what actually engages the
-# per-waypoint SIGCONT/detect-once/SIGSTOP mechanism (one YOLO+cascade
-# detection per calibration waypoint, not continuous per-frame detection)
-# during a ~/calibrate run. The continuous active-flip above still runs
-# unchanged alongside this — it's the fallback detector used whenever
-# hybrid_per_waypoint_enabled is false, and yolo_marker_bridge_node's own
-# continuous cup_holder/hole detection is entirely unaffected by this
-# switch either way. Continuous-frame hybrid marker detection (the OLD
-# meaning of "hybrid" here, which caused ~200% CPU usage and was the
-# reason this switch was disabled in the web UI) is retired — the
-# per-waypoint approach replaces it as this project's only "hybrid" mode
-# going forward.
+# mode="hybrid" also sets calibration_broadcaster_node's
+# hybrid_per_waypoint_enabled=true (and mode="classical" sets it false) —
+# this is what actually engages the per-waypoint SIGCONT/detect-once/
+# SIGSTOP mechanism (one YOLO+cascade detection per calibration waypoint,
+# not continuous per-frame detection) during a ~/calibrate run. The
+# continuous active-flip above still runs unchanged alongside this — it's
+# the fallback detector used whenever hybrid_per_waypoint_enabled is
+# false, and yolo_marker_bridge_node's own continuous cup_holder/hole
+# detection is entirely unaffected by this switch either way.
 #
 # mode: "classical" or "hybrid" — not a bool, so a third mode is never a
 # breaking change to this service's shape, only a new accepted string value.
