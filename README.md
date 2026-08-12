@@ -98,13 +98,49 @@ calibration. Two sibling repositories build on top of it:
 
 ## Quick Start
 
-Build the workspace (from `ros2_ws/`):
+1. Clone this repository into `ros2_ws/src/`, then clone the two
+   [related repositories](#related-repositories) — the web app and the
+   YOLO pipeline server — at the same directory level as `ros2_ws` itself.
+2. A helper alias file (`aliases.sh`) is provided under
+   `visual_calibration/resources/scripts/shell/`. Source it.
 
-```bash
-colcon build --symlink-install
-```
+   > [!TIP]
+   > You can also source it automatically every time by adding these lines
+   > to the bottom of your user-level `.bashrc`:
+   ```bash
+   [ -f "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh" ] && . "$HOME/ros2_ws/src/visual_calibration/resources/scripts/shell/aliases.sh"
 
-Then follow the ordered manual startup sequence (simulation, `move_group`,
+   TMUX_CONF_SRC="$HOME/ros2_ws/src/visual_calibration/resources/scripts/tmux/tmux.conf"
+   TMUX_CONF_DST="$HOME/.tmux.conf"
+
+   # copy the project's tmux config only if the user doesn't already have one
+   if [ -f "$TMUX_CONF_SRC" ] && [ ! -f "$TMUX_CONF_DST" ]; then
+       cp "$TMUX_CONF_SRC" "$TMUX_CONF_DST"
+   fi
+
+   # nvm is required by the web app's Node.js toolchain (webpage_ws)
+   export NVM_DIR="$HOME/.nvm"
+   [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+   [ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+   ```
+3. Install all required tooling with `completesimsetup` (simulation) or
+   `completerealsetup` (real robot) — these install `tmux`, the web stack,
+   and YOLO where needed for the chosen environment. Re-source your
+   `.bashrc` after either one finishes.
+4. Build the workspace with `vccleanbuildsymlink`, or plain
+   `colcon build --symlink-install` from `ros2_ws/`.
+5. Once the build succeeds, start each of the following in its own
+   terminal:
+   - Simulation: `tmuxbasesim`, `tmuxwebstack`, `tmuxtrajcalsim`, `tmuxdepthperceptionsim`
+   - Real robot: `tmuxbasereal`, `tmuxwebstack`, `tmuxtrajcalreal`, `tmuxyoloreal`, `tmuxdepthperceptionreal`
+6. Get the web app's URL with `statusweb`, or check the bottom pane of the
+   `tmuxwebstack` session — the URL is printed there directly.
+7. If a node or server doesn't come up cleanly (most common in simulation),
+   run `customkill all` to tear down every tmux session, then repeat step 5.
+8. Once everything is up, start calibration from the web page, choosing
+   either `Classic Aruco detection` (default) or `Hybrid Aruco detection`. For detailed instructions follow the [Demo Section](#demo-how-it-works)
+
+Alternatively, follow the same ordered manual startup sequence (simulation, `move_group`,
 planning scene, trajectory planner, detectors, calibration) in
 [resources/docs/manual_bringup.md](./resources/docs/manual_bringup.md) — see
 [Getting started](#getting-started) below.
